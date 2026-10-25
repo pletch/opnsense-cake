@@ -123,6 +123,20 @@ ours_serve(void (*sent)(struct trace_pkt *, int))
 }
 
 #ifdef CAKE_DEBUG
+/* the link clock's clamp counters since the last call, then reset */
+void
+ours_link_stats(unsigned *reads, unsigned *behind, unsigned *behind_max,
+    unsigned *ahead, unsigned *ahead_max)
+{
+	*reads = cake_link_reads;
+	*behind = cake_link_behind;
+	*behind_max = cake_link_behind_max;
+	*ahead = cake_link_ahead;
+	*ahead_max = cake_link_ahead_max;
+	cake_link_reads = cake_link_behind = cake_link_behind_max = 0;
+	cake_link_ahead = cake_link_ahead_max = 0;
+}
+
 uint32_t
 ours_check_errors(void)
 {

@@ -221,7 +221,25 @@ struct totals {
 static int run_ingress;			/* the current run is in ingress mode */
 static int pace_hz;		/* pace mode: dummynet's ticks, not lockstep */
 static int link_mode;		/* link mode: event to event, link clock on */
+static int pace_late;		/* pace-random: % of ticks that come late */
+static uint64_t rng_late = 0x5eed;
 uint64_t linux_next_release(void);
+void ours_link_stats(unsigned *, unsigned *, unsigned *, unsigned *,
+    unsigned *);
+
+/* pace modes: the link clock's clamp, as a suffix to the run's line */
+static void
+print_link_stats(void)
+{
+	unsigned r, b, bm, a, am;
+
+	ours_link_stats(&r, &b, &bm, &a, &am);
+	if (r == 0)
+		return;
+	printf("    link clock: %u reads, %.3f%% pulled forward (max %u us),"
+	    " %.3f%% pulled back (max %u us)\n", r, 100.0 * b / r, bm,
+	    100.0 * a / r, am);
+}
 static uint64_t tin_bytes[2][8];	/* pace mode: [side][tin] sent */
 static void pace_tin_sent(struct trace_pkt *p, int tin)
 {
@@ -362,6 +380,9 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 	if (link_mode)
 		ours_set_link_clock(1);
 	if (pace_hz) {
+		unsigned x;
+
+		ours_link_stats(&x, &x, &x, &x, &x);
 		trace_now_ns = 1000000;
 		ours_set_hz(pace_hz);
 		ours_set_link_clock(getenv("SD_LINK_CLOCK") != NULL &&
@@ -397,8 +418,12 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		if (pace_hz) {
 			while ((pl = linux_impl.dequeue(&tl)) != NULL)
 				tin_bytes[0][tl] += pl->len;
+			/* SD_LATE=n: n% of ticks come late, as dummynet's do
+			 * under load; the next one catches up their credit */
 			if (trace_now_ns * pace_hz / 1000000000 !=
-			    (trace_now_ns - step) * pace_hz / 1000000000)
+			    (trace_now_ns - step) * pace_hz / 1000000000 &&
+			    (pace_late == 0 || mix(&rng_late) % 100 >=
+			    (uint64_t)pace_late))
 				ours_serve(pace_tin_sent);
 			continue;
 		}
@@ -517,6 +542,7 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		    wt, 100.0 * ((double)tin_bytes[1][wt] - tin_bytes[0][wt]) * 8 /
 		    secs_run / c.rate, tin_bytes[0][wt] * 8 / secs_run / 1e6,
 		    tin_bytes[1][wt] * 8 / secs_run / 1e6, ndrops_linux, ndrops_ours);
+		print_link_stats();
 	}
 	free(pkts);
 	return (0);
@@ -621,6 +647,7 @@ pace(int secs, int khz)
 	    pace_bytes[1][0] * 8 / ((end - warm) / 1e3),
 	    pace_bytes[0][1] * 8 / ((end - warm) / 1e3),
 	    pace_bytes[1][1] * 8 / ((end - warm) / 1e3));
+	print_link_stats();
 	free(lp);
 	free(op);
 }
@@ -653,6 +680,7 @@ main(int argc, char **argv)
 	if (argc > 1 && strcmp(argv[1], "pace-random") == 0) {
 		/* sched-diff pace-random hz [runs [seconds [seed]]] */
 		pace_hz = argc > 2 ? atoi(argv[2]) : 1000;
+		pace_late = getenv("SD_LATE") ? atoi(getenv("SD_LATE")) : 0;
 		runs = argc > 3 ? atoi(argv[3]) : 50;
 		secs = argc > 4 ? atoi(argv[4]) : 2;
 		seed = argc > 5 ? strtoull(argv[5], NULL, 0) : 1;

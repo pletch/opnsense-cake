@@ -8,6 +8,7 @@
 #define OURS_SHIM_H
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
