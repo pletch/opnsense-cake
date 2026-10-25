@@ -25,7 +25,7 @@ arc4random(void)
 }
 
 static int
-ecn_mark(struct mbuf *m)
+cake_ecn_mark(struct mbuf *m)
 {
 	return (m->ecn_capable);
 }

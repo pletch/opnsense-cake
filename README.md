@@ -485,6 +485,35 @@ queue 10001 config pipe 10001 weight 100
   truncates the interval to 32 bits.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
+- **Packet ownership.** All callbacks run under dummynet's lock
+  (`DN_BH_WLOCK`, held by `dummynet_io`, `dummynet_task`, `config_sched` and
+  the delete paths), so each packet is in exactly one place at a time. Every
+  way a packet enters or leaves the scheduler (checked 2026-10-25 for 1.3):
+
+  | path | where | the packet | counted |
+  |---|---|---|---|
+  | accepted | `cake_flow_enqueue` | appended to its flow, timestamp tag added | queued: flow, tin, queue and instance length and bytes |
+  | no timestamp tag (allocation failure) | `cake_flow_enqueue` | freed; `enqueue` returns 1, so dummynet clears its pointer without freeing | drop, once (dummynet undoes its own count) |
+  | ACK filter | `cake_enqueue` | an older ACK of the same connection unlinked and freed; the scan stops at the new packet, which is never chosen | drop, ACK drop |
+  | over the packet or byte limit | `cake_drop_fattest` | head of the fattest flow freed, which can be the new packet; `enqueue` returns 0 and dummynet does not touch it again (it only compares the pointer with packets still queued) | drop |
+  | dequeued | `cake_extract_head` | unlinked and its tag removed, then handed to dummynet, which owns it | dequeued |
+  | COBALT drop | `cake_flow_dequeue` | freed, never the flow's last packet (which may be marked instead) | drop |
+  | receiving interface gone | `cake_extract_head` | freed | drop (from 1.3; before, only dequeued) |
+  | reconfiguration with new tables | `cake_free_tables` | every packet in the old tables freed | drops; queue and instance totals reduced |
+  | instance destroyed (delete, type change, flush, unload) | `cake_free_sched` | every flow's packets freed | none (the instance goes) |
+  | idle instance expired | dummynet | dummynet only expires instances with nothing queued, which needs the instance length exact; the `CAKE_DEBUG` checker verifies it | |
+
+  The packet pointer never changes (no `m_pullup`). Wash and ECN marking
+  change the IP header in place only if it lies in the first mbuf and that
+  mbuf is writable (not shared with other copies, e.g. by a bridge). Up to
+  1.2, ECN marking used dummynet's `ecn_mark()`, which does not check
+  either (FQ-CoDel, CoDel and PIE still do); a packet that can't be marked
+  now is dropped instead. Also from 1.3, a timestamp tag a packet still
+  carries is reused instead of being prepended a second time, which would
+  corrupt its tag list (a pattern from dummynet's FQ-CoDel; not reachable
+  as dequeue removes the tag). The robustness suite's leak test checks that
+  mbufs and dummynet memory return to their baseline after floods,
+  overflows, reconfigurations and failed rebuilds.
 
 ## Verification status
 

@@ -109,6 +109,7 @@
 
 static struct dn_alg cake_desc;
 static void cake_reconfig(struct cake_si *si, struct cake_schk *schk);
+static int cake_ecn_mark(struct mbuf *m);
 static __inline void cake_charge_tin(struct cake_tin *tin, int len,
     uint64_t now);
 
@@ -455,7 +456,7 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 
 	if (next_due && v->dropping) {
 		/* use ECN mark if possible, otherwise drop */
-		if (ecn && ecn_mark(m))
+		if (ecn && cake_ecn_mark(m))
 			*marked = 1;
 		else
 			drop = 1;
@@ -604,6 +605,53 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 	    interval;
 	si->_si.credit = MAX(credit - (int64_t)hz * 8 * len,
 	    MIN(credit, -debt));
+}
+
+/*
+ * Mark an ECN-capable packet CE for COBALT: 1 if it is marked now or was
+ * already, 0 if it cannot be (not ECN-capable, or its header is not in
+ * the first mbuf or not writable), and COBALT drops it instead. Unlike
+ * dummynet's ecn_mark(), which writes at the recorded header offset
+ * unchecked, so it could change data shared with other copies of the
+ * packet; sch_cake's INET_ECN_set_ce() also checks the header bounds.
+ */
+static int
+cake_ecn_mark(struct mbuf *m)
+{
+	struct ip *ip;
+	struct ip6_hdr *ip6;
+	uint32_t flow;
+	uint16_t old;
+	int off;
+
+	off = dn_tag_get(m)->iphdr_off;
+	if (m->m_len < off + (int)sizeof(struct ip))
+		return (0);
+	ip = mtodo(m, off);
+	if (ip->ip_v == 4) {
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_NOTECT)
+			return (0);
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_CE)
+			return (1);
+		if (!M_WRITABLE(m))
+			return (0);
+		old = *(uint16_t *)ip;
+		ip->ip_tos |= IPTOS_ECN_CE;
+		ip->ip_sum = cksum_adjust(ip->ip_sum, old, *(uint16_t *)ip);
+		return (1);
+	}
+	if (ip->ip_v != 6 || m->m_len < off + (int)sizeof(struct ip6_hdr))
+		return (0);
+	ip6 = (struct ip6_hdr *)ip;
+	flow = ntohl(ip6->ip6_flow);
+	if ((flow & (IPTOS_ECN_MASK << 20)) == (IPTOS_ECN_NOTECT << 20))
+		return (0);
+	if ((flow & (IPTOS_ECN_MASK << 20)) == (IPTOS_ECN_CE << 20))
+		return (1);
+	if (!M_WRITABLE(m))
+		return (0);
+	ip6->ip6_flow = htonl(flow | (IPTOS_ECN_CE << 20));
+	return (1);
 }
 
 /*
@@ -991,15 +1039,18 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 
 	len = m->m_pkthdr.len;
 
-	/* Add timestamp to mbuf as MTAG */
+	/* Add timestamp to mbuf as MTAG. Reuse one the packet still carries
+	 * (prepending it again would corrupt the tag list).
+	 */
 	mtag = m_tag_locate(m, MTAG_ABI_COMPAT, DN_CAKE_MTAG_TS, NULL);
-	if (mtag == NULL)
+	if (mtag == NULL) {
 		mtag = m_tag_alloc(MTAG_ABI_COMPAT, DN_CAKE_MTAG_TS,
 		    sizeof(uint64_t), M_NOWAIT);
-	if (mtag == NULL)
-		goto drop;
+		if (mtag == NULL)
+			goto drop;
+		m_tag_prepend(m, mtag);
+	}
 	*(uint64_t *)(mtag + 1) = cake_now_us();
-	m_tag_prepend(m, mtag);
 
 	if (m->m_pkthdr.rcvif != NULL)
 		m_rcvif_serialize(m);
@@ -1041,8 +1092,10 @@ next:	m = q->mq.head;
 		*pkt_ts = *(uint64_t *)(mtag + 1);
 		m_tag_delete(m, mtag);
 	}
+	/* the receiving interface has gone away: drop the packet */
 	if (m->m_pkthdr.rcvif != NULL &&
 	    __predict_false(m_rcvif_restore(m) == NULL)) {
+		cake_update_stats(q, si, 0, 1);
 		m_freem(m);
 		goto next;
 	}

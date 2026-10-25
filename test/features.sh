@@ -3,6 +3,7 @@
 # (run with a CAKE_DEBUG module loaded to also count consistency errors):
 #
 #   wash        DSCP cleared at the server, ECN kept, IPv4 checksum valid
+#   ecn         with ECN negotiated, COBALT marks CE instead of dropping
 #   ack-filter  TCP download over a 0.2 Mbit/s upload, narrower than the
 #               ~0.43 Mbit/s of ACKs a 50 Mbit/s download sends: goodput without
 #               the filter, with it, and aggressive
@@ -78,6 +79,24 @@ grep -c "tos 0xb9\\|class 0xb9\\|bad cksum" /tmp/wash.txt')
 set -- $r 0 0 1
 [ "${1:-0}" -ge 2 ] && [ "${2:-0}" -ge 2 ] && [ "${3:-1}" = 0 ] && ok=1 || ok=0
 result wash $ok "EF+ECT(1) in, IPv4 tos 0x1 seen ${1:-?}x, IPv6 class 0x01 ${2:-?}x, unwashed or bad checksum ${3:-?}x"
+
+echo "== ecn"
+# both ends negotiate ECN (Linux only answers it by default), so COBALT
+# marks the download instead of dropping it; count CE packets at the client
+sched besteffort
+r=$(cli 'N="sudo ip netns exec"
+for ns in cli srv; do $N $ns sysctl -qw net.ipv4.tcp_ecn=1; done
+dev=$($N cli ip -o link | awk "!/lo:/ { sub(\":\", \"\", \$2); print \$2; exit }")
+$N cli timeout 14 tcpdump -l -n -i $dev "src 10.10.2.2 and ip[1] & 3 == 3" 2>/dev/null |
+    wc -l > /tmp/ce.txt &
+sleep 1
+d=$($N cli netperf -H 10.10.2.2 -t TCP_MAERTS -l 10 -P 0 -- -o THROUGHPUT)
+wait
+for ns in cli srv; do $N $ns sysctl -qw net.ipv4.tcp_ecn=2; done
+echo $(cat /tmp/ce.txt) ${d%%.*}')
+set -- $r 0 0
+[ "${1:-0}" -gt 0 ] && [ "${2:-0}" -gt 40 ] && ok=1 || ok=0
+result ecn $ok "CE-marked packets at the client ${1:-?}, download ${2:-?} Mbit/s"
 
 echo "== ack-filter"
 opn "cd /root/work && DOWN=50Mbit/s UP=200Kbit/s ./lul-setup.sh" 60 >/dev/null
