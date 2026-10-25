@@ -143,11 +143,11 @@ struct cobalt_params {
 /* per-flow COBALT state (CoDel + BLUE) */
 struct cobalt_vars {
 	uint32_t	count;		/* CoDel drop count */
-	uint16_t	rec_inv_sqrt;	/* 1/sqrt(count), Q0.16 */
-	uint16_t	dropping;	/* CoDel dropping state */
+	uint32_t	rec_inv_sqrt;	/* 1/sqrt(count), Q0.32 */
 	uint64_t	drop_next;	/* us */
 	uint64_t	blue_timer;	/* us */
 	uint32_t	p_drop;		/* BLUE drop probability, Q0.32 */
+	uint16_t	dropping;	/* CoDel dropping state */
 };
 
 /* flow (sub-queue) stats */
@@ -159,11 +159,13 @@ struct cake_flow_stats {
 	uint32_t drops;
 };
 
-/* flow states for host isolation */
+/* flow states, as sch_cake's */
 enum {
 	CAKE_SET_NONE = 0,	/* inactive */
 	CAKE_SET_SPARSE,	/* active, has not used up a quantum backlogged */
-	CAKE_SET_BULK		/* active, counted in its hosts' bulk counts */
+	CAKE_SET_SPARSE_WAIT,	/* sparse, but empty in the old rotation */
+	CAKE_SET_BULK,		/* active, counted in its hosts' bulk counts */
+	CAKE_SET_DECAYING	/* empty, COBALT state not yet at rest */
 };
 
 /* A flow of packets (sub-queue). */
@@ -175,10 +177,10 @@ struct cake_flow {
 	uint32_t srchost;	/* host table slots, within the tin */
 	uint32_t dsthost;
 	uint8_t	tin;		/* tin this flow belongs to */
-	uint8_t	active;		/* 1: flow is active (in a list) */
+	uint8_t	active;		/* 1: flow is in a list (any set but NONE) */
 	uint8_t	set;		/* CAKE_SET_* */
 	struct cobalt_vars cvars;
-	STAILQ_ENTRY(cake_flow) flowchain;
+	TAILQ_ENTRY(cake_flow) flowchain;
 };
 
 /* a host table slot; source and destination hosts are tracked separately */
@@ -190,19 +192,23 @@ struct cake_host {
 };
 
 /* list of flows */
-STAILQ_HEAD(cake_flow_list, cake_flow);
+TAILQ_HEAD(cake_flow_list, cake_flow);
 
 /* A tin: one diffserv class with its own flows and AQM parameters */
 struct cake_tin {
 	struct cake_flow_list newflows;	/* sparse flows */
 	struct cake_flow_list oldflows;	/* bulk flows */
+	struct cake_flow_list decayingflows; /* empty, COBALT decaying */
 	struct cobalt_params cparams;
 	uint64_t	time_next;	/* ns, virtual clock at the tin's rate */
 	uint64_t	ns_per_byte;	/* Q16 at the tin's rate share */
 	int32_t		tin_deficit;	/* WDRR, only used without a rate */
 	uint32_t	tin_quantum;	/* WDRR weight between tins */
 	uint32_t	backlog;	/* packets queued in this tin */
+	uint32_t	sparse_flows;	/* CAKE_SET_SPARSE and _SPARSE_WAIT */
 	uint32_t	bulk_flows;	/* flows in CAKE_SET_BULK */
+	uint32_t	decaying_flows;	/* flows in CAKE_SET_DECAYING */
+	uint32_t	unresponsive_flows; /* flows with BLUE active */
 	uint64_t	ecn_marks;
 	uint64_t	drops;
 	uint64_t	ack_drops;	/* removed by the ACK filter */

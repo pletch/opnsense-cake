@@ -195,7 +195,17 @@ static const uint32_t cake_tin_share[][CAKE_MAX_TINS] = {
 	{ 65536, 57344, 50176, 43904, 38416, 33614, 29412, 25735 },
 };
 
-static uint16_t cobalt_rec_inv_sqrt_cache[COBALT_CACHE];
+/*
+ * 1/sqrt(count) for small counts, Q0.32, as sch_cake's inv_sqrt_cache:
+ * a single Newton step is not accurate enough there. Entries 0 and 1 are
+ * as close to 1.0 as Q0.32 gets.
+ */
+static const uint32_t cobalt_rec_inv_sqrt_cache[COBALT_CACHE] = {
+		~0U,         ~0U, 3037000500, 2479700525,
+	2147483647, 1920767767, 1753413056, 1623345051,
+	1518500250, 1431655765, 1358187914, 1294981364,
+	1239850263, 1191209601, 1147878294, 1108955788
+};
 
 static int
 cake_sysctl_interval_handler(SYSCTL_HANDLER_ARGS)
@@ -304,42 +314,21 @@ cake_now_ns(void)
  * COBALT: CoDel and BLUE, as in sch_cake.
  */
 
-/* one Newton-Raphson step towards 1/sqrt(count), Q0.16 */
+/* one Newton-Raphson step towards 1/sqrt(count), Q0.32 */
 static void
 cobalt_newton_step(struct cobalt_vars *v)
 {
 	uint32_t invsqrt, invsqrt2;
 	uint64_t val;
 
-	invsqrt = (uint32_t)v->rec_inv_sqrt << 16;
+	invsqrt = v->rec_inv_sqrt;
 	invsqrt2 = ((uint64_t)invsqrt * invsqrt) >> 32;
 	val = (3ULL << 32) - ((uint64_t)v->count * invsqrt2);
 
 	val >>= 2; /* avoid overflow in following multiply */
 	val = (val * invsqrt) >> (32 - 2 + 1);
 
-	v->rec_inv_sqrt = val >> 16;
-}
-
-static void
-cobalt_cache_init(void)
-{
-	struct cobalt_vars v;
-
-	if (cobalt_rec_inv_sqrt_cache[0] != 0)
-		return;
-
-	memset(&v, 0, sizeof(v));
-	v.rec_inv_sqrt = ~0U >> 16;
-	cobalt_rec_inv_sqrt_cache[0] = v.rec_inv_sqrt;
-
-	for (v.count = 1; v.count < COBALT_CACHE; v.count++) {
-		cobalt_newton_step(&v);
-		cobalt_newton_step(&v);
-		cobalt_newton_step(&v);
-		cobalt_newton_step(&v);
-		cobalt_rec_inv_sqrt_cache[v.count] = v.rec_inv_sqrt;
-	}
+	v->rec_inv_sqrt = val;
 }
 
 static void
@@ -351,27 +340,43 @@ cobalt_invsqrt(struct cobalt_vars *v)
 		cobalt_newton_step(v);
 }
 
-/* t + interval / sqrt(count) */
+/*
+ * t + interval / sqrt(count). Split so that it cannot overflow: the
+ * interval grows with the MTU time on very slow pipes. Below 2^32 us it
+ * is sch_cake's reciprocal_scale().
+ */
 static __inline uint64_t
-cobalt_control(uint64_t t, uint64_t interval, uint16_t rec_inv_sqrt)
+cobalt_control(uint64_t t, uint64_t interval, uint32_t rec_inv_sqrt)
 {
-	return (t + ((interval * rec_inv_sqrt) >> 16));
+	return (t + (interval >> 32) * rec_inv_sqrt +
+	    (((interval & 0xffffffffULL) * rec_inv_sqrt) >> 32));
 }
 
 static void
 cobalt_vars_init(struct cobalt_vars *v)
 {
 	memset(v, 0, sizeof(*v));
-	/* start at 1/sqrt(1), so the first drop is one interval away */
-	v->rec_inv_sqrt = ~0U >> 16;
+	/*
+	 * Start at 1/sqrt(1), so the first signal is one interval after the
+	 * flow first exceeds the target, as sch_cake's comments intend. Its
+	 * cobalt_vars_init() leaves 0, so there a flow that has never been
+	 * signalled is signalled on its second packet over the target.
+	 */
+	v->rec_inv_sqrt = ~0U;
 }
 
-/* the flow overflowed: raise the BLUE drop probability */
-static void
+/*
+ * The flow overflowed: raise the BLUE drop probability. Return 1 if BLUE
+ * was quiescent before and is active now.
+ */
+static int
 cobalt_queue_full(struct cobalt_vars *v, struct cobalt_params *p,
 	uint64_t now)
 {
+	int up = 0;
+
 	if (now - v->blue_timer > p->target) {
+		up = !v->p_drop;
 		v->p_drop += p->p_inc;
 		if (v->p_drop < p->p_inc)
 			v->p_drop = ~0U;
@@ -381,19 +386,26 @@ cobalt_queue_full(struct cobalt_vars *v, struct cobalt_params *p,
 	v->drop_next = now;
 	if (!v->count)
 		v->count = 1;
+	return (up);
 }
 
-/* the flow drained: decay BLUE and leave CoDel dropping state */
-static void
+/*
+ * The flow was found empty: decay BLUE and leave CoDel dropping state.
+ * Return 1 if BLUE was active before and is quiescent now.
+ */
+static int
 cobalt_queue_empty(struct cobalt_vars *v, struct cobalt_params *p,
 	uint64_t now)
 {
+	int down = 0;
+
 	if (v->p_drop && now - v->blue_timer > p->target) {
 		if (v->p_drop < p->p_dec)
 			v->p_drop = 0;
 		else
 			v->p_drop -= p->p_dec;
 		v->blue_timer = now;
+		down = !v->p_drop;
 	}
 	v->dropping = 0;
 
@@ -403,6 +415,7 @@ cobalt_queue_empty(struct cobalt_vars *v, struct cobalt_params *p,
 		v->drop_next = cobalt_control(v->drop_next, p->interval,
 		    v->rec_inv_sqrt);
 	}
+	return (down);
 }
 
 /*
@@ -1248,18 +1261,19 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 	uint32_t t;
 
 	for (t = 0; t < si->tin_cnt; t++) {
-		STAILQ_FOREACH(f, &si->tins[t].newflows, flowchain)
+		TAILQ_FOREACH(f, &si->tins[t].newflows, flowchain)
 			if (fat == NULL || f->stats.len_bytes > fat->stats.len_bytes)
 				fat = f;
-		STAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain)
+		TAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain)
 			if (fat == NULL || f->stats.len_bytes > fat->stats.len_bytes)
 				fat = f;
 	}
 	if (fat == NULL || fat->mq.head == NULL)
 		return (0);
 
-	cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
-	    now_ns / 1000);
+	if (cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
+	    now_ns / 1000))
+		si->tins[fat->tin].unresponsive_flows++;
 	if (si->cfg.flags & CAKE_INGRESS)
 		cake_charge_link(si, &si->tins[fat->tin],
 		    cake_wire_bytes(&si->cfg, fat->mq.head), now_ns);
@@ -1308,9 +1322,11 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
 /*
  * Consistency checks for test builds (make CAKE_DEBUG=1): flow, tin and
  * instance counters must agree, every active flow must be on exactly one
- * list, an inactive flow must hold no packets (else it would never be
- * served again), and the tin and host bulk counts must add up to the
- * bulk flows. Violations are counted and the first few are logged.
+ * list, in a state that fits it (decaying flows on the decaying list and
+ * empty, the others on the new or old list), an inactive flow must hold
+ * no packets (else it would never be served again), and the tin and host
+ * flow counts must add up to the flows in each state. Violations are
+ * counted and the first few are logged.
  */
 static u_int cake_check_errors;
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, check_errors,
@@ -1328,18 +1344,26 @@ cake_check(struct cake_si *si, const char *where)
 
 	for (t = 0; t < si->tin_cnt; t++) {
 		tpkts = 0;
-		STAILQ_FOREACH(f, &si->tins[t].newflows, flowchain) {
+		TAILQ_FOREACH(f, &si->tins[t].newflows, flowchain) {
 			listed++;
 			tpkts += f->stats.length;
 			bytes += f->stats.len_bytes;
-			if (!f->active || f->tin != t)
+			if (!f->active || f->tin != t ||
+			    f->set == CAKE_SET_DECAYING)
 				bad |= 0x01;
 		}
-		STAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain) {
+		TAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain) {
 			listed++;
 			tpkts += f->stats.length;
 			bytes += f->stats.len_bytes;
-			if (!f->active || f->tin != t)
+			if (!f->active || f->tin != t ||
+			    f->set == CAKE_SET_DECAYING)
+				bad |= 0x01;
+		}
+		TAILQ_FOREACH(f, &si->tins[t].decayingflows, flowchain) {
+			listed++;
+			if (!f->active || f->tin != t ||
+			    f->set != CAKE_SET_DECAYING || f->mq.head != NULL)
 				bad |= 0x01;
 		}
 		if (tpkts != si->tins[t].backlog)
@@ -1354,18 +1378,29 @@ cake_check(struct cake_si *si, const char *where)
 	/* full scan of the flow table now and then */
 	if ((++calls & 63) == 0) {
 		for (t = 0; t < si->tin_cnt; t++) {
-			uint64_t nbulk = 0, src = 0, dst = 0;
+			uint64_t nbulk = 0, nsparse = 0, ndecay = 0, nblue = 0;
+			uint64_t src = 0, dst = 0;
 
 			for (i = 0; i < si->flows_cnt; i++) {
 				f = &si->flows[t * si->flows_cnt + i];
 				if (f->set == CAKE_SET_BULK)
 					nbulk++;
+				else if (f->set == CAKE_SET_SPARSE ||
+				    f->set == CAKE_SET_SPARSE_WAIT)
+					nsparse++;
+				else if (f->set == CAKE_SET_DECAYING)
+					ndecay++;
+				if (f->cvars.p_drop != 0)
+					nblue++;
 				src += si->hosts[t * si->flows_cnt + i].srchost_bulk;
 				dst += si->hosts[t * si->flows_cnt + i].dsthost_bulk;
 			}
 			if (src != (cake_dsrc(si->flow_mode) ? nbulk : 0) ||
 			    dst != (cake_ddst(si->flow_mode) ? nbulk : 0) ||
-			    nbulk != si->tins[t].bulk_flows)
+			    nbulk != si->tins[t].bulk_flows ||
+			    nsparse != si->tins[t].sparse_flows ||
+			    ndecay != si->tins[t].decaying_flows ||
+			    nblue != si->tins[t].unresponsive_flows)
 				bad |= 0x80;
 		}
 		for (i = 0; i < si->tin_cnt * si->flows_cnt; i++) {
@@ -1475,14 +1510,27 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 		return 1;
 	}
 
-	/* If the flow is not active, add it to the tail of the tin's new
-	 * (sparse) flows list and give it a full quantum.
+	/*
+	 * An inactive or decaying flow goes to the tail of the tin's new
+	 * (sparse) flows with a full quantum; a decaying one keeps its
+	 * COBALT state. A flow that ran out of quantum while empty, still
+	 * counted as sparse but in the old rotation, becomes bulk.
 	 */
-	if (!f->active) {
-		STAILQ_INSERT_TAIL(&tin->newflows, f, flowchain);
+	if (!f->active || f->set == CAKE_SET_DECAYING) {
+		if (f->active) {
+			TAILQ_REMOVE(&tin->decayingflows, f, flowchain);
+			tin->decaying_flows--;
+		}
+		TAILQ_INSERT_TAIL(&tin->newflows, f, flowchain);
 		f->set = CAKE_SET_SPARSE;
+		tin->sparse_flows++;
 		f->deficit = cake_flow_quantum(si, f, si->cfg.quantum);
 		f->active = 1;
+	} else if (f->set == CAKE_SET_SPARSE_WAIT) {
+		f->set = CAKE_SET_BULK;
+		tin->sparse_flows--;
+		tin->bulk_flows++;
+		cake_host_bulk(si, f, 1);
 	}
 
 	if (si->cfg.flags & CAKE_ACK_FILTER) {
@@ -1560,6 +1608,8 @@ cake_charge_tin(struct cake_tin *tin, int len, uint64_t now)
 /*
  * Dequeue a packet: pick a tin (rate thresholds when the pipe has a rate,
  * WDRR otherwise), then DRR between the flows of that tin, new flows first.
+ * As in sch_cake, the first flow visited in each call is a decaying one if
+ * there is any, so that empty flows' COBALT state decays to rest.
  */
 static struct mbuf *
 cake_dequeue(struct dn_sch_inst *_si)
@@ -1572,6 +1622,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 	struct mbuf *m;
 	uint64_t now, now_ns;
 	uint32_t len;
+	int first_flow = 1;
 
 	si = (struct cake_si *)_si;
 	schk = (struct cake_schk *)(si->_si.sched+1);
@@ -1604,12 +1655,15 @@ cake_dequeue(struct dn_sch_inst *_si)
 		}
 
 		/* select a list to start with */
-		if (STAILQ_EMPTY(&tin->newflows))
-			list = &tin->oldflows;
-		else
+		if (first_flow && !TAILQ_EMPTY(&tin->decayingflows))
+			list = &tin->decayingflows;
+		else if (!TAILQ_EMPTY(&tin->newflows))
 			list = &tin->newflows;
+		else
+			list = &tin->oldflows;
+		first_flow = 0;
 
-		f = STAILQ_FIRST(list);
+		f = TAILQ_FIRST(list);
 		if (f == NULL) {
 			/* backlog without active flows: stats are broken */
 			D("tin %u has backlog %u but no flows", si->cur_tin,
@@ -1619,35 +1673,52 @@ cake_dequeue(struct dn_sch_inst *_si)
 
 		/* out of deficit: refill and move to the tail of old flows.
 		 * A flow that used up a quantum and still has packets is bulk
-		 * and counts against its hosts' share.
+		 * and counts against its hosts' share; one that is empty stays
+		 * counted as sparse until it gets a packet (SPARSE_WAIT).
 		 */
 		if (f->deficit <= 0) {
-			if (f->set == CAKE_SET_SPARSE && f->mq.head != NULL) {
-				f->set = CAKE_SET_BULK;
-				tin->bulk_flows++;
-				cake_host_bulk(si, f, 1);
+			if (f->set == CAKE_SET_SPARSE) {
+				if (f->mq.head != NULL) {
+					f->set = CAKE_SET_BULK;
+					tin->sparse_flows--;
+					tin->bulk_flows++;
+					cake_host_bulk(si, f, 1);
+				} else
+					f->set = CAKE_SET_SPARSE_WAIT;
 			}
 			f->deficit += cake_flow_quantum(si, f, si->cfg.quantum);
-			STAILQ_REMOVE_HEAD(list, flowchain);
-			STAILQ_INSERT_TAIL(&tin->oldflows, f, flowchain);
+			TAILQ_REMOVE(list, f, flowchain);
+			TAILQ_INSERT_TAIL(&tin->oldflows, f, flowchain);
 			continue;
 		}
 
 		m = cake_flow_dequeue(f, si, now_ns);
 		if (m == NULL) {
-			/* A new flow that empties moves to old flows, so it
-			 * cannot regain priority immediately; an old flow
-			 * that empties is deactivated.
+			/* The flow is empty. As in sch_cake, it stays on the
+			 * decaying list while its COBALT state is not at rest
+			 * (BLUE active, a drop count, or active within an
+			 * interval), so that state carries over if it gets
+			 * packets again and its hash slot is not reused;
+			 * otherwise it is deactivated. Either way its next
+			 * packet puts it among the new flows.
 			 */
-			cobalt_queue_empty(&f->cvars, &tin->cparams, now);
-			STAILQ_REMOVE_HEAD(list, flowchain);
-			if (list == &tin->newflows)
-				STAILQ_INSERT_TAIL(&tin->oldflows, f, flowchain);
-			else {
-				if (f->set == CAKE_SET_BULK) {
-					tin->bulk_flows--;
-					cake_host_bulk(si, f, -1);
-				}
+			if (cobalt_queue_empty(&f->cvars, &tin->cparams, now))
+				tin->unresponsive_flows--;
+			TAILQ_REMOVE(list, f, flowchain);
+			if (f->set == CAKE_SET_BULK) {
+				tin->bulk_flows--;
+				cake_host_bulk(si, f, -1);
+			} else if (f->set == CAKE_SET_DECAYING)
+				tin->decaying_flows--;
+			else
+				tin->sparse_flows--;
+			if (f->cvars.p_drop || f->cvars.count ||
+			    (int64_t)(now - f->cvars.drop_next) < 0) {
+				TAILQ_INSERT_TAIL(&tin->decayingflows, f,
+				    flowchain);
+				f->set = CAKE_SET_DECAYING;
+				tin->decaying_flows++;
+			} else {
 				f->set = CAKE_SET_NONE;
 				f->active = 0;
 			}
@@ -1774,11 +1845,15 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 	si->shaped = bw != 0;
 	cake_buffer_limit(si, cfg, bw);
 	for (i = 0; i < si->tin_cnt; i++) {
-		STAILQ_INIT(&si->tins[i].newflows);
-		STAILQ_INIT(&si->tins[i].oldflows);
+		TAILQ_INIT(&si->tins[i].newflows);
+		TAILQ_INIT(&si->tins[i].oldflows);
+		TAILQ_INIT(&si->tins[i].decayingflows);
 		si->tins[i].time_next = 0;
 		si->tins[i].backlog = 0;
+		si->tins[i].sparse_flows = 0;
 		si->tins[i].bulk_flows = 0;
+		si->tins[i].decaying_flows = 0;
+		si->tins[i].unresponsive_flows = 0;
 		cake_tin_params(si, i, cfg, bw);
 		si->tins[i].tin_deficit = si->tins[i].tin_quantum;
 	}
@@ -1943,7 +2018,6 @@ cake_config(struct dn_schk *_schk)
 		cake_desc.ref_count++;
 	}
 
-	cobalt_cache_init();
 	*cfg = cake_sysctl;
 	schk->gen++;		/* instances pick the change up in enqueue */
 

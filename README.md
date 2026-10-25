@@ -363,8 +363,28 @@ queue 10001 config pipe 10001 weight 100
   goes idle. Its refill is the quantum divided by the larger bulk count of
   its source and destination hosts, as the dual and triple modes require,
   dithered so that the average is exact, and never less than 1 byte.
-  Unlike sch_cake there is no "decaying" list: emptied new flows move to
-  the old list, as in fq_codel.
+- **Flow lifecycle** follows sch_cake, not fq_codel (from 1.3; before, an
+  emptied new flow moved to the old list as in fq_codel):
+  - A flow found empty, from either list, goes to the tin's *decaying* list
+    if its COBALT state is not at rest (BLUE active, a drop count, or
+    signalled within an interval), else it is deactivated. Either way its
+    next packet puts it among the new flows with a full quantum.
+  - Each dequeue first visits one decaying flow, so that state decays while
+    other traffic flows, and a decaying flow's hash slot is not given to
+    another flow. Before, an idle flow's state was frozen (a stale BLUE
+    probability survived) or lost when its slot was reused.
+  - A sparse flow that runs out of quantum while empty is moved to the old
+    rotation but still counted as sparse (`SPARSE_WAIT`), and becomes bulk
+    when its next packet arrives, as in sch_cake.
+  - Measured with RRUL on the bench (50/10 Mbit/s, besteffort, 4 runs
+    each): throughput unchanged; ICMP median 2.26–2.48 ms against
+    1.75–2.26 ms before, UDP 2.65–2.67 against 2.51–2.61 ms. Flows that
+    send often but never queue, like the download's ACKs in the upload
+    pipe, now keep returning to the new flows instead of being treated as
+    bulk, and pings share that list with them. This is sch_cake's
+    behavior. Sparse flows spaced wider than a DRR round, like pings or
+    VoIP, were already deactivated between packets and got the same
+    priority under both.
 - **Overhead compensation.** `serve_sched()` charges `m_pkthdr.len` against
   the pipe rate. The src patch gives `struct dn_alg` an optional
   `wire_len(si, m)` method for this, appended to the struct and only read
@@ -452,8 +472,17 @@ queue 10001 config pipe 10001 weight 100
   queueing at this ratio of NIC speed to shaped rate. It matters when a
   much faster NIC feeds a slower link, e.g. 10 Gbit/s shaping 1–2 Gbit/s.
   The one late tick in 1.2 s also shows that the VM's timer is steady.
-- **Initial `rec_inv_sqrt` is 1.0**, so the first CoDel drop comes one
-  interval after a flow enters the dropping state, as in classic CoDel.
+- **COBALT is sch_cake's, bit for bit** (from 1.3): the same Q0.32
+  1/√count with its cache table, control law, BLUE and signalling
+  decisions, in microseconds instead of nanoseconds. `test/cobalt-diff.sh`
+  builds both in userland and compares them; see *Verification status*.
+  One deliberate difference: a fresh flow starts at 1/√1, so the first
+  signal comes one interval after it first exceeds the target, as
+  sch_cake's comments describe. sch_cake's `cobalt_vars_init()` zeroes it,
+  so there a flow that was never signalled is signalled on its second
+  packet over the target. The control law is also split so that it cannot
+  overflow for very long intervals (slow pipes), where `reciprocal_scale()`
+  truncates the interval to 32 bits.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
 
@@ -529,7 +558,17 @@ queue 10001 config pipe 10001 weight 100
   ping's fragments loses the whole ping. The mbuf count steps up once
   after the floods, because NIC rings and UMA caches settle higher, and
   then stays flat. So the leak check compares against a warm count.
-- A userspace check of the COBALT 1/√count math matched 1/√n within 0.17%.
+- COBALT against sch_cake (`test/cobalt-diff.sh`, sch_cake at
+  `torvalds/linux` 700b4c6c70d6): both implementations are extracted from
+  their sources, built side by side and driven with the same random
+  events (queue delays below, around and far above the target, ECN and
+  non-ECN packets, overflows, drains, idle gaps; random target, interval,
+  MTU time, BLUE steps and bulk counts). Over 10 million events in 2000
+  runs, with counts up to 558 and BLUE active, every drop, mark, BLUE
+  transition and state field matched. With the earlier Q0.16 arithmetic
+  the drop and mark decisions differed in 135 of the 2000 runs. With
+  sch_cake's zeroed start, it signals a fresh flow earlier in 71% of runs,
+  by 66 events on average (the deliberate difference above).
 - ipfw patch: builds with `-Werror` and FreeBSD's full userland warning
   set against `stable/26.7`. Tested on the VM:
   - every parameter is set and shown back
