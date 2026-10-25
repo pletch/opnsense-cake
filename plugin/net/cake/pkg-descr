@@ -10,6 +10,11 @@ the shaper keeps running with the pipes' own scheduler.
 Plugin Changelog
 ================
 
+1.3.2
+
+* The statistics tables keep fixed column widths, so the columns line
+  up between pipes and do not move as the values change
+
 1.3.1
 
 * The statistics no longer disappear and reset between bursts of

@@ -67,6 +67,18 @@
             ["{{ lang._('Hash collisions') }}", t => t.collisions]
         ];
 
+        /*
+         * Fixed column widths, so that the columns line up between pipes
+         * (with the same number of tins) and do not move as values change
+         */
+        function statCols(n) {
+            let $cols = $("<colgroup/>").append($("<col/>").css("width", "25%"));
+            for (let i = 0; i < n; i++) {
+                $cols.append($("<col/>").css("width", (75 / n) + "%"));
+            }
+            return $cols;
+        }
+
         /**
          * per-tin statistics of each pipe that uses CAKE
          */
@@ -104,8 +116,8 @@
                     });
                     $stats.append($("<div/>").addClass("content-box").append(
                         $("<div/>").addClass("table-responsive").append(
-                            $("<table/>").addClass("table table-condensed table-striped")
-                                .append($("<thead/>").append($head), $body)
+                            $("<table/>").addClass("table table-condensed table-striped cake-stats")
+                                .append(statCols(tins.length), $("<thead/>").append($head), $body)
                         )
                     ));
                 });
@@ -190,6 +202,13 @@
 </div>
 
 {{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/cake/service/reconfigure'}) }}
+
+<style>
+    table.cake-stats {
+        table-layout: fixed;
+        font-variant-numeric: tabular-nums;
+    }
+</style>
 
 <div id="cake_stats" style="display: none;"></div>
 {{ partial('layout_partials/base_dialog', ['fields': formDialogPipe, 'id': formGridPipe['edit_dialog_id'], 'label': lang._('Edit CAKE pipe')]) }}
