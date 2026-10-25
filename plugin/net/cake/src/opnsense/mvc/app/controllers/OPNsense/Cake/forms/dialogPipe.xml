@@ -1,0 +1,135 @@
+<form>
+    <field>
+        <id>pipe.enabled</id>
+        <label>Enabled</label>
+        <type>checkbox</type>
+        <help>Use CAKE for this pipe. When disabled, the pipe uses the scheduler set on its traffic shaper page.</help>
+        <grid_view>
+            <width>6em</width>
+            <type>boolean</type>
+            <formatter>rowtoggle</formatter>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.pipe</id>
+        <label>Pipe</label>
+        <type>dropdown</type>
+        <help>Traffic shaper pipe to schedule with CAKE. CAKE schedules the queues attached to the pipe, so point the shaper rules at a queue on it; traffic sent to the pipe itself is served first in, first out. Target, interval, quantum, limit and flows set on the pipe for FQ-CoDel also apply to CAKE.</help>
+    </field>
+    <field>
+        <id>pipe.diffserv</id>
+        <label>Diffserv</label>
+        <type>dropdown</type>
+        <help><![CDATA[How packets are sorted by DSCP into priority tins. Each tin may use its share of the pipe bandwidth at priority.
+        <li>diffserv3: Bulk (CS1, LE; 1/16), Best Effort and Voice (EF, VA, CS6, CS7; 1/4).</li>
+        <li>diffserv4: Bulk, Best Effort, Video (AF2x-AF4x, CS2, CS3; 1/2) and Voice (EF, VA, CS4-CS7; 1/4).</li>
+        <li>diffserv8 and IP precedence: eight tins, each with 7/8 of the share of the one below it.</li>
+        ]]></help>
+        <grid_view>
+            <formatter>default</formatter>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.isolation</id>
+        <label>Isolation</label>
+        <type>dropdown</type>
+        <help><![CDATA[How bandwidth is shared between hosts and flows.
+        <li>Triple isolate: fair between source hosts and between destination hosts, then between each host's flows. Works on both upload and download pipes.</li>
+        <li>Per source / destination host, then flow: the same for one side only, e.g. source for an upload pipe, destination for a download pipe.</li>
+        <li>Per flow: fair between connections, so a host with many connections gets more.</li>
+        ]]></help>
+    </field>
+    <field>
+        <id>pipe.ecn</id>
+        <label>ECN</label>
+        <type>checkbox</type>
+        <help>Mark ECN capable packets instead of dropping them.</help>
+        <grid_view>
+            <visible>false</visible>
+            <type>boolean</type>
+            <formatter>boolean</formatter>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.link</id>
+        <label>Link type</label>
+        <type>dropdown</type>
+        <help>Link-layer overhead of the bottleneck link. CAKE then charges each packet for what it takes on that link, so the pipe bandwidth can be set close to the line or sync rate instead of well below it.</help>
+    </field>
+    <field>
+        <id>pipe.overhead</id>
+        <label>Overhead</label>
+        <type>text</type>
+        <advanced>true</advanced>
+        <help>Bytes added to each packet on the link (-64 to 256), overriding the link type, e.g. 4 more for a VLAN tag.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.mpu</id>
+        <label>MPU</label>
+        <type>text</type>
+        <advanced>true</advanced>
+        <help>Minimum packet size on the link in bytes, overriding the link type.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.framing</id>
+        <label>Framing</label>
+        <type>dropdown</type>
+        <advanced>true</advanced>
+        <help>Link framing, overriding the link type: ATM cells for ADSL, PTM for VDSL2.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.ack_filter</id>
+        <label>ACK filter</label>
+        <type>dropdown</type>
+        <help>Drop pure TCP ACKs made redundant by a newer one queued behind them. Helps on upload pipes of asymmetric links, where ACKs of a fast download fill the uplink. The aggressive filter also drops a single redundant ACK.</help>
+    </field>
+    <field>
+        <id>pipe.wash</id>
+        <label>Wash</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help>Clear the DSCP field, keeping ECN, after classifying a packet, e.g. on a download pipe whose markings are not to be trusted.</help>
+        <grid_view>
+            <visible>false</visible>
+            <type>boolean</type>
+            <formatter>boolean</formatter>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.ingress</id>
+        <label>Ingress mode</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help>For a pipe that shapes traffic after it has crossed the bottleneck, such as a download pipe: dropped packets are still charged to the bandwidth, and the AQM allows for the number of bulk flows.</help>
+        <grid_view>
+            <visible>false</visible>
+            <type>boolean</type>
+            <formatter>boolean</formatter>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.memlimit</id>
+        <label>Memory limit</label>
+        <type>text</type>
+        <advanced>true</advanced>
+        <help>Limit of the bytes queued, in MB. Leave empty for four times what the pipe sends in an interval, and at least 4 MB.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>pipe.description</id>
+        <label>Description</label>
+        <type>text</type>
+        <help>Description to identify this entry.</help>
+    </field>
+</form>

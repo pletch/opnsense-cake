@@ -1,0 +1,5 @@
+CAKE scheduler for dummynet, as a kernel module (dn_cake.ko), and a
+dnctl(8) that can set its parameters. Used by the os-cake plugin.
+
+The module is built for one FreeBSD release, the one of the OPNsense
+series it was built on, and is not loaded on another.

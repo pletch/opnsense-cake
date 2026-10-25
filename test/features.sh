@@ -1,0 +1,131 @@
+#!/bin/sh
+# Checks for the CAKE options beyond scheduling, on the lul-setup.sh bench
+# (run with a CAKE_DEBUG module loaded to also count consistency errors):
+#
+#   wash        DSCP cleared at the server, ECN kept, IPv4 checksum valid
+#   ack-filter  TCP download over a 0.2 Mbit/s upload, narrower than the
+#               ~0.43 Mbit/s of ACKs a 50 Mbit/s download sends: goodput without
+#               the filter, with it, and aggressive
+#   memlimit    bytes queued under a UDP flood stay below a 32 KB limit
+#   ingress     under a UDP flood, drops are charged to the rate, so less
+#               is delivered than in egress mode, and the pipe passes
+#               traffic again right after (the debt is capped)
+#   diffserv8, precedence
+#               RRUL runs and every tin gets traffic
+#
+#   test/features.sh
+set -u
+
+OPN=${OPN:-$HOME/VMs/opnsense-cake}
+CLI=${CLI:-$HOME/VMs/lul-client}
+fails=0
+
+opn() {
+	tag=R$(date +%N)
+	out=$("$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
+	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" 2>/dev/null)
+	printf '%s\n' "$out" | sed -n "/^BEG-$tag\$/,/^END-$tag /p" | sed '1d;$d'
+}
+
+cli() {
+	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
+	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
+}
+
+result() { # name ok detail
+	if [ "$2" = 1 ]; then
+		echo "PASS  $1  $3"
+	else
+		echo "FAIL  $1  $3"
+		fails=$((fails + 1))
+	fi
+}
+
+sched() { opn "/root/work/lul-sched.sh cake $* >/dev/null" 30 >/dev/null; }
+
+# delivered packets per second at the server during a 1472 byte UDP flood
+flood_pps() {
+	cli 'N="sudo ip netns exec"
+	$N cli netperf -H 10.10.2.2 -t UDP_STREAM -l 12 -P 0 -- -m 1472 -R 1 >/dev/null 2>&1 &
+	sleep 3
+	f=/sys/class/net/enp0s4/statistics/rx_packets
+	a=$($N srv cat $f); sleep 6; b=$($N srv cat $f)
+	wait
+	echo $(( (b - a) / 6 ))'
+}
+
+"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
+opn "cd /root/work && DOWN=50Mbit/s UP=10Mbit/s ./lul-setup.sh" 60 | tail -1
+
+echo "== wash"
+opn '/root/work/opn-robust.sh v6up' 30 >/dev/null
+cli 'N="sudo ip netns exec"
+for x in cli:1 srv:2; do ns=${x%%:*}; n=${x#*:}
+	dev=$($N $ns ip -o link | awk "!/lo:/ { sub(\":\", \"\", \$2); print \$2; exit }")
+	$N $ns ip -6 addr replace fd00:$n::2/64 dev $dev nodad
+	$N $ns ip -6 route replace default via fd00:$n::1
+done'
+sched diffserv4 wash
+r=$(cli 'N="sudo ip netns exec"
+$N srv timeout 8 tcpdump -l -n -v -i enp0s4 "icmp or icmp6" 2>/dev/null >/tmp/wash.txt &
+sleep 2
+$N cli ping -q -c 2 -Q 0xb9 10.10.2.2 >/dev/null
+$N cli ping -6 -q -c 2 -Q 0xb9 fd00:2::2 >/dev/null
+wait
+grep -c "tos 0x1," /tmp/wash.txt; grep -c "class 0x01" /tmp/wash.txt
+grep -c "tos 0xb9\\|class 0xb9\\|bad cksum" /tmp/wash.txt')
+set -- $r 0 0 1
+[ "${1:-0}" -ge 2 ] && [ "${2:-0}" -ge 2 ] && [ "${3:-1}" = 0 ] && ok=1 || ok=0
+result wash $ok "EF+ECT(1) in, IPv4 tos 0x1 seen ${1:-?}x, IPv6 class 0x01 ${2:-?}x, unwashed or bad checksum ${3:-?}x"
+
+echo "== ack-filter"
+opn "cd /root/work && DOWN=50Mbit/s UP=200Kbit/s ./lul-setup.sh" 60 >/dev/null
+for mode in no-ack-filter ack-filter ack-filter-aggressive; do
+	sched besteffort $mode
+	d=$(cli 'sudo ip netns exec cli netperf -H 10.10.2.2 -t TCP_MAERTS -l 15 -P 0 -- -o THROUGHPUT')
+	eval "down_$(echo $mode | tr - _)=\${d%%.*}"
+	echo "   $mode: download $d Mbit/s"
+done
+[ "${down_ack_filter:-0}" -gt "${down_no_ack_filter:-0}" ] &&
+    [ "${down_ack_filter_aggressive:-0}" -ge "${down_ack_filter:-0}" ] && ok=1 || ok=0
+result ack-filter $ok "download ${down_no_ack_filter:-?} -> ${down_ack_filter:-?} -> ${down_ack_filter_aggressive:-?} Mbit/s"
+
+echo "== memlimit"
+opn "cd /root/work && DOWN=50Mbit/s UP=10Mbit/s ./lul-setup.sh" 60 >/dev/null
+sched besteffort memlimit 32k
+cli 'sudo ip netns exec cli netperf -H 10.10.2.2 -t UDP_STREAM -l 10 -P 0 -- -m 1472 -R 1 >/dev/null 2>&1' &
+sleep 4
+q=$(opn 'for i in 1 2 3 4 5; do dnctl sched 2 show | awk "\$1 == 0 && NF >= 9 { print \$(NF-1) }"; sleep 0.5; done' 30 |
+    sort -n | tail -1)
+wait
+[ -n "$q" ] && [ "$q" -le $((32768 + 1514)) ] && ok=1 || ok=0
+result memlimit $ok "largest queued backlog ${q:-?} bytes, limit 32768"
+
+echo "== ingress"
+sched besteffort egress
+e=$(flood_pps)
+sched besteffort ingress
+i=$(flood_pps)
+sleep 1
+rec=$(cli 'sudo ip netns exec cli ping -q -c 5 -i 0.2 10.10.2.2 | sed -n "s/.* \([0-9]*\)% packet loss.*/\1/p"')
+[ "${i:-0}" -lt "${e:-0}" ] && [ "${rec:-100}" = 0 ] && ok=1 || ok=0
+result ingress $ok "flood delivered $e pps in egress mode, $i pps in ingress mode; ping loss right after ${rec:-?}%"
+
+for mode in diffserv8 precedence; do
+	echo "== $mode"
+	sched $mode
+	r=$(cli "sudo ip netns exec cli flent rrul -l 20 -H 10.10.2.2 -D /tmp -f summary 2>/dev/null" |
+	    awk '/TCP download sum/ { d = $(NF-4) } /Ping \(ms\) ICMP/ { p = $(NF-3) }
+		END { print d, p }')
+	set -- $r 0 0
+	[ "${1%%.*}" -gt 40 ] 2>/dev/null && ok=1 || ok=0
+	result $mode $ok "RRUL download ${1:-?} Mbit/s, ICMP median ${2:-?} ms"
+done
+
+errs=$(opn 'sysctl -n net.inet.ip.dummynet.cake.check_errors 2>/dev/null || echo n/a' 30)
+[ "$errs" = 0 ] || [ "$errs" = n/a ] && ok=1 || ok=0
+result consistency $ok "check_errors $errs"
+
+echo
+[ $fails = 0 ] && echo "all tests passed" || echo "$fails test(s) failed"
+exit $fails

@@ -1,0 +1,2 @@
+# os-cake: load the shaper rules through the CAKE wrapper
+dnctl_program="/usr/local/opnsense/scripts/cake/dnctl.py"

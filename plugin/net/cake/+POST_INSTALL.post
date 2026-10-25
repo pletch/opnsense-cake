@@ -1,0 +1,1 @@
+if [ -f /usr/local/sbin/configctl ]; then echo "Reloading traffic shaper"; /usr/local/sbin/configctl shaper reload; fi

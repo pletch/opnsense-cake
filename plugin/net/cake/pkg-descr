@@ -1,0 +1,15 @@
+CAKE (Common Applications Kept Enhanced) is a queue scheduler that
+combines flow and host fairness, diffserv priority tins, the COBALT
+AQM and link-layer overhead compensation. This plugin lets pipes of
+the traffic shaper use it in place of FQ-CoDel.
+
+The scheduler is an unofficial kernel module (cake-kmod) built for a
+specific OPNsense series. If it does not match the running kernel,
+the shaper keeps running with the pipes' own scheduler.
+
+Plugin Changelog
+================
+
+1.0
+
+* Initial release

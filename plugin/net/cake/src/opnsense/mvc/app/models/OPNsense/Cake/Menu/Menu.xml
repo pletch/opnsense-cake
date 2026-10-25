@@ -1,0 +1,7 @@
+<menu>
+    <Firewall>
+        <Shaper>
+            <CAKE order="35" url="/ui/cake"/>
+        </Shaper>
+    </Firewall>
+</menu>

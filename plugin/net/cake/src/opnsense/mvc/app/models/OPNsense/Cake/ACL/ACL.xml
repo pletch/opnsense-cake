@@ -1,0 +1,9 @@
+<acl>
+    <page-firewall-trafficshaper-cake>
+        <name>Firewall: Shaper: CAKE</name>
+        <patterns>
+            <pattern>ui/cake/*</pattern>
+            <pattern>api/cake/*</pattern>
+        </patterns>
+    </page-firewall-trafficshaper-cake>
+</acl>

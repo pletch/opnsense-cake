@@ -1,0 +1,629 @@
+ipfw(8)/dnctl(8): "type cake" scheduler parameters, display and manual.
+
+Made against opnsense/src stable/26.7 (01510f09); apply with
+"patch -p1" in /usr/src.
+
+diff --git a/sbin/ipfw/dummynet.c b/sbin/ipfw/dummynet.c
+index 3cf9a18..9c598f6 100644
+--- a/sbin/ipfw/dummynet.c
++++ b/sbin/ipfw/dummynet.c
+@@ -75,6 +75,7 @@ static struct _s_x dummynet_params[] = {
+ 	{ "fq_codel",	TOK_FQ_CODEL}, /* FQ-Codel  */
+ 	{ "pie",		TOK_PIE}, /* PIE AQM */
+ 	{ "fq_pie",		TOK_FQ_PIE}, /* FQ-PIE */
++	{ "cake",		TOK_CAKE}, /* CAKE */
+ #endif
+ 	{ "bw",			TOK_BW },
+ 	{ "bandwidth",		TOK_BW },
+@@ -120,6 +121,32 @@ static struct _s_x aqm_params[] = {
+ 	{ "ts",	TOK_TS},
+ 	{ "derand",	TOK_DERAND},
+ 	{ "noderand",	TOK_NO_DERAND},
++	{ "besteffort",	TOK_BESTEFFORT},
++	{ "diffserv3",	TOK_DIFFSERV3},
++	{ "diffserv4",	TOK_DIFFSERV4},
++	{ "flowblind",	TOK_FLOWBLIND},
++	{ "srchost",	TOK_SRCHOST},
++	{ "dsthost",	TOK_DSTHOST},
++	{ "hosts",	TOK_HOSTS},
++	{ "dual-srchost",	TOK_DUAL_SRCHOST},
++	{ "dual-dsthost",	TOK_DUAL_DSTHOST},
++	{ "triple-isolate",	TOK_TRIPLE_ISOLATE},
++	{ "overhead",	TOK_OVERHEAD},
++	{ "mpu",	TOK_MPU},
++	{ "atm",	TOK_ATM},
++	{ "ptm",	TOK_PTM},
++	{ "noatm",	TOK_NOATM},
++	{ "ether-vlan",	TOK_ETHER_VLAN},
++	{ "diffserv8",	TOK_DIFFSERV8},
++	{ "precedence",	TOK_PRECEDENCE},
++	{ "wash",	TOK_WASH},
++	{ "nowash",	TOK_NOWASH},
++	{ "ack-filter",	TOK_ACK_FILTER},
++	{ "ack-filter-aggressive",	TOK_ACK_FILTER_AGGR},
++	{ "no-ack-filter",	TOK_NO_ACK_FILTER},
++	{ "ingress",	TOK_INGRESS},
++	{ "egress",	TOK_EGRESS},
++	{ "memlimit",	TOK_MEMLIMIT},
+ 	{ NULL, 0 }	/* terminator */
+ };
+ #endif
+@@ -152,6 +179,55 @@ enum {
+ 	CODEL_ECN_ENABLED = 1
+ };
+ 
++/* CAKE flags and diffserv modes, from CAKE kernel module */
++enum {
++	CAKE_ECN_ENABLED = 0x01,
++	CAKE_WASH = 0x02,
++	CAKE_ACK_FILTER = 0x04,
++	CAKE_ACK_AGGRESSIVE = 0x08,
++	CAKE_INGRESS = 0x10
++};
++/* par[2] carries the flags given in the low bits and which they are here */
++#define	CAKE_FLAGS_MASK_SHIFT	16
++
++static const char *cake_diffserv_names[] = {
++	"besteffort", "diffserv3", "diffserv4", "diffserv8", "precedence"
++};
++
++/* flow isolation modes, indexed by the kernel's CAKE_FLOW_* value */
++static const char *cake_flow_mode_names[] = {
++	"flowblind", "srchost", "dsthost", "hosts",
++	"flows", "dual-srchost", "dual-dsthost", "triple-isolate"
++};
++
++/* link framing, indexed by the kernel's CAKE_ATM_* value */
++static const char *cake_atm_names[] = { "noatm", "atm", "ptm" };
++
++/* link-layer overhead presets as in tc-cake(8); mpu -1 leaves it alone */
++static const struct {
++	const char *name;
++	int overhead, mpu, atm;
++} cake_presets[] = {
++	{ "raw",		0,	0,	0 },
++	{ "conservative",	48,	-1,	1 },
++	{ "ethernet",		38,	84,	0 },
++	{ "docsis",		18,	64,	0 },
++	{ "pppoe-ptm",		30,	-1,	2 },
++	{ "bridged-ptm",	22,	-1,	2 },
++	{ "ipoa-vcmux",		8,	-1,	1 },
++	{ "ipoa-llcsnap",	16,	-1,	1 },
++	{ "bridged-vcmux",	24,	-1,	1 },
++	{ "bridged-llcsnap",	32,	-1,	1 },
++	{ "pppoa-vcmux",	10,	-1,	1 },
++	{ "pppoa-llc",		14,	-1,	1 },
++	{ "pppoe-vcmux",	32,	-1,	1 },
++	{ "pppoe-llcsnap",	40,	-1,	1 },
++	{ NULL,			0,	0,	0 }
++};
++
++/* par[8] carries the overhead offset by this, so that -1 means unset */
++#define	CAKE_OVERHEAD_BIAS	64
++
+ /* PIE flags, from PIE kernel module */
+ enum {
+ 	PIE_ECN_ENABLED = 1,
+@@ -307,6 +383,44 @@ get_extra_parms(uint32_t nr, char *out, int subtype)
+ 			else
+ 				l += sprintf(out + l, " NoECN");
+ 			l += sprintf(out + l, "\n");
++		} else 	if (!strcasecmp(ep->name,"CAKE")) {
++			us_to_time(ep->par[0], strt1);
++			us_to_time(ep->par[1], strt2);
++			l = sprintf(out," CAKE %s %s target %s interval %s"
++				" quantum %jd limit %jd flows %jd",
++				(ep->par[3] >= 0 && ep->par[3] <= 4) ?
++				    cake_diffserv_names[ep->par[3]] : "?",
++				(ep->par[7] >= 0 && ep->par[7] <= 7) ?
++				    cake_flow_mode_names[ep->par[7]] : "?",
++				strt1, strt2,
++				(intmax_t) ep->par[4],
++				(intmax_t) (ep->par[5] & 0xffffffff),
++				(intmax_t) ep->par[6]
++				);
++			if (ep->par[2] & CAKE_ECN_ENABLED)
++				l += sprintf(out + l, " ECN");
++			else
++				l += sprintf(out + l, " NoECN");
++			if (ep->par[2] & CAKE_WASH)
++				l += sprintf(out + l, " wash");
++			if (ep->par[2] & CAKE_ACK_AGGRESSIVE)
++				l += sprintf(out + l, " ack-filter-aggressive");
++			else if (ep->par[2] & CAKE_ACK_FILTER)
++				l += sprintf(out + l, " ack-filter");
++			if (ep->par[2] & CAKE_INGRESS)
++				l += sprintf(out + l, " ingress");
++			if (ep->par[5] >> 32)
++				l += sprintf(out + l, " memlimit %jdK",
++				    (intmax_t)(ep->par[5] >> 32));
++			/* overhead compensation, if any (older kernels: none) */
++			if (ep->par[8] > 0 && ep->par[9] >= 0 &&
++			    (ep->par[8] != CAKE_OVERHEAD_BIAS || ep->par[9] != 0))
++				l += sprintf(out + l, " overhead %jd mpu %jd %s",
++				    (intmax_t)(ep->par[8] - CAKE_OVERHEAD_BIAS),
++				    (intmax_t)(ep->par[9] & 0xffff),
++				    (ep->par[9] >> 16) <= 2 ?
++				    cake_atm_names[ep->par[9] >> 16] : "?");
++			l += sprintf(out + l, "\n");
+ 		} else 	if (!strcasecmp(ep->name,"FQ_PIE")) {
+ 			us_to_time(ep->par[0], strt1);
+ 			us_to_time(ep->par[1], strt2);
+@@ -603,7 +717,7 @@ list_pipes(struct dn_id *oid, struct dn_id *end)
+ 			s->sched_nr,
+ 			s->name, s->flags, s->buckets, s->oid.id);
+ #ifdef NEW_AQM
+-		char parms[200];
++		char parms[320];	/* CAKE uses up to ~180 */
+ 		get_extra_parms(s->sched_nr, parms, DN_SCH_PARAMS);
+ 		printf("%s",parms);
+ #endif
+@@ -1109,6 +1223,217 @@ process_extra_parms(int *ac, char **av, struct dn_extra_parms *ep,
+ 			}
+ 		}
+ 		break;
++	case TOK_CAKE: {
++		/* CAKE
++		 * 0- target, 1- interval, 2- flags, 3- diffserv,
++		 * 4- quantum, 5- limit | memlimit (KB) << 32, 6- flows,
++		 * 7- flow mode, 8- overhead + 64, 9- mpu | framing << 16
++		 */
++		int ovh = INT_MIN, mpu = -1, atm = -1, flags = 0, fmask = 0;
++		int64_t limit = 0, memkb = 0;
++		double mem;
++		char *end;
++
++		while (*ac > 0) {
++			int tok = match_token(aqm_params, *av);
++			(*ac)--; av++;
++			switch(tok) {
++			case TOK_TARGET:
++				if (*ac <= 0 || time_to_us(av[0]) < 0)
++					errx(EX_DATAERR, "target needs time\n");
++
++				ep->par[0] = time_to_us(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_INTERVAL:
++				if (*ac <= 0 || time_to_us(av[0]) < 0)
++					errx(EX_DATAERR, "interval needs time\n");
++
++				ep->par[1] = time_to_us(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_ECN:
++				flags |= CAKE_ECN_ENABLED;
++				fmask |= CAKE_ECN_ENABLED;
++				break;
++			case TOK_NO_ECN:
++				flags &= ~CAKE_ECN_ENABLED;
++				fmask |= CAKE_ECN_ENABLED;
++				break;
++			case TOK_WASH:
++				flags |= CAKE_WASH;
++				fmask |= CAKE_WASH;
++				break;
++			case TOK_NOWASH:
++				flags &= ~CAKE_WASH;
++				fmask |= CAKE_WASH;
++				break;
++			case TOK_ACK_FILTER:
++				flags = (flags | CAKE_ACK_FILTER) &
++				    ~CAKE_ACK_AGGRESSIVE;
++				fmask |= CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE;
++				break;
++			case TOK_ACK_FILTER_AGGR:
++				flags |= CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE;
++				fmask |= CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE;
++				break;
++			case TOK_NO_ACK_FILTER:
++				flags &= ~(CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE);
++				fmask |= CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE;
++				break;
++			case TOK_INGRESS:
++				flags |= CAKE_INGRESS;
++				fmask |= CAKE_INGRESS;
++				break;
++			case TOK_EGRESS:
++				flags &= ~CAKE_INGRESS;
++				fmask |= CAKE_INGRESS;
++				break;
++
++			case TOK_BESTEFFORT:
++				ep->par[3] = 0;
++				break;
++			case TOK_DIFFSERV3:
++				ep->par[3] = 1;
++				break;
++			case TOK_DIFFSERV4:
++				ep->par[3] = 2;
++				break;
++			case TOK_DIFFSERV8:
++				ep->par[3] = 3;
++				break;
++			case TOK_PRECEDENCE:
++				ep->par[3] = 4;
++				break;
++
++			case TOK_QUANTUM:
++				if (*ac <= 0 || !is_valid_number(av[0]))
++					errx(EX_DATAERR, "quantum needs number\n");
++
++				ep->par[4] = atoi(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_LIMIT:
++				if (*ac <= 0 || !is_valid_number(av[0]))
++					errx(EX_DATAERR, "limit needs number\n");
++
++				limit = atoi(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_MEMLIMIT:	/* bytes, k/m/g suffix as in tc */
++				if (*ac <= 0)
++					errx(EX_DATAERR, "memlimit needs size\n");
++				mem = strtod(av[0], &end);
++				if (*end == 'k' || *end == 'K')
++					mem *= 1024, end++;
++				else if (*end == 'm' || *end == 'M')
++					mem *= 1024 * 1024, end++;
++				else if (*end == 'g' || *end == 'G')
++					mem *= 1024 * 1024 * 1024, end++;
++				if (*av[0] == '\0' || *end != '\0' || mem < 1024 ||
++				    mem > 4.0 * 1024 * 1024 * 1024)
++					errx(EX_DATAERR,
++					    "memlimit must be 1k to 4g\n");
++				memkb = (int64_t)((mem + 1023) / 1024);
++				(*ac)--; av++;
++				break;
++
++			/* "flows N" sets the flow count; a bare "flows" is
++			 * the flow isolation mode, as in tc-cake(8) */
++			case TOK_FLOWS:
++				if (*ac <= 0 || !is_valid_number(av[0])) {
++					ep->par[7] = 4;
++					break;
++				}
++				ep->par[6] = atoi(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_FLOWBLIND:
++				ep->par[7] = 0;
++				break;
++			case TOK_SRCHOST:
++				ep->par[7] = 1;
++				break;
++			case TOK_DSTHOST:
++				ep->par[7] = 2;
++				break;
++			case TOK_HOSTS:
++				ep->par[7] = 3;
++				break;
++			case TOK_DUAL_SRCHOST:
++				ep->par[7] = 5;
++				break;
++			case TOK_DUAL_DSTHOST:
++				ep->par[7] = 6;
++				break;
++			case TOK_TRIPLE_ISOLATE:
++				ep->par[7] = 7;
++				break;
++
++			case TOK_OVERHEAD:
++				if (*ac <= 0)
++					errx(EX_DATAERR, "overhead needs number\n");
++				ovh = strtol(av[0], &end, 10);
++				if (*av[0] == '\0' || *end != '\0' ||
++				    ovh < -64 || ovh > 256)
++					errx(EX_DATAERR,
++					    "overhead must be -64 to 256\n");
++				(*ac)--; av++;
++				break;
++
++			case TOK_MPU:
++				if (*ac <= 0 || !is_valid_number(av[0]) ||
++				    atoi(av[0]) > 256)
++					errx(EX_DATAERR, "mpu must be 0 to 256\n");
++				mpu = atoi(av[0]);
++				(*ac)--; av++;
++				break;
++
++			case TOK_NOATM:
++				atm = 0;
++				break;
++			case TOK_ATM:
++				atm = 1;
++				break;
++			case TOK_PTM:
++				atm = 2;
++				break;
++
++			case TOK_ETHER_VLAN:	/* adds a VLAN tag */
++				ovh = (ovh == INT_MIN ? 0 : ovh) + 4;
++				break;
++
++			default:
++				for (i = 0; cake_presets[i].name != NULL; i++)
++					if (!strcmp(av[-1], cake_presets[i].name))
++						break;
++				if (cake_presets[i].name == NULL) {
++					printf("%s is invalid parameter\n",
++					    av[-1]);
++					break;
++				}
++				ovh = cake_presets[i].overhead;
++				if (cake_presets[i].mpu >= 0)
++					mpu = cake_presets[i].mpu;
++				atm = cake_presets[i].atm;
++			}
++		}
++		if (fmask != 0)
++			ep->par[2] = flags | fmask << CAKE_FLAGS_MASK_SHIFT;
++		if (limit != 0 || memkb != 0)
++			ep->par[5] = limit | memkb << 32;
++		if (ovh != INT_MIN)
++			ep->par[8] = ovh + CAKE_OVERHEAD_BIAS;
++		if (mpu >= 0 || atm >= 0)
++			ep->par[9] = (mpu < 0 ? 0 : mpu) |
++			    (atm < 0 ? 0 : atm) << 16;
++		break;
++	}
+ 	case TOK_PIE:
+ 	case TOK_FQ_PIE:
+ 		/* PIE
+@@ -1604,10 +1929,11 @@ end_mask:
+ 
+ 		case TOK_FQ_CODEL:
+ 		case TOK_FQ_PIE:
++		case TOK_CAKE:
+ 			if (!strcmp(av[-1],"type"))
+-				errx(EX_DATAERR, "use type before fq_codel/fq_pie");
++				errx(EX_DATAERR, "use type before fq_codel/fq_pie/cake");
+ 
+-			NEED(sch, "fq_codel/fq_pie is only for schd");
++			NEED(sch, "fq_codel/fq_pie/cake is only for schd");
+ 			strlcpy(sch_extra->name, av[-1],
+ 			    sizeof(sch_extra->name));
+ 			sch_extra->oid.subtype = DN_SCH_PARAMS;
+@@ -1684,7 +2010,8 @@ end_mask:
+ 			/* if fq_codel is selected, consider all tokens after it
+ 			 * as parameters
+ 			 */
+-			if (!strcasecmp(av[0],"fq_codel") || !strcasecmp(av[0],"fq_pie")){
++			if (!strcasecmp(av[0],"fq_codel") || !strcasecmp(av[0],"fq_pie") ||
++			    !strcasecmp(av[0],"cake")){
+ 				strlcpy(sch_extra->name, av[0],
+ 				    sizeof(sch_extra->name));
+ 				sch_extra->oid.subtype = DN_SCH_PARAMS;
+diff --git a/sbin/ipfw/ipfw.8 b/sbin/ipfw/ipfw.8
+index e295f8a..b5212f8 100644
+--- a/sbin/ipfw/ipfw.8
++++ b/sbin/ipfw/ipfw.8
+@@ -3000,7 +3000,7 @@ The following case-insensitive parameters can be configured for a
+ scheduler:
+ .Pp
+ .Bl -tag -width indent -compact
+-.It Cm type Ar {fifo | wf2q+ | rr | qfq | fq_codel | fq_pie}
++.It Cm type Ar {fifo | wf2q+ | rr | qfq | fq_codel | fq_pie | cake}
+ specifies the scheduling algorithm to use.
+ .Bl -tag -width indent -compact
+ .It Cm fifo
+@@ -3039,6 +3039,21 @@ created sub-queues are controlled by separate instances of CoDel AQM.
+ implements the FQ-PIE (FlowQueue-PIE) scheduler/AQM algorithm, which similar to
+ .Cm fq_codel
+ but uses per sub-queue PIE AQM instance to control the queue delay.
++.It Cm cake
++implements the flow queueing and AQM parts of CAKE (Common Applications Kept
++Enhanced).
++Packets are sorted by DSCP into priority tins, hashed into flows with an
++8-way set-associative table, served by Deficit Round Robin with new flows
++first, and controlled by COBALT (CoDel with ECN marking, plus BLUE on
++overflow).
++When the pipe has a
++.Cm bw ,
++each tin may use its share of it (Bulk 1/16, Video 1/2, Voice 1/4) at
++priority; above that, tins share the rest in proportion.
++The pipe still does the rate limiting.
++This scheduler is provided by the
++.Pa dn_cake
++kernel module.
+ .El
+ .Pp
+ .Cm fq_codel
+@@ -3089,6 +3104,136 @@ So, ensure all scheduler
+ configuration options not related to fq_{codel/pie} are written before
+ .Cm fq_codel/fq_pie
+ tokens.
++.Pp
++.Cm cake
++takes
++.Cm target ,
++.Cm interval ,
++.Cm ecn
++and
++.Cm noecn
++as for
++.Cm codel ,
++and
++.Cm quantum ,
++.Cm limit
++and
++.Cm flows
++as above, except that the minimum
++.Cm quantum
++is 300 bytes, the maximum
++.Cm limit
++is 65535 packets, and
++.Cm flows
++is per tin, rounded up to a multiple of 8.
++ECN is on by default.
++It also takes one of:
++.Bl -tag -width indent
++.It Cm besteffort
++a single tin.
++.It Cm diffserv3
++Bulk (LE, CS1), Best Effort and Voice (TOS4, VA, EF, CS6, CS7) tins.
++This is the default.
++.It Cm diffserv4
++Bulk (LE, CS1), Best Effort, Video (TOS4, CS2, AF2x, CS3, AF3x, AF4x) and
++Voice (CS4, CS5, VA, EF, CS6, CS7) tins.
++.It Cm diffserv8
++eight tins: Background (LE), High Throughput (AF1x, CS1), Best Effort,
++Low Latency (AF2x), Video (AF3x, AF4x, CS3), Interactive (CS2), Minimum
++Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
++.It Cm precedence
++eight tins by IP precedence, the top three DSCP bits.
++.El
++.Pp
++and one flow isolation mode:
++.Bl -tag -width indent
++.It Cm flowblind
++all packets of a tin share one queue.
++.It Cm srchost , dsthost , hosts
++one queue per source host, destination host, or source and destination
++pair.
++.It Cm flows
++one queue per 5-tuple flow.
++.It Cm dual-srchost , dual-dsthost
++one queue per flow, and each source (destination) host gets an equal share,
++split between its flows.
++.It Cm triple-isolate
++one queue per flow, and both source and destination hosts get fair shares,
++so it works without knowing which side is the LAN.
++This is the default.
++.El
++.Pp
++A bare
++.Cm flows
++selects the mode;
++.Cm flows Ar m
++sets the number of flow queues.
++Host isolation looks at the addresses dummynet sees, so on a NAT gateway
++the scheduler has to run where they are not yet translated: before
++.Xr pf 4
++for outbound packets and after it for inbound packets.
++.Pp
++Link-layer overhead compensation makes the pipe charge each packet for the
++bytes it takes on the bottleneck link rather than its IP length, so the
++pipe
++.Cm bw
++can be set close to the real line rate:
++.Bl -tag -width indent
++.It Cm overhead Ar n
++bytes added to each packet, from -64 to 256.
++.It Cm mpu Ar n
++minimum size of a packet on the link, up to 256 bytes.
++.It Cm atm , ptm , noatm
++ATM cell framing (48 bytes of payload in each 53 byte cell), PTM 64b/65b
++encoding (VDSL2), or neither.
++.It Cm ethernet , docsis , pppoe-ptm , bridged-ptm , conservative , raw
++presets as in tc-cake(8): Ethernet (overhead 38 mpu 84), DOCSIS cable
++(overhead 18 mpu 64), VDSL2 with PPPoE (overhead 30 ptm) or bridged (22
++ptm), worst-case ATM (overhead 48 atm), or no compensation.
++.It Cm pppoa-vcmux , pppoa-llc , pppoe-vcmux , pppoe-llcsnap , bridged-vcmux , bridged-llcsnap , ipoa-vcmux , ipoa-llcsnap
++ADSL encapsulations, all with ATM framing.
++.It Cm ether-vlan
++adds 4 bytes for a VLAN tag; give it after a preset.
++.El
++.Pp
++The scheduler's tin shares are charged the same way.
++With a
++.Nm dummynet
++that lacks the scheduler wire length method, the scheduler adjusts the
++pipe's credit itself, with the same result.
++.Pp
++Further options:
++.Bl -tag -width indent
++.It Cm ack-filter , ack-filter-aggressive , no-ack-filter
++drop pure TCP ACKs made redundant by a newer ACK of the same connection
++queued behind them, which helps on asymmetric links.
++The aggressive filter also drops a single redundant ACK right in front of
++the new one.
++.It Cm wash , nowash
++clear the DSCP field, keeping ECN, after classifying a packet, e.g. on the
++download pipe of a link whose markings are not to be trusted.
++.It Cm ingress , egress
++in ingress mode, for a pipe that shapes traffic after it has crossed the
++bottleneck, dropped packets are still charged to the rate, and the AQM
++allows for the number of bulk flows.
++.It Cm memlimit Ar size
++byte limit of all queues, with an optional k, m or g suffix.
++By default it is four times what the pipe sends in an interval, and at
++least 4 MB.
++.El
++.Pp
++Parameters that are not given take their defaults from the
++.Va net.inet.ip.dummynet.cake
++sysctls.
++The tin AQM parameters are computed from the pipe
++.Cm bw
++when a scheduler instance is created, so reconfigure the scheduler after
++changing the pipe bandwidth.
++As with
++.Cm fq_codel ,
++any token after
++.Cm cake
++is considered a parameter for it.
+ .El
+ .Pp
+ In addition to the type, all parameters allowed for a pipe can also
+@@ -5009,6 +5154,16 @@ to 10ms, we do:
+ .Pp
+ .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
+ .Pp
++To use
++.Cm cake
++with four diffserv tins on a 95Mbits/s uplink, we do:
++.Pp
++.Dl "kldload dn_cake"
++.Dl "dnctl pipe 1 config bw 95mbits/s"
++.Dl "dnctl sched 1 config pipe 1 type cake diffserv4"
++.Dl "dnctl queue 1 config sched 1"
++.Dl "ipfw add 100 queue 1 ip from any to any out xmit em0"
++.Pp
+ Similar to
+ .Cm fq_codel ,
+ to configure
+diff --git a/sbin/ipfw/ipfw2.h b/sbin/ipfw/ipfw2.h
+index f19ea59..efb5e8b 100644
+--- a/sbin/ipfw/ipfw2.h
++++ b/sbin/ipfw/ipfw2.h
+@@ -215,6 +215,33 @@ enum tokens {
+ 	TOK_TS,
+ 	TOK_DERAND,
+ 	TOK_NO_DERAND,
++	TOK_CAKE,
++	TOK_BESTEFFORT,
++	TOK_DIFFSERV3,
++	TOK_DIFFSERV4,
++	TOK_FLOWBLIND,
++	TOK_SRCHOST,
++	TOK_DSTHOST,
++	TOK_HOSTS,
++	TOK_DUAL_SRCHOST,
++	TOK_DUAL_DSTHOST,
++	TOK_TRIPLE_ISOLATE,
++	TOK_OVERHEAD,
++	TOK_MPU,
++	TOK_ATM,
++	TOK_PTM,
++	TOK_NOATM,
++	TOK_ETHER_VLAN,
++	TOK_DIFFSERV8,
++	TOK_PRECEDENCE,
++	TOK_WASH,
++	TOK_NOWASH,
++	TOK_ACK_FILTER,
++	TOK_ACK_FILTER_AGGR,
++	TOK_NO_ACK_FILTER,
++	TOK_INGRESS,
++	TOK_EGRESS,
++	TOK_MEMLIMIT,
+ #endif
+ 	/* dummynet tokens */
+ 	TOK_WEIGHT,

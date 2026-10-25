@@ -1,0 +1,117 @@
+<model>
+    <mount>//OPNsense/Cake</mount>
+    <version>1.0.0</version>
+    <description>CAKE scheduler settings for traffic shaper pipes</description>
+    <items>
+        <pipes>
+            <pipe type="ArrayField">
+                <enabled type="BooleanField">
+                    <Default>1</Default>
+                    <Required>Y</Required>
+                </enabled>
+                <pipe type="ModelRelationField">
+                    <Model>
+                        <pipes>
+                            <source>OPNsense.TrafficShaper.TrafficShaper</source>
+                            <items>pipes.pipe</items>
+                            <display>description</display>
+                        </pipes>
+                    </Model>
+                    <Required>Y</Required>
+                    <ValidationMessage>Related pipe not found.</ValidationMessage>
+                    <Constraints>
+                        <check001>
+                            <type>UniqueConstraint</type>
+                            <ValidationMessage>This pipe already uses CAKE.</ValidationMessage>
+                        </check001>
+                    </Constraints>
+                </pipe>
+                <diffserv type="OptionField">
+                    <Default>diffserv3</Default>
+                    <Required>Y</Required>
+                    <OptionValues>
+                        <besteffort>Best effort (1 tin)</besteffort>
+                        <diffserv3>diffserv3 (3 tins)</diffserv3>
+                        <diffserv4>diffserv4 (4 tins)</diffserv4>
+                        <diffserv8>diffserv8 (8 tins)</diffserv8>
+                        <precedence>IP precedence (8 tins)</precedence>
+                    </OptionValues>
+                </diffserv>
+                <isolation type="OptionField">
+                    <Default>triple-isolate</Default>
+                    <Required>Y</Required>
+                    <OptionValues>
+                        <triple-isolate>Triple isolate (hosts and flows)</triple-isolate>
+                        <dual-srchost>Per source host, then flow</dual-srchost>
+                        <dual-dsthost>Per destination host, then flow</dual-dsthost>
+                        <flows>Per flow</flows>
+                        <hosts>Per host pair</hosts>
+                        <srchost>Per source host</srchost>
+                        <dsthost>Per destination host</dsthost>
+                        <flowblind>None (one queue per tin)</flowblind>
+                    </OptionValues>
+                </isolation>
+                <ecn type="BooleanField">
+                    <Default>1</Default>
+                    <Required>Y</Required>
+                </ecn>
+                <ack_filter type="OptionField">
+                    <BlankDesc>Off</BlankDesc>
+                    <OptionValues>
+                        <ack-filter>On</ack-filter>
+                        <ack-filter-aggressive>Aggressive</ack-filter-aggressive>
+                    </OptionValues>
+                </ack_filter>
+                <wash type="BooleanField">
+                    <Default>0</Default>
+                    <Required>Y</Required>
+                </wash>
+                <ingress type="BooleanField">
+                    <Default>0</Default>
+                    <Required>Y</Required>
+                </ingress>
+                <link type="OptionField">
+                    <OptionValues>
+                        <ethernet>Ethernet (overhead 38, mpu 84)</ethernet>
+                        <docsis>Cable, DOCSIS (overhead 18, mpu 64)</docsis>
+                        <pppoe-ptm>VDSL2, PPPoE (overhead 30, PTM)</pppoe-ptm>
+                        <bridged-ptm>VDSL2, bridged (overhead 22, PTM)</bridged-ptm>
+                        <pppoe-vcmux>ADSL, PPPoE VC-mux (overhead 32, ATM)</pppoe-vcmux>
+                        <pppoe-llcsnap>ADSL, PPPoE LLC/SNAP (overhead 40, ATM)</pppoe-llcsnap>
+                        <pppoa-vcmux>ADSL, PPPoA VC-mux (overhead 10, ATM)</pppoa-vcmux>
+                        <pppoa-llc>ADSL, PPPoA LLC (overhead 14, ATM)</pppoa-llc>
+                        <bridged-vcmux>ADSL, bridged VC-mux (overhead 24, ATM)</bridged-vcmux>
+                        <bridged-llcsnap>ADSL, bridged LLC/SNAP (overhead 32, ATM)</bridged-llcsnap>
+                        <ipoa-vcmux>ADSL, IPoA VC-mux (overhead 8, ATM)</ipoa-vcmux>
+                        <ipoa-llcsnap>ADSL, IPoA LLC/SNAP (overhead 16, ATM)</ipoa-llcsnap>
+                        <conservative>ADSL, unknown (overhead 48, ATM)</conservative>
+                    </OptionValues>
+                </link>
+                <overhead type="IntegerField">
+                    <MinimumValue>-64</MinimumValue>
+                    <MaximumValue>256</MaximumValue>
+                    <ValidationMessage>Overhead must be between -64 and 256 bytes.</ValidationMessage>
+                </overhead>
+                <mpu type="IntegerField">
+                    <MinimumValue>0</MinimumValue>
+                    <MaximumValue>256</MaximumValue>
+                    <ValidationMessage>MPU must be between 0 and 256 bytes.</ValidationMessage>
+                </mpu>
+                <framing type="OptionField">
+                    <BlankDesc>Default</BlankDesc>
+                    <OptionValues>
+                        <noatm>None</noatm>
+                        <atm>ATM cells</atm>
+                        <ptm>PTM (64b/65b)</ptm>
+                    </OptionValues>
+                </framing>
+                <memlimit type="IntegerField">
+                    <MinimumValue>1</MinimumValue>
+                    <MaximumValue>4096</MaximumValue>
+                    <ValidationMessage>Memory limit must be between 1 and 4096 MB.</ValidationMessage>
+                </memlimit>
+                <description type="DescriptionField"/>
+            </pipe>
+        </pipes>
+    </items>
+</model>

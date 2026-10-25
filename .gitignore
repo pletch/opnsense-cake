@@ -1,0 +1,16 @@
+# kernel module build (make in sys/modules/dn_sched_cake)
+*.o
+*.ko
+*.ko.debug
+*.full
+.depend*
+export_syms
+opt_*.h
+machine
+x86
+i386
+
+# opnsense/plugins build output, Python caches
+work/
+__pycache__/
+*.pyc

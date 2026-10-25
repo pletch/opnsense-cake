@@ -1,0 +1,273 @@
+Traffic Shaper: CAKE scheduler type, diffserv mode, quantum check.
+
+diff --git a/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml b/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml
+index 6c1fd9d..6fffa8c 100644
+--- a/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml
++++ b/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml
+@@ -56,7 +56,7 @@
+         <label>Scheduler type</label>
+         <type>dropdown</type>
+         <advanced>true</advanced>
+-        <help>Specify the scheduling algorithm to use</help>
++        <help>Specify the scheduling algorithm to use. FlowQueue-CoDel, FlowQueue-PIE and CAKE schedule the queues attached to this pipe, so point rules at a queue; traffic sent to the pipe itself is served first in, first out.</help>
+         <grid_view>
+             <visible>false</visible>
+         </grid_view>
+@@ -74,7 +74,7 @@
+     </field>
+     <field>
+         <id>pipe.codel_target</id>
+-        <label>(FQ-)CoDel target</label>
++        <label>(FQ-)CoDel/CAKE target</label>
+         <type>text</type>
+         <advanced>true</advanced>
+         <help>Minimum acceptable persistent queue delay (in ms), leave empty for default</help>
+@@ -84,7 +84,7 @@
+     </field>
+     <field>
+         <id>pipe.codel_interval</id>
+-        <label>(FQ-)CoDel interval</label>
++        <label>(FQ-)CoDel/CAKE interval</label>
+         <type>text</type>
+         <advanced>true</advanced>
+         <help>Interval before dropping packets (in ms), leave empty for default</help>
+@@ -94,7 +94,7 @@
+     </field>
+     <field>
+         <id>pipe.codel_ecn_enable</id>
+-        <label>(FQ-)CoDel ECN</label>
++        <label>(FQ-)CoDel/CAKE ECN</label>
+         <type>checkbox</type>
+         <advanced>true</advanced>
+         <help>Explicit Congestion Notification</help>
+@@ -106,17 +106,17 @@
+     </field>
+     <field>
+         <id>pipe.fqcodel_quantum</id>
+-        <label>FQ-CoDel quantum</label>
++        <label>FQ-CoDel/CAKE quantum</label>
+         <type>text</type>
+         <advanced>true</advanced>
+-        <help>The number of bytes a queue can serve before being moved to the tail of old queues list (bytes), leave empty for defaults</help>
++        <help>The number of bytes a queue can serve before being moved to the tail of old queues list (bytes), leave empty for defaults. CAKE requires at least 300 bytes.</help>
+         <grid_view>
+             <visible>false</visible>
+         </grid_view>
+     </field>
+     <field>
+         <id>pipe.fqcodel_limit</id>
+-        <label>FQ-CoDel limit</label>
++        <label>FQ-CoDel/CAKE limit</label>
+         <type>text</type>
+         <advanced>true</advanced>
+         <help>The hard size limit of all queues managed by this instance, leave empty for defaults</help>
+@@ -126,10 +126,78 @@
+     </field>
+     <field>
+         <id>pipe.fqcodel_flows</id>
+-        <label>FQ-CoDel flows</label>
++        <label>FQ-CoDel/CAKE flows</label>
+         <type>text</type>
+         <advanced>true</advanced>
+-        <help>The number of flow queues that are created and managed, leave empty for defaults</help>
++        <help>The number of flow queues that are created and managed, leave empty for defaults. For CAKE this is per tin.</help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_diffserv</id>
++        <label>CAKE diffserv</label>
++        <type>dropdown</type>
++        <advanced>true</advanced>
++        <help><![CDATA[How CAKE sorts packets into priority tins by DSCP. Each tin may use its share of the pipe bandwidth at priority.
++        <li>Best effort: one tin, no prioritization.</li>
++        <li>diffserv3 (default): Bulk (CS1, LE; 1/16), Best Effort and Voice (EF, VA, CS6, CS7; 1/4).</li>
++        <li>diffserv4: Bulk, Best Effort, Video (AF2x-AF4x, CS2, CS3; 1/2) and Voice (EF, VA, CS4-CS7; 1/4).</li>
++        ]]></help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_isolation</id>
++        <label>CAKE isolation</label>
++        <type>dropdown</type>
++        <advanced>true</advanced>
++        <help><![CDATA[How CAKE shares bandwidth between hosts and flows.
++        <li>Triple isolate (default): fair between source hosts and between destination hosts, then between each host's flows. Works on both upload and download pipes.</li>
++        <li>Per source / destination host, then flow: the same for one side only, e.g. source for an upload pipe, destination for a download pipe.</li>
++        <li>Per flow: fair between connections, so a host with many connections gets more.</li>
++        ]]></help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_link</id>
++        <label>CAKE link type</label>
++        <type>dropdown</type>
++        <advanced>true</advanced>
++        <help>Link-layer overhead of the bottleneck link. CAKE then charges each packet for what it takes on that link, so the bandwidth can be set close to the line or sync rate instead of well below it.</help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_overhead</id>
++        <label>CAKE overhead</label>
++        <type>text</type>
++        <advanced>true</advanced>
++        <help>Bytes added to each packet on the link (-64 to 256), overriding the link type. E.g. add 4 for a VLAN tag.</help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_mpu</id>
++        <label>CAKE MPU</label>
++        <type>text</type>
++        <advanced>true</advanced>
++        <help>Minimum packet size on the link in bytes, overriding the link type.</help>
++        <grid_view>
++            <visible>false</visible>
++        </grid_view>
++    </field>
++    <field>
++        <id>pipe.cake_framing</id>
++        <label>CAKE framing</label>
++        <type>dropdown</type>
++        <advanced>true</advanced>
++        <help>Link framing, overriding the link type: ATM cells for ADSL, PTM for VDSL2.</help>
+         <grid_view>
+             <visible>false</visible>
+         </grid_view>
+diff --git a/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.php b/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.php
+index afc49ab..c7e9d6b 100644
+--- a/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.php
++++ b/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.php
+@@ -72,6 +72,16 @@ class TrafficShaper extends BaseModel
+                         ));
+                     }
+                 }
++                if (
++                    in_array($node->getInternalXMLTagName(), ['scheduler', 'fqcodel_quantum']) &&
++                    $parentNode->scheduler == 'cake' && !$parentNode->fqcodel_quantum->isEmpty() &&
++                    $parentNode->fqcodel_quantum->asInt() < 300
++                ) {
++                    $messages->appendMessage(new Message(
++                        gettext('The CAKE quantum must be at least 300 bytes.'),
++                        $parentNode->fqcodel_quantum->__reference
++                    ));
++                }
+             }
+         }
+         return $messages;
+diff --git a/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.xml b/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.xml
+index af46c2e..0c9c281 100644
+--- a/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.xml
++++ b/src/opnsense/mvc/app/models/OPNsense/TrafficShaper/TrafficShaper.xml
+@@ -60,6 +60,7 @@
+                         <qfq>QFQ</qfq>
+                         <fq_codel>FlowQueue-CoDel</fq_codel>
+                         <fq_pie>FlowQueue-PIE</fq_pie>
++                        <cake>CAKE</cake>
+                     </OptionValues>
+                 </scheduler>
+                 <codel_enable type="BooleanField">
+@@ -108,6 +109,63 @@
+                     <MinimumValue>1</MinimumValue>
+                     <MaximumValue>65535</MaximumValue>
+                 </fqcodel_flows>
++                <cake_diffserv type="OptionField">
++                    <BlankDesc>Default</BlankDesc>
++                    <OptionValues>
++                        <besteffort>Best effort (1 tin)</besteffort>
++                        <diffserv3>diffserv3 (3 tins)</diffserv3>
++                        <diffserv4>diffserv4 (4 tins)</diffserv4>
++                    </OptionValues>
++                </cake_diffserv>
++                <cake_isolation type="OptionField">
++                    <BlankDesc>Default</BlankDesc>
++                    <OptionValues>
++                        <triple-isolate>Triple isolate (hosts and flows)</triple-isolate>
++                        <dual-srchost>Per source host, then flow</dual-srchost>
++                        <dual-dsthost>Per destination host, then flow</dual-dsthost>
++                        <flows>Per flow</flows>
++                        <hosts>Per host pair</hosts>
++                        <srchost>Per source host</srchost>
++                        <dsthost>Per destination host</dsthost>
++                        <flowblind>None (one queue per tin)</flowblind>
++                    </OptionValues>
++                </cake_isolation>
++                <cake_link type="OptionField">
++                    <BlankDesc>None</BlankDesc>
++                    <OptionValues>
++                        <ethernet>Ethernet (overhead 38, mpu 84)</ethernet>
++                        <docsis>Cable, DOCSIS (overhead 18, mpu 64)</docsis>
++                        <pppoe-ptm>VDSL2, PPPoE (overhead 30, PTM)</pppoe-ptm>
++                        <bridged-ptm>VDSL2, bridged (overhead 22, PTM)</bridged-ptm>
++                        <pppoe-vcmux>ADSL, PPPoE VC-mux (overhead 32, ATM)</pppoe-vcmux>
++                        <pppoe-llcsnap>ADSL, PPPoE LLC/SNAP (overhead 40, ATM)</pppoe-llcsnap>
++                        <pppoa-vcmux>ADSL, PPPoA VC-mux (overhead 10, ATM)</pppoa-vcmux>
++                        <pppoa-llc>ADSL, PPPoA LLC (overhead 14, ATM)</pppoa-llc>
++                        <bridged-vcmux>ADSL, bridged VC-mux (overhead 24, ATM)</bridged-vcmux>
++                        <bridged-llcsnap>ADSL, bridged LLC/SNAP (overhead 32, ATM)</bridged-llcsnap>
++                        <ipoa-vcmux>ADSL, IPoA VC-mux (overhead 8, ATM)</ipoa-vcmux>
++                        <ipoa-llcsnap>ADSL, IPoA LLC/SNAP (overhead 16, ATM)</ipoa-llcsnap>
++                        <conservative>ADSL, unknown (overhead 48, ATM)</conservative>
++                    </OptionValues>
++                </cake_link>
++                <cake_overhead type="IntegerField">
++                    <MinimumValue>-64</MinimumValue>
++                    <MaximumValue>256</MaximumValue>
++                    <ValidationMessage>Overhead must be between -64 and 256 bytes.</ValidationMessage>
++                </cake_overhead>
++                <cake_mpu type="IntegerField">
++                    <MinimumValue>0</MinimumValue>
++                    <MaximumValue>256</MaximumValue>
++                    <ValidationMessage>MPU must be between 0 and 256 bytes.</ValidationMessage>
++                </cake_mpu>
++                <cake_framing type="OptionField">
++                    <BlankDesc>Default</BlankDesc>
++                    <OptionValues>
++                        <noatm>None</noatm>
++                        <atm>ATM cells</atm>
++                        <ptm>PTM (64b/65b)</ptm>
++                    </OptionValues>
++                </cake_framing>
+                 <origin type="TextField">
+                     <Mask>/^([a-z,A-Z,1-9]){0,30}$/</Mask>
+                     <ValidationMessage>Origin should be regular text of max 30 characters.</ValidationMessage>
+diff --git a/src/opnsense/service/templates/OPNsense/Shaper/dnctl.conf b/src/opnsense/service/templates/OPNsense/Shaper/dnctl.conf
+index a68e9a0..67b4ccf 100644
+--- a/src/opnsense/service/templates/OPNsense/Shaper/dnctl.conf
++++ b/src/opnsense/service/templates/OPNsense/Shaper/dnctl.conf
+@@ -11,15 +11,23 @@ pipe {{ pipe.number }} config bw {{ pipe.bandwidth }}{{ pipe.bandwidthMetric }}/
+  %}{% if pipe.mask in ['src-ip6', 'dst-ip6'] %} mask {{ pipe.mask }} /128 {% endif %}{%
+  if pipe.delay|default('') != '' %} delay {{pipe.delay}} {% endif %} type {%
+  if pipe.scheduler|default('') != '' %} {{pipe.scheduler}} {% else %} wf2q+ {% endif %}{%
+- if pipe.codel_enable|default('0') == '1' and pipe.scheduler != 'fq_codel' %} codel {% endif %}{%
+- if pipe.codel_enable|default('0') == '1' or pipe.scheduler == 'fq_codel' %}{%
++ if pipe.codel_enable|default('0') == '1' and pipe.scheduler not in ['fq_codel', 'cake'] %} codel {% endif %}{%
++ if pipe.codel_enable|default('0') == '1' or pipe.scheduler in ['fq_codel', 'cake'] %}{%
+      if pipe.codel_target|default('') != ''%} target {{pipe.codel_target}} {% endif %}{%
+      if pipe.codel_interval|default('') != ''%} interval {{pipe.codel_interval}} {% endif %}{%
+      if pipe.codel_ecn_enable|default('0') == '1'%} ecn {% else %} noecn {% endif %} {%
+-     if pipe.scheduler == 'fq_codel' %} {%
++     if pipe.scheduler in ['fq_codel', 'cake'] %} {%
+          if pipe.fqcodel_quantum|default('') != '' %} quantum {{pipe.fqcodel_quantum}} {% endif %} {%
+          if pipe.fqcodel_limit|default('') != '' %} limit {{pipe.fqcodel_limit}} {% endif %} {%
+-         if pipe.fqcodel_flows|default('') != '' %} flows {{pipe.fqcodel_flows}} {% endif %}
++         if pipe.fqcodel_flows|default('') != '' %} flows {{pipe.fqcodel_flows}} {% endif %} {%
++         if pipe.scheduler == 'cake' and pipe.cake_diffserv|default('') != '' %} {{pipe.cake_diffserv}} {% endif %} {%
++         if pipe.scheduler == 'cake' and pipe.cake_isolation|default('') != '' %} {{pipe.cake_isolation}} {% endif %} {%
++         if pipe.scheduler == 'cake' %}{%
++             if pipe.cake_link|default('') != '' %} {{pipe.cake_link}} {% endif %}{%
++             if pipe.cake_overhead|default('') != '' %} overhead {{pipe.cake_overhead}} {% endif %}{%
++             if pipe.cake_mpu|default('') != '' %} mpu {{pipe.cake_mpu}} {% endif %}{%
++             if pipe.cake_framing|default('') != '' %} {{pipe.cake_framing}} {% endif %}{%
++         endif %}
+ {% endif %}{%
+  elif pipe.pie_enable|default('0') == '1' and pipe.scheduler != 'fq_pie' %} pie {% endif %}
+ 
