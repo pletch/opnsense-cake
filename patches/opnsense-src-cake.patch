@@ -707,10 +707,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..8225c6e
+index 0000000..d8fbc02
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,2528 @@
+@@ -0,0 +1,2677 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -835,6 +835,7 @@ index 0000000..8225c6e
 +#define	CAKE_STALE(si, schk)	((si)->gen != (schk)->gen ||		\
 +	(si)->bw != (si)->_si.sched->link.bandwidth)
 +static int cake_ecn_mark(struct mbuf *m);
++static void cake_heapify(struct cake_si *si, uint32_t i);
 +static __inline void cake_charge_tin(struct cake_tin *tin, int len,
 +    uint64_t now);
 +
@@ -1418,9 +1419,12 @@ index 0000000..8225c6e
 +/*
 + * Packets of a flow the ACK filter looks at, from the head. sch_cake scans
 + * the whole flow; a cap keeps the cost of one ACK bounded when an
-+ * unresponsive flow has thousands queued.
++ * unresponsive flow has thousands queued. (test/sched-diff.sh lifts it to
++ * compare with sch_cake at any queue depth.)
 + */
++#ifndef CAKE_ACK_SCAN
 +#define	CAKE_ACK_SCAN	128
++#endif
 +
 +/* the TCP header of a packet, copied out of the mbuf chain if needed */
 +struct cake_tcp {
@@ -1799,6 +1803,10 @@ index 0000000..8225c6e
 +	q->mq.count--;
 +
 +	cake_update_stats(q, si, -m->m_pkthdr.len, 0);
++	/* the flow's backlog shrank: keep a warm heap up to date, as
++	 * cake_dequeue_one() does */
++	if (si->overflow_timeout)
++		cake_heapify(si, q->heap_idx);
 +
 +	if (si->main_q.ni.length == 0) /* queue is now idle */
 +		si->main_q.q_time = V_dn_cfg.curr_time;
@@ -2022,25 +2030,115 @@ index 0000000..8225c6e
 +}
 +
 +/*
-+ * Drop the head packet of the flow with the largest byte backlog; 0 if
-+ * nothing is queued.
++ * The overflow heap, as sch_cake's: a max-heap of flow byte backlogs with
++ * an entry for each flow of all CAKE_MAX_TINS tins, laid out as sch_cake
++ * lays out its own (entry j * CAKE_MAX_TINS + t starts as flow j of tin
++ * t), so that ties are broken the same way. Tins the diffserv mode does
++ * not use have no flows and count as empty.
++ */
++#define	CAKE_HEAP_TIN(e)	((e) & (CAKE_MAX_TINS - 1))
++#define	CAKE_HEAP_FLOW(e)	((e) >> 3)
++
++static __inline uint32_t
++cake_heap_backlog(struct cake_si *si, uint32_t i)
++{
++	uint32_t e = si->overflow_heap[i];
++
++	return (CAKE_HEAP_TIN(e) < si->tin_cnt ?
++	    si->flows[CAKE_HEAP_TIN(e) * si->flows_cnt +
++	    CAKE_HEAP_FLOW(e)].stats.len_bytes : 0);
++}
++
++static void
++cake_heap_swap(struct cake_si *si, uint32_t i, uint32_t j)
++{
++	uint32_t ii = si->overflow_heap[i], jj = si->overflow_heap[j];
++
++	si->overflow_heap[i] = jj;
++	si->overflow_heap[j] = ii;
++	if (CAKE_HEAP_TIN(ii) < si->tin_cnt)
++		si->flows[CAKE_HEAP_TIN(ii) * si->flows_cnt +
++		    CAKE_HEAP_FLOW(ii)].heap_idx = j;
++	if (CAKE_HEAP_TIN(jj) < si->tin_cnt)
++		si->flows[CAKE_HEAP_TIN(jj) * si->flows_cnt +
++		    CAKE_HEAP_FLOW(jj)].heap_idx = i;
++}
++
++/* sift entry i down, as cake_heapify() */
++static void
++cake_heapify(struct cake_si *si, uint32_t i)
++{
++	uint32_t a = CAKE_MAX_TINS * si->flows_cnt;
++	uint32_t m = i, mb = cake_heap_backlog(si, i), l, r, lb, rb;
++
++	while (m < a) {
++		l = m + m + 1;
++		r = l + 1;
++		if (l < a) {
++			lb = cake_heap_backlog(si, l);
++			if (lb > mb) {
++				m = l;
++				mb = lb;
++			}
++		}
++		if (r < a) {
++			rb = cake_heap_backlog(si, r);
++			if (rb > mb) {
++				m = r;
++				mb = rb;
++			}
++		}
++		if (m == i)
++			break;
++		cake_heap_swap(si, i, m);
++		i = m;
++	}
++}
++
++/* move entry i up as its backlog grew, as cake_heapify_up() */
++static void
++cake_heapify_up(struct cake_si *si, uint32_t i)
++{
++	uint32_t p;
++
++	while (i > 0 && i < CAKE_MAX_TINS * si->flows_cnt) {
++		p = (i - 1) >> 1;
++		if (cake_heap_backlog(si, i) <= cake_heap_backlog(si, p))
++			break;
++		cake_heap_swap(si, i, p);
++		i = p;
++	}
++}
++
++/*
++ * Drop the head packet of the flow with the largest byte backlog, from
++ * the heap as sch_cake's cake_drop(); 0 if nothing is queued.
 + */
 +static int
 +cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 +{
-+	struct cake_flow *f, *fat = NULL;
-+	uint32_t t;
++	struct cake_flow *fat;
++	uint32_t e, i, tries;
 +
-+	for (t = 0; t < si->tin_cnt; t++) {
-+		TAILQ_FOREACH(f, &si->tins[t].newflows, flowchain)
-+			if (fat == NULL || f->stats.len_bytes > fat->stats.len_bytes)
-+				fat = f;
-+		TAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain)
-+			if (fat == NULL || f->stats.len_bytes > fat->stats.len_bytes)
-+				fat = f;
++	for (tries = 0;; tries++) {
++		/* as cake_drop(): a heap gone cold is rebuilt first */
++		if (si->overflow_timeout == 0)
++			for (i = CAKE_MAX_TINS * si->flows_cnt / 2; i-- > 0;)
++				cake_heapify(si, i);
++		si->overflow_timeout = 65535;
++
++		e = si->overflow_heap[0];
++		fat = CAKE_HEAP_TIN(e) < si->tin_cnt ?
++		    &si->flows[CAKE_HEAP_TIN(e) * si->flows_cnt +
++		    CAKE_HEAP_FLOW(e)] : NULL;
++		if (fat != NULL && fat->mq.head != NULL)
++			break;
++		/* the heap went wrong (sch_cake rebuilds it on its next
++		 * call): rebuild it now, or give up if nothing is queued */
++		si->overflow_timeout = 0;
++		if (tries > 0)
++			return (0);
 +	}
-+	if (fat == NULL || fat->mq.head == NULL)
-+		return (0);
 +
 +	if (cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
 +	    now_ns))
@@ -2049,6 +2147,7 @@ index 0000000..8225c6e
 +		cake_charge_link(si, &si->tins[fat->tin],
 +		    cake_wire_bytes(&si->cfg, fat->mq.head), now_ns);
 +	cake_drop_head(fat, si);
++	cake_heapify(si, 0);
 +	return (1);
 +}
 +
@@ -2079,10 +2178,13 @@ index 0000000..8225c6e
 +}
 +
 +/*
-+ * Dequeue from a flow, applying COBALT. Return NULL if the flow is empty.
++ * Dequeue from a flow, applying COBALT. Return NULL if the flow is empty,
++ * or, in ingress mode, after a drop with *retry set: the drop used up
++ * deficit, so the tin's DRR chooses a flow again, as in sch_cake.
 + */
 +static struct mbuf *
-+cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
++cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns,
++	int *retry)
 +{
 +	struct cake_tin *tin = &si->tins[f->tin];
 +	struct mbuf *m;
@@ -2091,6 +2193,7 @@ index 0000000..8225c6e
 +	int drop, marked, ingress;
 +
 +	ingress = (si->cfg.flags & CAKE_INGRESS) != 0;
++	*retry = 0;
 +	while ((m = cake_extract_head(f, si, &pkt_ts)) != NULL) {
 +		drop = cobalt_should_drop(&f->cvars, &tin->cparams,
 +		    now_ns, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
@@ -2113,6 +2216,10 @@ index 0000000..8225c6e
 +		}
 +		cake_update_stats(f, si, 0, 1);
 +		m_freem(m);
++		if (ingress) {
++			*retry = 1;
++			return NULL;
++		}
 +	}
 +	return NULL;
 +}
@@ -2216,6 +2323,14 @@ index 0000000..8225c6e
 +				n++;
 +			if (n != f->stats.length)
 +				bad |= 0x20;
++		}
++		/* every flow knows its place in the overflow heap */
++		for (i = 0; i < si->tin_cnt * si->flows_cnt; i++) {
++			uint32_t e = si->overflow_heap[si->flows[i].heap_idx];
++
++			if (CAKE_HEAP_TIN(e) * si->flows_cnt +
++			    CAKE_HEAP_FLOW(e) != i)
++				bad |= 0x100;
 +		}
 +		if (active != listed)
 +			bad |= 0x40;
@@ -2350,6 +2465,10 @@ index 0000000..8225c6e
 +		}
 +	}
 +
++	/* the flow's backlog grew: keep a warm heap up to date */
++	if (si->overflow_timeout)
++		cake_heapify_up(si, f->heap_idx);
++
 +	/* over the packet or byte limit: drop from the fattest flow, which
 +	 * is usually not the one this packet went to, so report the enqueue
 +	 * as a success.
@@ -2428,7 +2547,7 @@ index 0000000..8225c6e
 +	struct mbuf *m;
 +	uint64_t now_ns;
 +	uint32_t len, idle_tins = 0;
-+	int first_flow = 1;
++	int first_flow = 1, retry;
 +
 +	si = (struct cake_si *)_si;
 +	schk = (struct cake_schk *)(si->_si.sched+1);
@@ -2465,6 +2584,7 @@ index 0000000..8225c6e
 +			}
 +		}
 +
++retry:
 +		/* select a list to start with */
 +		if (first_flow && !TAILQ_EMPTY(&tin->decayingflows))
 +			list = &tin->decayingflows;
@@ -2504,7 +2624,9 @@ index 0000000..8225c6e
 +			continue;
 +		}
 +
-+		m = cake_flow_dequeue(f, si, now_ns);
++		m = cake_flow_dequeue(f, si, now_ns, &retry);
++		if (m == NULL && retry)
++			goto retry;
 +		if (m == NULL) {
 +			/* The flow is empty. As in sch_cake, it stays on the
 +			 * decaying list while its COBALT state is not at rest
@@ -2550,6 +2672,9 @@ index 0000000..8225c6e
 +			si->_si.credit -= (int64_t)hz * 8 *
 +			    ((int64_t)len - m->m_pkthdr.len);
 +#endif
++		/* a heap untouched for 65535 packets has gone cold */
++		if (si->overflow_timeout)
++			si->overflow_timeout--;
 +		CAKE_CHECK(si, "dequeue");
 +		return m;
 +	}
@@ -2643,22 +2768,27 @@ index 0000000..8225c6e
 +	struct dn_sch_cake_parms *cfg = &schk->cfg;
 +	struct cake_flow *flows;
 +	struct cake_host *hosts;
-+	uint32_t i, n, bw;
++	uint32_t *heap;
++	uint32_t i, j, n, bw;
 +
 +	n = cake_tin_cnt[cfg->diffserv] * cfg->flows_cnt;
 +	flows = cake_alloc(n, sizeof(struct cake_flow));
 +	hosts = cake_alloc(n, sizeof(struct cake_host));
-+	if (flows == NULL || hosts == NULL) {
++	heap = cake_alloc(CAKE_MAX_TINS * cfg->flows_cnt, sizeof(uint32_t));
++	if (flows == NULL || hosts == NULL || heap == NULL) {
 +		/* a failed rebuild is retried on every packet */
 +		if (ppsratecheck(&lastfail, &failpps, 1))
 +			D("cannot allocate memory for cake flows");
 +		free(flows, M_DUMMYNET);
 +		free(hosts, M_DUMMYNET);
++		free(heap, M_DUMMYNET);
 +		return ENOMEM ;
 +	}
 +
 +	si->flows = flows;
 +	si->hosts = hosts;
++	si->overflow_heap = heap;
++	si->overflow_timeout = 0;
 +	si->tin_cnt = cake_tin_cnt[cfg->diffserv];
 +	si->flows_cnt = cfg->flows_cnt;
 +	si->dscp_map = cake_dscp_maps[cfg->diffserv];
@@ -2690,6 +2820,14 @@ index 0000000..8225c6e
 +		flows[i].tin = i / si->flows_cnt;
 +		cobalt_vars_init(&flows[i].cvars);
 +	}
++	/* entry j * CAKE_MAX_TINS + t holds flow j of tin t, as in cake_init() */
++	for (j = 0; j < si->flows_cnt; j++)
++		for (i = 0; i < CAKE_MAX_TINS; i++) {
++			heap[j * CAKE_MAX_TINS + i] = j << 3 | i;
++			if (i < si->tin_cnt)
++				flows[i * si->flows_cnt + j].heap_idx =
++				    j * CAKE_MAX_TINS + i;
++		}
 +	return 0;
 +}
 +
@@ -2699,7 +2837,7 @@ index 0000000..8225c6e
 + */
 +static void
 +cake_free_tables(struct cake_si *si, struct cake_flow *flows,
-+	struct cake_host *hosts, uint32_t n)
++	struct cake_host *hosts, uint32_t *heap, uint32_t n)
 +{
 +	struct mbuf *m;
 +	uint32_t i;
@@ -2721,6 +2859,7 @@ index 0000000..8225c6e
 +		si->main_q.q_time = V_dn_cfg.curr_time;
 +	free(flows, M_DUMMYNET);
 +	free(hosts, M_DUMMYNET);
++	free(heap, M_DUMMYNET);
 +}
 +
 +/*
@@ -2738,6 +2877,7 @@ index 0000000..8225c6e
 +	struct dn_sch_cake_parms *cfg = &schk->cfg;
 +	struct cake_flow *flows = si->flows;
 +	struct cake_host *hosts = si->hosts;
++	uint32_t *heap = si->overflow_heap;
 +	uint32_t i, n, bw;
 +
 +	if (cake_tin_cnt[cfg->diffserv] == si->tin_cnt &&
@@ -2758,7 +2898,7 @@ index 0000000..8225c6e
 +		CAKE_COUNT(cake_rebuild_failures);
 +		return;		/* keep the old tables, try again later */
 +	}
-+	cake_free_tables(si, flows, hosts, n);
++	cake_free_tables(si, flows, hosts, heap, n);
 +	CAKE_COUNT(cake_rebuilds);
 +}
 +
@@ -2806,6 +2946,8 @@ index 0000000..8225c6e
 +
 +	s->flows = si->flows;
 +	s->hosts = si->hosts;
++	s->overflow_heap = si->overflow_heap;
++	s->overflow_timeout = si->overflow_timeout;
 +	cake_move_tins(s->tins, si->tins, si->tin_cnt);
 +	s->cfg = si->cfg;
 +	s->dscp_map = si->dscp_map;
@@ -2843,6 +2985,8 @@ index 0000000..8225c6e
 +
 +	si->flows = s->flows;
 +	si->hosts = s->hosts;
++	si->overflow_heap = s->overflow_heap;
++	si->overflow_timeout = s->overflow_timeout;
 +	cake_move_tins(si->tins, s->tins, s->tin_cnt);
 +	si->cfg = s->cfg;
 +	si->dscp_map = s->dscp_map;
@@ -2857,6 +3001,7 @@ index 0000000..8225c6e
 +	si->shaped = s->shaped;
 +	s->flows = NULL;
 +	s->hosts = NULL;
++	s->overflow_heap = NULL;
 +	CAKE_COUNT(cake_adoptions);
 +}
 +
@@ -2936,8 +3081,10 @@ index 0000000..8225c6e
 +			dn_free_pkts(si->flows[i].mq.head);
 +		free(si->flows , M_DUMMYNET);
 +		free(si->hosts, M_DUMMYNET);
++		free(si->overflow_heap, M_DUMMYNET);
 +		si->flows = NULL;
 +		si->hosts = NULL;
++		si->overflow_heap = NULL;
 +		cake_desc.ref_count--;
 +	}
 +
@@ -3052,8 +3199,10 @@ index 0000000..8225c6e
 +		mtx_unlock(&cake_instances_mtx);
 +		free(schk->stash.flows, M_DUMMYNET);
 +		free(schk->stash.hosts, M_DUMMYNET);
++		free(schk->stash.overflow_heap, M_DUMMYNET);
 +		schk->stash.flows = NULL;
 +		schk->stash.hosts = NULL;
++		schk->stash.overflow_heap = NULL;
 +	}
 +	if (schk->held) {
 +		schk->held = 0;
@@ -3241,10 +3390,10 @@ index 0000000..8225c6e
 +DECLARE_DNSCHED_MODULE(dn_cake, &cake_desc);
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.h b/sys/netpfil/ipfw/dn_sched_cake.h
 new file mode 100644
-index 0000000..04b2e4b
+index 0000000..1fa268b
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.h
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,294 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -3426,6 +3575,7 @@ index 0000000..04b2e4b
 +	uint8_t	tin;		/* tin this flow belongs to */
 +	uint8_t	active;		/* 1: flow is in a list (any set but NONE) */
 +	uint8_t	set;		/* CAKE_SET_* */
++	uint32_t heap_idx;	/* position in the overflow heap */
 +	struct cobalt_vars cvars;
 +	TAILQ_ENTRY(cake_flow) flowchain;
 +};
@@ -3480,6 +3630,8 @@ index 0000000..04b2e4b
 +struct cake_stash {
 +	struct cake_flow *flows;	/* NULL: nothing kept */
 +	struct cake_host *hosts;
++	uint32_t	*overflow_heap;
++	uint32_t	overflow_timeout;
 +	struct cake_tin	tins[CAKE_MAX_TINS];
 +	struct dn_sch_cake_parms cfg;
 +	const uint8_t	*dscp_map;
@@ -3512,6 +3664,12 @@ index 0000000..04b2e4b
 +
 +	struct cake_flow *flows; /* tin_cnt * flows_cnt flows */
 +	struct cake_host *hosts; /* tin_cnt * flows_cnt host slots */
++	/* the overflow drop's max-heap of flow backlogs, as sch_cake's: one
++	 * entry per flow of each of CAKE_MAX_TINS tins, (flow << 3) | tin,
++	 * kept up to date while it is warm (overflow_timeout dequeues after
++	 * the last overflow) and rebuilt when it is cold */
++	uint32_t *overflow_heap;
++	uint32_t overflow_timeout;
 +	struct cake_tin tins[CAKE_MAX_TINS];
 +	const uint8_t *dscp_map; /* DSCP -> tin */
 +	uint32_t tin_cnt;	/* geometry of the current tables */

@@ -179,6 +179,7 @@ struct cake_flow {
 	uint8_t	tin;		/* tin this flow belongs to */
 	uint8_t	active;		/* 1: flow is in a list (any set but NONE) */
 	uint8_t	set;		/* CAKE_SET_* */
+	uint32_t heap_idx;	/* position in the overflow heap */
 	struct cobalt_vars cvars;
 	TAILQ_ENTRY(cake_flow) flowchain;
 };
@@ -233,6 +234,8 @@ struct cake_tin {
 struct cake_stash {
 	struct cake_flow *flows;	/* NULL: nothing kept */
 	struct cake_host *hosts;
+	uint32_t	*overflow_heap;
+	uint32_t	overflow_timeout;
 	struct cake_tin	tins[CAKE_MAX_TINS];
 	struct dn_sch_cake_parms cfg;
 	const uint8_t	*dscp_map;
@@ -265,6 +268,12 @@ struct cake_si {
 
 	struct cake_flow *flows; /* tin_cnt * flows_cnt flows */
 	struct cake_host *hosts; /* tin_cnt * flows_cnt host slots */
+	/* the overflow drop's max-heap of flow backlogs, as sch_cake's: one
+	 * entry per flow of each of CAKE_MAX_TINS tins, (flow << 3) | tin,
+	 * kept up to date while it is warm (overflow_timeout dequeues after
+	 * the last overflow) and rebuilt when it is cold */
+	uint32_t *overflow_heap;
+	uint32_t overflow_timeout;
 	struct cake_tin tins[CAKE_MAX_TINS];
 	const uint8_t *dscp_map; /* DSCP -> tin */
 	uint32_t tin_cnt;	/* geometry of the current tables */
