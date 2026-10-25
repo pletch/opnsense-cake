@@ -15,7 +15,7 @@
 #   memlimit    bytes queued under a UDP flood stay below a 32 KB limit
 #   ingress     under a UDP flood, drops are charged to the rate, so less
 #               is delivered than in egress mode, and the pipe passes
-#               traffic again right after (the debt is capped)
+#               traffic again right after (the debt is bounded)
 #   rate        a pipe rate changed on its own, without reconfiguring the
 #               scheduler, reaches CAKE's tin parameters
 #   diffserv8, precedence

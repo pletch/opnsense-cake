@@ -8,6 +8,7 @@
 # PKT_SCHED point to copies.
 #
 #   test/sched-diff.sh [runs [seconds [seed]]]
+#   test/sched-diff.sh pace [seconds [hz ...]]
 #
 # SD_TRACE=N prints both sides' tin states from packet N on.
 set -eu
@@ -32,25 +33,41 @@ python3 -I "$TOP/test/sched-diff/extract-ours.py" \
     "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" >"$WRK/ours-cake.inc"
 
 # How much of each implementation is its production source: every line
-# of the extracted code that is not a line of the source, i.e. the
-# documented substitutions (sch_cake: DSCP from the trace instead of
-# parsing it; dn_sched_cake: cake_hash_flow() renamed, its replacement in
-# ours_shim.h returning the trace's hashes).
+# of the extracted code not matched, in order, to the source (a line
+# found elsewhere in the source does not count). Only the
+# documented substitutions are allowed (sch_cake: DSCP from the trace
+# instead of parsing it; dn_sched_cake: cake_hash_flow() renamed, its
+# replacement in ours_shim.h returning the trace's hashes); any other
+# line fails the comparison before it runs.
 python3 -I - "$SCH_CAKE" "$WRK/linux-cake.inc" "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" \
     "$WRK/ours-cake.inc" "$PKT_SCHED" <<'EOF'
-import sys
+import difflib, sys
 lsrc, linc, osrc, oinc, uapi = sys.argv[1:6]
-for name, srcs, inc in (('sch_cake', (lsrc, uapi), linc),
+allowed = {
+    'sch_cake': [
+        '/* sched-diff: the DSCP comes from the trace (washing is not compared) */',
+        '\t(void)wash;',
+        '\treturn skb->trace->dscp;'],
+    'dn_sched_cake': [
+        '__attribute__((unused)) cake_hash_flow_kernel(struct mbuf *m, uint32_t perturbation, uint32_t mode,'],
+}
+bad = 0
+for name, srcs, inc in (('sch_cake', (uapi, lsrc), linc),
                         ('dn_sched_cake', (osrc,), oinc)):
-    src = set()
-    for f in srcs:
-        src.update(open(f).read().split('\n'))
+    src = [x for f in srcs for x in open(f).read().split('\n') if x.strip()]
     lines = [x for x in open(inc).read().split('\n') if x.strip()]
-    extra = [x for x in lines if x not in src]
+    matched = set()
+    sm = difflib.SequenceMatcher(None, src, lines, autojunk=False)
+    for b in sm.get_matching_blocks():
+        matched.update(range(b.b, b.b + b.size))
+    extra = [x for i, x in enumerate(lines) if i not in matched]
     print('%s: %d of %d extracted lines are its source verbatim; not:'
           % (name, len(lines) - len(extra), len(lines)))
     for x in extra:
-        print('    | ' + x)
+        ok = x in allowed[name]
+        bad += not ok
+        print('    | ' + x + ('' if ok else '    <- not a documented substitution'))
+sys.exit(1 if bad else 0)
 EOF
 
 # the ACK filter's scan cap is a deliberate addition: lift it, so that

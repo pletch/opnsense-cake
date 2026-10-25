@@ -11,6 +11,7 @@ static struct {
 	struct cake_schk c;
 } sched;
 static struct cake_si *si;
+static uint64_t sched_time;	/* the pipe's last service, in ticks */
 
 static void
 o_init(const struct sd_config *c)
@@ -34,12 +35,16 @@ o_init(const struct sd_config *c)
 	 * addition (memory per packet), kept out of the way here */
 	sched.c.cfg.limit = 1000000;
 	sched.c.gen = 1;
+	/* stepped with sch_cake's releases, the real time is the link's;
+	 * sched-diff link and pace turn the link clock on */
+	cake_link_clock = 0;
 
 	si = calloc(1, sizeof(*si));
 	si->_si.sched = &sched.s;
 	set_oid(&si->main_q.ni.oid, DN_QUEUE, sizeof(si->main_q));
 	si->main_q._si = &si->_si;
 	cake_new_tables(si, &sched.c);
+	sched_time = trace_now_ns * hz / 1000000000;
 }
 
 static void
@@ -76,6 +81,45 @@ static uint32_t
 o_qlen(void)
 {
 	return (si->main_q.ni.length);
+}
+
+/*
+ * sched-diff pace: dummynet's own release mechanism instead of sch_cake's
+ * shaper. As serve_sched() on each tick at kern.hz=khz: the pipe's credit
+ * (bits * hz) grows by the bandwidth per tick elapsed, and the scheduler
+ * is asked for packets while it is not negative, each costing its length.
+ */
+void
+ours_set_hz(int khz)
+{
+	hz = khz;
+	sched_time = trace_now_ns * hz / 1000000000;
+	si->_si.credit = 0;
+}
+
+void
+ours_set_link_clock(int on)
+{
+	cake_link_clock = on;
+}
+
+int
+ours_serve(void (*sent)(struct trace_pkt *, int))
+{
+	uint64_t now = trace_now_ns * hz / 1000000000;
+	struct trace_pkt *p;
+	int n = 0, t;
+
+	si->_si.credit += (int64_t)(now - sched_time) * sched.s.link.bandwidth;
+	sched_time = now;
+	while (si->_si.credit >= 0 && (p = o_dequeue(&t)) != NULL) {
+		si->_si.credit -= (int64_t)hz * p->len * 8;
+		sent(p, t);
+		n++;
+	}
+	if (si->_si.credit >= 0)	/* idle: no credit saved up */
+		si->_si.credit = 0;
+	return (n);
 }
 
 #ifdef CAKE_DEBUG

@@ -144,6 +144,23 @@ l_debug_flow(uint32_t flow)
 		}
 }
 
+/*
+ * sched-diff link: when sch_cake's shaper next lets a packet out, as its
+ * cake_dequeue() checks it (the earlier of the shaper and the failsafe
+ * time); UINT64_MAX while nothing is queued.
+ */
+uint64_t
+linux_next_release(void)
+{
+	struct cake_sched_data *qd = qdisc_priv(sch);
+	uint64_t t = (uint64_t)qd->time_next_packet;
+	uint64_t f = (uint64_t)qd->failsafe_next_packet;
+
+	if (sch->q.qlen == 0)
+		return (UINT64_MAX);
+	return (t < f ? t : f);
+}
+
 const struct sched_impl linux_impl = {
 	"sch_cake", l_init, l_enqueue, l_dequeue, l_qlen, l_debug, l_debug_flow
 };

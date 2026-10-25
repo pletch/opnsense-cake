@@ -4,6 +4,14 @@
  * packet, which one each sends, from which tin, and which it drops.
  *
  *   sched-diff [runs [seconds [seed]]]
+ *   sched-diff link [runs [seconds [seed]]]
+ *   sched-diff pace [seconds [hz ...]]
+ *   sched-diff pace-random [hz [runs [seconds [seed]]]]
+ *
+ * link: the same comparison with dn_sched_cake's link clock on. The clock
+ * goes from event to event, each arrival and each moment sch_cake's
+ * shaper lets a packet out, rather than in steps: so sch_cake decides at
+ * the times the link clock computes, and the two must still match.
  *
  * Linux's cake_dequeue() contains the link shaper, dn_sched_cake leaves
  * that to the dummynet pipe; so the clock advances in 10 us steps, and
@@ -211,6 +219,17 @@ struct totals {
 };
 
 static int run_ingress;			/* the current run is in ingress mode */
+static int pace_hz;		/* pace mode: dummynet's ticks, not lockstep */
+static int link_mode;		/* link mode: event to event, link clock on */
+uint64_t linux_next_release(void);
+static uint64_t tin_bytes[2][8];	/* pace mode: [side][tin] sent */
+static void pace_tin_sent(struct trace_pkt *p, int tin)
+{
+	tin_bytes[1][tin] += p->len;
+}
+void ours_set_hz(int);
+void ours_set_link_clock(int);
+int ours_serve(void (*)(struct trace_pkt *, int));
 
 
 /* SD_PKT=id: the packets of id's flow around it, with each side's fate */
@@ -247,6 +266,20 @@ dump_flow(struct trace_pkt *pkts, size_t npkts)
 	}
 }
 
+/* link mode: the next arrival or sch_cake release, whichever is first */
+static uint64_t
+next_event(struct gen_flow *fl, int nflows, int arrivals)
+{
+	uint64_t t = linux_next_release();
+	int i;
+
+	for (i = 0; arrivals && i < nflows; i++)
+		if (fl[i].next_ns < t)
+			t = fl[i].next_ns;
+	/* never stand still: a release due now was just made */
+	return (t > trace_now_ns ? t : trace_now_ns + 1);
+}
+
 /* one run; returns 0 if every decision matched */
 static int
 run(uint64_t seed, int secs, struct totals *t, int verbose)
@@ -259,6 +292,7 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 	uint64_t end, step = 10000;
 	int nflows, m, fm, lk, acks, i, tl, to, load;
 	uint32_t id = 0;
+	struct trace_pkt *pl;
 
 	rng_gen = seed;
 	rng_linux = rng_ours = seed ^ 0xabcdef;
@@ -325,9 +359,20 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 
 	linux_impl.init(&c);
 	ours_impl.init(&c);
+	if (link_mode)
+		ours_set_link_clock(1);
+	if (pace_hz) {
+		trace_now_ns = 1000000;
+		ours_set_hz(pace_hz);
+		ours_set_link_clock(getenv("SD_LINK_CLOCK") != NULL &&
+		    atoi(getenv("SD_LINK_CLOCK")) != 0);
+		memset(tin_bytes, 0, sizeof(tin_bytes));
+	}
 
 	end = (uint64_t)secs * 1000000000ULL;
-	for (trace_now_ns = 1000000; trace_now_ns < end; trace_now_ns += step) {
+	for (trace_now_ns = 1000000; trace_now_ns < end;
+	    trace_now_ns = link_mode ? next_event(fl, nflows, npkts < cap) :
+	    trace_now_ns + step) {
 		/* arrivals up to now, into both */
 		for (i = 0; i < nflows; i++) {
 			struct gen_flow *f = &fl[i];
@@ -349,10 +394,19 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 				f->next_ns += f->gap_ns / 2 + range(0, f->gap_ns);
 			}
 		}
+		if (pace_hz) {
+			while ((pl = linux_impl.dequeue(&tl)) != NULL)
+				tin_bytes[0][tl] += pl->len;
+			if (trace_now_ns * pace_hz / 1000000000 !=
+			    (trace_now_ns - step) * pace_hz / 1000000000)
+				ours_serve(pace_tin_sent);
+			continue;
+		}
 		/* everything sch_cake's shaper lets out now */
 		for (;;) {
-			struct trace_pkt *pl = linux_impl.dequeue(&tl), *po;
+			struct trace_pkt *po;
 
+			pl = linux_impl.dequeue(&tl);
 			if (pl == NULL)
 				break;
 			po = ours_impl.dequeue(&to);
@@ -443,8 +497,132 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		t->steps++;
 	}
 	t->drops += ndrops_linux;
+	if (pace_hz) {
+		/* each tin's share of the link, as fractions of the rate */
+		double worst = 0, d, secs_run = (end - 1000000) / 1e9;
+		int wt = 0;
+
+		for (i = 0; i < 8; i++) {
+			d = ((double)tin_bytes[1][i] - tin_bytes[0][i]) * 8 /
+			    secs_run / c.rate;
+			if (d < 0 ? -d > worst : d > worst) {
+				worst = d < 0 ? -d : d;
+				wt = i;
+			}
+		}
+		printf("pace %4" PRIu64 " %-10s %3" PRIu64 " Mbit/s%s: worst tin %d"
+		    " %+.2f%% of the rate (sch_cake %.2f, dn_sched_cake %.2f Mbit/s;"
+		    " drops %d, %d)\n",
+		    seed, modes[m].name, c.rate / 1000000, c.ingress ? " ingress" : "",
+		    wt, 100.0 * ((double)tin_bytes[1][wt] - tin_bytes[0][wt]) * 8 /
+		    secs_run / c.rate, tin_bytes[0][wt] * 8 / secs_run / 1e6,
+		    tin_bytes[1][wt] * 8 / secs_run / 1e6, ndrops_linux, ndrops_ours);
+	}
 	free(pkts);
 	return (0);
+}
+
+/*
+ * pace: how the release mechanism alone changes the tins' shares, with
+ * contention.sh's bulk+voice scenario: a 5 Mbit/s isochronous Bulk flow
+ * (1278-byte datagrams every 2 ms) against more Voice (full-size TCP
+ * segments) than the 50 Mbit/s link takes, in diffserv4. sch_cake sends
+ * whenever its shaper allows, as on Linux; dn_sched_cake is asked for
+ * packets on each tick of kern.hz, as by a dummynet pipe. Each side gets
+ * its own copy of the trace.
+ */
+static uint64_t pace_bytes[2][2];	/* [side][flow] */
+
+static void
+pace_sent(struct trace_pkt *p, int tin)
+{
+	(void)tin;
+	pace_bytes[1][p->flow - 1000] += p->len;
+}
+
+static void
+pace(int secs, int khz)
+{
+	struct gen_flow fl[2];
+	struct sd_config c;
+	struct trace_pkt *lp, *op, *p;
+	size_t npkts = 0, cap = 400000;
+	uint64_t end = (uint64_t)secs * 1000000000ULL, warm = 1000000000ULL;
+	uint32_t id = 0;
+	int i, t;
+
+	rng_gen = 1;
+	rng_linux = rng_ours = 1 ^ 0xabcdef;
+	ndrops_linux = ndrops_ours = 0;
+	memset(pace_bytes, 0, sizeof(pace_bytes));
+	memset(&c, 0, sizeof(c));
+	c.diffserv = 2;
+	c.flow_mode = 7;
+	c.rate = 50000000;
+	memset(fl, 0, sizeof(fl));
+	for (i = 0; i < 2; i++) {
+		fl[i].proto.flow = 1000 + i;
+		fl[i].proto.src = 1;
+		fl[i].proto.dst = 101;
+		fl[i].window = 65535;
+	}
+	fl[0].kind = FLOW_SPARSE;
+	fl[0].proto.dscp = 8;			/* CS1: Bulk */
+	fl[0].len_lo = fl[0].len_hi = 1278;
+	fl[0].gap_ns = 2000000;
+	fl[1].kind = FLOW_DATA;
+	fl[1].proto.dscp = 46;			/* EF: Voice */
+	fl[1].len_lo = fl[1].len_hi = 1500;
+	fl[1].gap_ns = 1500ULL * 8 * 1000000000 / 60000000;
+	lp = calloc(cap, sizeof(*lp));
+	op = calloc(cap, sizeof(*op));
+
+	trace_now_ns = 1000000;
+	linux_impl.init(&c);
+	ours_impl.init(&c);
+	ours_set_hz(khz);
+	ours_set_link_clock(getenv("SD_LINK_CLOCK") != NULL &&
+	    atoi(getenv("SD_LINK_CLOCK")) != 0);
+	for (; trace_now_ns < end; trace_now_ns += 10000) {
+		for (i = 0; i < 2; i++) {
+			struct gen_flow *f = &fl[i];
+
+			while (f->next_ns <= trace_now_ns && npkts < cap) {
+				p = &lp[npkts];
+				*p = f->proto;
+				p->id = ++id;
+				build(p, f);
+				op[npkts++] = *p;
+				linux_impl.enqueue(p);
+				ours_impl.enqueue(&op[npkts - 1]);
+				f->next_ns += f->gap_ns;
+			}
+		}
+		while ((p = linux_impl.dequeue(&t)) != NULL)
+			if (trace_now_ns >= warm)
+				pace_bytes[0][p->flow - 1000] += p->len;
+		/* dummynet's tick: from the start of each tick on */
+		if (trace_now_ns * khz / 1000000000 !=
+		    (trace_now_ns - 10000) * khz / 1000000000) {
+			if (trace_now_ns >= warm)
+				ours_serve(pace_sent);
+			else {
+				uint64_t keep[2] = { pace_bytes[1][0], pace_bytes[1][1] };
+
+				ours_serve(pace_sent);
+				pace_bytes[1][0] = keep[0];
+				pace_bytes[1][1] = keep[1];
+			}
+		}
+	}
+	printf("hz %6d: Bulk sch_cake %.2f, dn_sched_cake %.2f Mbit/s;"
+	    " Voice sch_cake %.2f, dn_sched_cake %.2f Mbit/s\n", khz,
+	    pace_bytes[0][0] * 8 / ((end - warm) / 1e3),
+	    pace_bytes[1][0] * 8 / ((end - warm) / 1e3),
+	    pace_bytes[0][1] * 8 / ((end - warm) / 1e3),
+	    pace_bytes[1][1] * 8 / ((end - warm) / 1e3));
+	free(lp);
+	free(op);
 }
 
 /*
@@ -464,6 +642,33 @@ main(int argc, char **argv)
 	int r, bad = 0, verbose = getenv("SD_VERBOSE") != NULL;
 	uint64_t before;
 
+	if (argc > 1 && strcmp(argv[1], "link") == 0) {
+		link_mode = 1;
+		argv++;
+		argc--;
+		runs = argc > 1 ? atoi(argv[1]) : 50;
+		secs = argc > 2 ? atoi(argv[2]) : 2;
+		seed = argc > 3 ? strtoull(argv[3], NULL, 0) : 1;
+	}
+	if (argc > 1 && strcmp(argv[1], "pace-random") == 0) {
+		/* sched-diff pace-random hz [runs [seconds [seed]]] */
+		pace_hz = argc > 2 ? atoi(argv[2]) : 1000;
+		runs = argc > 3 ? atoi(argv[3]) : 50;
+		secs = argc > 4 ? atoi(argv[4]) : 2;
+		seed = argc > 5 ? strtoull(argv[5], NULL, 0) : 1;
+		memset(&t, 0, sizeof(t));
+		for (r = 0; r < runs; r++)
+			run(seed + r, secs, &t, verbose);
+		return (0);
+	}
+	if (argc > 1 && strcmp(argv[1], "pace") == 0) {
+		secs = argc > 2 ? atoi(argv[2]) : 10;
+		if (argc <= 3)
+			pace(secs, 1000);
+		for (r = 3; r < argc; r++)
+			pace(secs, atoi(argv[r]));
+		return (0);
+	}
 	memset(&t, 0, sizeof(t));
 	for (r = 0; r < runs; r++) {
 		before = t.sent;

@@ -1,7 +1,9 @@
 #!/bin/sh
 # Bandwidth sharing between tins under contention (diffserv4, 50 Mbit/s
 # download), on the lul-setup.sh bench or, for comparison, on Linux's own
-# sch_cake between two network namespaces on the client VM:
+# sch_cake: between two network namespaces on the client VM (linux), or on
+# the bench's own path (path), shaping the client VM's interfaces with the
+# router's pipes opened to 1 Gbit/s, so that both see the same TCP path:
 #
 #   voice+bulk     a 5 Mbit/s isochronous Voice flow (EF, irtt) against a
 #                  greedy Bulk download (CS1): Voice should get all it
@@ -11,7 +13,7 @@
 #   voice+all      the Voice flow against greedy Video (AF41), Best Effort
 #                  and Bulk downloads at once
 #
-#   test/contention.sh [bench|linux]
+#   test/contention.sh [bench|linux|path]
 set -u
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
@@ -24,17 +26,27 @@ cli() {
 	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
 }
 
+opn() {
+	tag=R$(date +%N)
+	"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
+	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
+	    >/dev/null 2>&1
+}
+
 case "$TARGET" in
 bench)
 	"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
-	opn() {
-		tag=R$(date +%N)
-		"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-		    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
-		    >/dev/null 2>&1
-	}
 	opn "cd /root/work && DOWN=50Mbit/s UP=50Mbit/s ./lul-setup.sh" 60
 	opn "/root/work/lul-sched.sh cake diffserv4"
+	C=cli S=srv H=10.10.2.2
+	;;
+path)
+	"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
+	opn "cd /root/work && DOWN=1Gbit/s UP=1Gbit/s ./lul-setup.sh" 60
+	opn "/root/work/lul-sched.sh fifo"
+	cli 'for x in cli:enp0s3 srv:enp0s4; do
+		sudo ip netns exec ${x%%:*} /usr/sbin/tc qdisc replace dev ${x#*:} root cake bandwidth 50mbit diffserv4
+	done'
 	C=cli S=srv H=10.10.2.2
 	;;
 linux)
@@ -52,7 +64,7 @@ linux)
 	C=lca S=lcb H=10.99.0.2
 	;;
 *)
-	echo "usage: $0 [bench|linux]" >&2
+	echo "usage: $0 [bench|linux|path]" >&2
 	exit 1
 	;;
 esac
@@ -92,6 +104,9 @@ run voice+bulk 0xb8 0x20
 run bulk+voice 0x20 0xb8
 run voice+all 0xb8 0x88 0x00 0x20
 
+[ "$TARGET" = path ] && cli 'for x in cli:enp0s3 srv:enp0s4; do
+	sudo ip netns exec ${x%%:*} /usr/sbin/tc qdisc replace dev ${x#*:} root fq_codel
+done'
 [ "$TARGET" = linux ] && cli 'sudo pkill -f "irtt server -b 10.99"; sudo pkill -x netserver;
     sudo ip netns del lca; sudo ip netns del lcb'
 exit 0
