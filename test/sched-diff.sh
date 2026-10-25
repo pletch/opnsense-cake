@@ -31,7 +31,31 @@ fi
 python3 -I "$TOP/test/sched-diff/extract-ours.py" \
     "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" >"$WRK/ours-cake.inc"
 
-${CC:-cc} -O2 -DCAKE_DEBUG -I"$TOP/test/sched-diff" -I"$WRK" \
+# How much of each implementation is its production source: every line
+# of the extracted code that is not a line of the source, i.e. the
+# documented substitutions (sch_cake: DSCP from the trace instead of
+# parsing it; dn_sched_cake: cake_hash_flow() renamed, its replacement in
+# ours_shim.h returning the trace's hashes).
+python3 -I - "$SCH_CAKE" "$WRK/linux-cake.inc" "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" \
+    "$WRK/ours-cake.inc" "$PKT_SCHED" <<'EOF'
+import sys
+lsrc, linc, osrc, oinc, uapi = sys.argv[1:6]
+for name, srcs, inc in (('sch_cake', (lsrc, uapi), linc),
+                        ('dn_sched_cake', (osrc,), oinc)):
+    src = set()
+    for f in srcs:
+        src.update(open(f).read().split('\n'))
+    lines = [x for x in open(inc).read().split('\n') if x.strip()]
+    extra = [x for x in lines if x not in src]
+    print('%s: %d of %d extracted lines are its source verbatim; not:'
+          % (name, len(lines) - len(extra), len(lines)))
+    for x in extra:
+        print('    | ' + x)
+EOF
+
+# the ACK filter's scan cap is a deliberate addition: lift it, so that
+# the comparison holds at any queue depth
+${CC:-cc} -O2 -DCAKE_DEBUG -DCAKE_ACK_SCAN=1000000 -I"$TOP/test/sched-diff" -I"$WRK" \
     -I"$TOP/sys/netpfil/ipfw" -Wall -Wno-unused-function \
     -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable \
     -o "$WRK/sched-diff" "$TOP/test/sched-diff/main.c" \

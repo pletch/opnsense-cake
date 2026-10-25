@@ -13,9 +13,24 @@ struct trace_pkt {
 	uint32_t	flow, src, dst;	/* flow (ports) and host identities */
 	uint8_t		dscp;		/* 6-bit DSCP */
 	uint8_t		ecn;		/* ECN-capable */
-	uint16_t	len;		/* bytes */
+	uint16_t	len;		/* bytes, IP header included */
 	/* per side: 0 queued, 1 sent, 2 dropped */
 	uint8_t		linux_state, ours_state;
+	/* the IPv4 and TCP headers, as both sides parse them */
+	uint8_t		hdr[128];
+};
+
+/* the settings of a run, beyond diffserv and flow isolation */
+struct sd_config {
+	int		diffserv;	/* dn_sched_cake's CAKE_DIFFSERV_* */
+	int		flow_mode;	/* CAKE_FLOW_*, the same in both */
+	uint64_t	rate;		/* bit/s */
+	int		overhead;	/* bytes; with mpu and atm: compensation */
+	int		mpu;
+	int		atm;		/* 0 none, 1 ATM, 2 PTM, the same in both */
+	int		ingress;
+	int		ack_filter;	/* 0 off, 1 on, 2 aggressive */
+	uint32_t	memlimit;	/* bytes, a multiple of 1024; 0 default */
 };
 
 extern uint64_t trace_now_ns;
@@ -29,12 +44,13 @@ void trace_dropped_ours(struct trace_pkt *);
 /* one implementation, behind a common interface */
 struct sched_impl {
 	const char *name;
-	void	(*init)(int diffserv, int flow_mode, uint64_t rate_bps);
+	void	(*init)(const struct sd_config *);
 	void	(*enqueue)(struct trace_pkt *);
 	/* the packet sent now, or NULL; *tin set to its tin */
 	struct trace_pkt *(*dequeue)(int *tin);
 	uint32_t (*qlen)(void);
 	void	(*debug)(void);		/* print the tins' state */
+	void	(*debug_flow)(uint32_t flow);	/* print its queued packets */
 };
 extern const struct sched_impl linux_impl, ours_impl;
 

@@ -69,31 +69,183 @@ range(uint64_t lo, uint64_t hi)
 	return (lo + mix(&rng_gen) % (hi - lo + 1));
 }
 
-/* diffserv modes: name, Linux's number, ours, the DSCPs to use */
+/* diffserv modes (dn_sched_cake's numbers) and the DSCPs to use */
 static const struct {
 	const char *name;
-	int linux_mode, ours_mode;
+	int mode;
 	uint8_t dscp[5];
 } modes[] = {
-	{ "besteffort", 3, 0, { 0, 0, 0, 0, 0 } },
-	{ "diffserv3", 0, 1, { 0, 8, 46, 0, 0 } },
-	{ "diffserv4", 1, 2, { 0, 8, 34, 46, 0 } },
+	{ "besteffort", 0, { 0, 0, 0, 0, 0 } },
+	{ "diffserv3", 1, { 0, 8, 46, 0, 0 } },
+	{ "diffserv4", 2, { 0, 8, 34, 46, 0 } },
 };
+
+/* overhead presets: name, overhead, mpu, atm (as tc-cake(8)'s keywords) */
+static const struct { const char *name; int overhead, mpu, atm; } links[] = {
+	{ "raw", 0, 0, 0 }, { "ethernet", 38, 84, 0 }, { "docsis", 18, 64, 0 },
+	{ "pppoe-ptm", 30, 0, 2 }, { "atm", 0, 0, 1 }, { "random", 0, 0, 0 },
+};
+
+static void
+put16(uint8_t *b, uint16_t v)
+{
+	b[0] = v >> 8;
+	b[1] = v;
+}
+
+static void
+put32(uint8_t *b, uint32_t v)
+{
+	put16(b, v >> 16);
+	put16(b + 2, v);
+}
 static const struct { const char *name; int mode; } flow_modes[] = {
 	{ "flows", 4 }, { "dual-srchost", 5 }, { "dual-dsthost", 6 },
 	{ "triple-isolate", 7 },
 };
 
+enum { FLOW_DATA, FLOW_SPARSE, FLOW_ACKS };
+
 struct gen_flow {
 	struct trace_pkt proto;
+	int kind;
 	uint64_t next_ns, gap_ns;	/* next arrival, mean gap */
 	uint16_t len_lo, len_hi;
+	uint32_t seq, ack, tsval;	/* TCP state */
+	uint16_t window;
+	int ts;				/* sends timestamps */
 };
+
+/*
+ * The packet's IPv4 and TCP (or UDP) headers and length: data segments
+ * for bulk flows, datagrams for sparse ones, and for ACK streams mostly
+ * pure ACKs with growing ack numbers, timestamps, SACK blocks, duplicate
+ * ACKs, ECN flags and the odd window change or data segment, so that the
+ * ACK filter has every case to decide.
+ */
+static void
+build(struct trace_pkt *p, struct gen_flow *f)
+{
+	uint8_t *ip = p->hdr, *th = p->hdr + 20, *o = th + 20;
+	int olen = 0, payload = 0, flags = 0x10, i, n;
+
+	memset(p->hdr, 0, sizeof(p->hdr));
+	ip[0] = 0x45;
+	ip[1] = (uint8_t)(p->dscp << 2 | (p->ecn ? 2 : 0));
+	put16(ip + 6, 0x4000);
+	ip[8] = 64;
+	put32(ip + 12, 0x0a000000 | p->src);
+	put32(ip + 16, 0x0a010000 | p->dst);
+	put16(th, (uint16_t)(10000 + p->flow));
+	put16(th + 2, 443);
+
+	if (f->kind == FLOW_SPARSE) {
+		ip[9] = 17;
+		p->len = (uint16_t)range(f->len_lo, f->len_hi);
+		put16(th + 4, p->len - 20);
+		put16(ip + 2, p->len);
+		return;
+	}
+	ip[9] = 6;
+	if (f->ts) {
+		o[0] = o[1] = 1;
+		o[2] = 8;
+		o[3] = 10;
+		f->tsval += (uint32_t)range(0, 2);
+		put32(o + 4, f->tsval);
+		put32(o + 8, f->tsval - 40);
+		olen = 12;
+	}
+	if (f->kind == FLOW_DATA) {
+		flags |= 0x08;
+		payload = (int)range(f->len_lo, f->len_hi) - 40 - olen;
+		if (payload < 1)
+			payload = 1;
+	} else {
+		if (range(0, 9) == 0)
+			n = 0;			/* duplicate ACK */
+		else
+			n = (int)range(1, 4);
+		f->ack += (uint32_t)n * 1448;
+		if ((n == 0 || range(0, 9) == 0) && olen + 2 + 8 <= 40) {
+			int blocks = (int)range(1, (40 - olen - 4) / 8);
+
+			o[olen] = o[olen + 1] = 1;
+			o[olen + 2] = 5;
+			o[olen + 3] = (uint8_t)(2 + 8 * blocks);
+			for (i = 0; i < blocks; i++) {
+				uint32_t l = f->ack + 1448 * (uint32_t)range(1, 20);
+
+				put32(o + olen + 4 + 8 * i, l);
+				put32(o + olen + 8 + 8 * i, l + 1448 *
+				    (uint32_t)range(1, 4));
+			}
+			olen += 4 + 8 * blocks;
+		}
+		if (range(0, 9) == 0)
+			flags |= 0x40;			/* ECE */
+		if (range(0, 49) == 0)
+			flags |= 0x80;			/* CWR */
+		if (range(0, 29) == 0) {
+			flags |= 0x08;
+			payload = (int)range(1, 1000);
+		}
+		if (range(0, 49) == 0)
+			f->window = (uint16_t)range(1000, 65535);
+	}
+	put32(th + 4, f->seq);
+	put32(th + 8, f->ack);
+	th[12] = (uint8_t)((5 + olen / 4) << 4);
+	th[13] = (uint8_t)flags;
+	put16(th + 14, f->window);
+	f->seq += (uint32_t)payload;
+	p->len = (uint16_t)(20 + 20 + olen + payload);
+	put16(ip + 2, p->len);
+}
 
 struct totals {
 	uint64_t sent, drops, steps;
 	uint64_t mismatches;
+	int ingress_runs, ingress_mismatches;
+	uint64_t ingress_sent;		/* packets matched before diverging */
 };
+
+static int run_ingress;			/* the current run is in ingress mode */
+
+
+/* SD_PKT=id: the packets of id's flow around it, with each side's fate */
+static void
+dump_flow(struct trace_pkt *pkts, size_t npkts)
+{
+	const char *e = getenv("SD_PKT");
+	uint32_t id, i, flow;
+
+	if (e == NULL || (id = (uint32_t)atoi(e)) == 0 || id > npkts)
+		return;
+	flow = pkts[id - 1].flow;
+	for (i = id > 150 ? id - 150 : 1; i <= id + 100 && i <= npkts; i++) {
+		struct trace_pkt *p = &pkts[i - 1];
+		const uint8_t *th = p->hdr + 20;
+		int hl = (th[12] >> 4) * 4, o, k;
+
+		if (p->flow != flow)
+			continue;
+		printf("    %6u len %4u ack %10u flags %02x win %5u %s %s opts:",
+		    p->id, p->len, (th[8] << 24 | th[9] << 16 | th[10] << 8 | th[11]),
+		    th[13], th[14] << 8 | th[15],
+		    p->linux_state == 2 ? "L-drop" : p->linux_state == 1 ? "L-sent" : "L-q   ",
+		    p->ours_state == 2 ? "O-drop" : p->ours_state == 1 ? "O-sent" : "O-q   ");
+		for (o = 20; o < hl; ) {
+			k = th[o];
+			if (k == 0) break;
+			if (k == 1) { o++; continue; }
+			printf(" %d/%d", k, th[o + 1]);
+			if (k == 8) printf("(%u)", th[o+2] << 24 | th[o+3] << 16 | th[o+4] << 8 | th[o+5]);
+			o += th[o + 1] < 2 ? 2 : th[o + 1];
+		}
+		printf("\n");
+	}
+}
 
 /* one run; returns 0 if every decision matched */
 static int
@@ -101,22 +253,41 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 {
 	const int nflows_max = 48;
 	struct gen_flow fl[48];
+	struct sd_config c;
 	struct trace_pkt *pkts;
-	size_t npkts = 0, cap = 400000;
-	uint64_t rate, end, step = 10000;
-	int nflows, m, fm, i, tl, to, cd = 0;
+	size_t npkts = 0, cap = 600000;
+	uint64_t end, step = 10000;
+	int nflows, m, fm, lk, acks, i, tl, to, load;
 	uint32_t id = 0;
 
 	rng_gen = seed;
 	rng_linux = rng_ours = seed ^ 0xabcdef;
 	ndrops_linux = ndrops_ours = 0;
+	memset(&c, 0, sizeof(c));
 	m = (int)range(0, 2);
 	fm = (int)range(0, 3);
-	rate = range(50, 200) * 1000000ULL;
-	nflows = (int)range(1, nflows_max);
+	c.diffserv = modes[m].mode;
+	c.flow_mode = flow_modes[fm].mode;
+	c.rate = range(50, 200) * 1000000ULL;
+	lk = (int)range(0, 5);
+	c.overhead = links[lk].overhead;
+	c.mpu = links[lk].mpu;
+	c.atm = links[lk].atm;
+	if (lk == 5) {
+		c.overhead = (int)range(0, 70) - 10;
+		c.mpu = (int)range(0, 96);
+	}
+	c.ingress = range(0, 9) < 3;
+	run_ingress = c.ingress;
+	t->ingress_runs += c.ingress;
+	c.ack_filter = (int)range(0, 2);
+	if (range(0, 9) < 4)	/* a small byte limit, so overflow drops happen */
+		c.memlimit = (uint32_t)range(32, 512) * 1024;
+	load = (int)range(10, 16);		/* offered load, tenths of the rate */
+	acks = range(0, 1) ? (int)range(1, 6) : 0;
+	nflows = (int)range(1 + acks, nflows_max);
 	pkts = calloc(cap, sizeof(*pkts));
 
-	/* flows: mostly bulk at a share of the rate, some sparse */
 	for (i = 0; i < nflows; i++) {
 		struct gen_flow *f = &fl[i];
 		uint64_t share;
@@ -127,23 +298,33 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		f->proto.dst = 101 + (uint32_t)range(0, 3);
 		f->proto.dscp = modes[m].dscp[range(0, 4)];
 		f->proto.ecn = range(0, 1);
-		if (range(0, 3) == 0) {		/* sparse */
+		f->seq = (uint32_t)mix(&rng_gen);
+		f->ack = (uint32_t)mix(&rng_gen);
+		f->tsval = (uint32_t)mix(&rng_gen);
+		f->window = 65535;
+		f->ts = range(0, 3) != 0;
+		if (i < acks) {			/* an ACK stream, a few % */
+			f->kind = FLOW_ACKS;
+			f->gap_ns = 8 * 70 * 1000000000ULL /
+			    (c.rate * range(1, 5) / 100);
+		} else if (range(0, 3) == 0) {	/* sparse datagrams */
+			f->kind = FLOW_SPARSE;
 			f->len_lo = 64;
 			f->len_hi = 300;
 			f->gap_ns = range(2, 40) * 1000000ULL;
-		} else {			/* bulk */
+		} else {			/* bulk data */
+			f->kind = FLOW_DATA;
 			f->len_lo = range(0, 1) ? 1514 : 64;
 			f->len_hi = 1514;
-			/* together the bulk flows offer up to 1.2x the rate */
-			share = rate * 12 / 10 / nflows;
+			share = c.rate * load / 10 / nflows;
 			f->gap_ns = (uint64_t)(f->len_lo + f->len_hi) / 2 * 8 *
 			    1000000000ULL / (share ? share : 1);
 		}
 		f->next_ns = range(0, f->gap_ns);
 	}
 
-	linux_impl.init(modes[m].linux_mode, flow_modes[fm].mode, rate);
-	ours_impl.init(modes[m].ours_mode, flow_modes[fm].mode, rate);
+	linux_impl.init(&c);
+	ours_impl.init(&c);
 
 	end = (uint64_t)secs * 1000000000ULL;
 	for (trace_now_ns = 1000000; trace_now_ns < end; trace_now_ns += step) {
@@ -156,9 +337,15 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 
 				*p = f->proto;
 				p->id = ++id;
-				p->len = (uint16_t)range(f->len_lo, f->len_hi);
+				build(p, f);
 				linux_impl.enqueue(p);
 				ours_impl.enqueue(p);
+				if (getenv("SD_ACKDBG") &&
+				    p->id == (uint32_t)atoi(getenv("SD_ACKDBG"))) {
+					printf("  after enqueueing %u:\n", p->id);
+					linux_impl.debug_flow(p->flow);
+					ours_impl.debug_flow(p->flow);
+				}
 				f->next_ns += f->gap_ns / 2 + range(0, f->gap_ns);
 			}
 		}
@@ -169,42 +356,104 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 			if (pl == NULL)
 				break;
 			po = ours_impl.dequeue(&to);
+			pl->linux_state = 1;
+			if (po != NULL)
+				po->ours_state = 1;
 			if (getenv("SD_TRACE") && t->sent >= (uint64_t)atoi(getenv("SD_TRACE"))) {
 				printf("  %.6f s: sch_cake %u (flow %u tin %d), dn_sched_cake %u (flow %u tin %d)\n",
 				    trace_now_ns / 1e9, pl->id, pl->flow, tl, po ? po->id : 0,
 				    po ? po->flow : 0, to);
 				linux_impl.debug();
 				ours_impl.debug();
+				linux_impl.debug_flow(pl->flow);
+				ours_impl.debug_flow(pl->flow);
 			}
 			t->sent++;
 			if (po != pl || tl != to || ndrops_linux != ndrops_ours ||
 			    memcmp(drops_linux, drops_ours,
 			    ndrops_linux * sizeof(uint32_t)) != 0) {
-				if (verbose) {
+				if (verbose || !c.ingress) {
 					printf("mismatch: seed %" PRIu64 " %s %s %" PRIu64
-					    " Mbit/s %d flows, at %.6f s after %" PRIu64
+					    " Mbit/s %s%s ack-filter %d memlimit %u, %d flows"
+					    " (%d ACK streams), at %.6f s after %" PRIu64
 					    " packets\n", seed, modes[m].name,
-					    flow_modes[fm].name, rate / 1000000, nflows,
+					    flow_modes[fm].name, c.rate / 1000000,
+					    links[lk].name, c.ingress ? " ingress" : "",
+					    c.ack_filter, c.memlimit, nflows, acks,
 					    trace_now_ns / 1e9, t->sent);
 					printf("  sch_cake      sent %u (flow %u tin %d), drops %d\n",
 					    pl->id, pl->flow, tl, ndrops_linux);
 					printf("  dn_sched_cake sent %u (flow %u tin %d), drops %d\n",
 					    po ? po->id : 0, po ? po->flow : 0, to, ndrops_ours);
+					for (i = 0; i < ndrops_linux && i < ndrops_ours &&
+					    drops_linux[i] == drops_ours[i]; i++)
+						;
+					if (i < ndrops_linux || i < ndrops_ours)
+						printf("  drops differ from #%d: sch_cake %u (flow %u), dn_sched_cake %u (flow %u)\n",
+						    i, i < ndrops_linux ? drops_linux[i] : 0,
+						    i < ndrops_linux ? pkts[drops_linux[i] - 1].flow : 0,
+						    i < ndrops_ours ? drops_ours[i] : 0,
+						    i < ndrops_ours ? pkts[drops_ours[i] - 1].flow : 0);
+					printf("  last drops sch_cake:");
+					for (i = ndrops_linux > 4 ? ndrops_linux - 4 : 0; i < ndrops_linux; i++)
+						printf(" %u (flow %u)", drops_linux[i], pkts[drops_linux[i] - 1].flow);
+					printf("\n  last drops dn_sched_cake:");
+					for (i = ndrops_ours > 4 ? ndrops_ours - 4 : 0; i < ndrops_ours; i++)
+						printf(" %u (flow %u)", drops_ours[i], pkts[drops_ours[i] - 1].flow);
+					printf("\n");
 				}
 				t->mismatches++;
+				dump_flow(pkts, npkts);
 				free(pkts);
 				return (1);
 			}
-			cd++;
+		}
+		/*
+		 * In ingress mode a drop charges sch_cake's own shaper too,
+		 * so a dequeue can drop and then send nothing; dn_sched_cake,
+		 * paced by the pipe's credit instead, makes that drop on its
+		 * next call. The drop lists are compared, in order, at every
+		 * packet sent; the queue lengths only while no such drop is
+		 * pending.
+		 */
+		if (ndrops_linux == ndrops_ours &&
+		    linux_impl.qlen() != ours_impl.qlen()) {
+			if (verbose || !c.ingress) {
+				printf("mismatch: seed %" PRIu64 " %s %s %" PRIu64
+				    " Mbit/s %s%s ack-filter %d memlimit %u, %d flows"
+				    " (%d ACK streams): queue lengths %u and %u at %.6f s\n",
+				    seed, modes[m].name, flow_modes[fm].name,
+				    c.rate / 1000000, links[lk].name,
+				    c.ingress ? " ingress" : "", c.ack_filter, c.memlimit,
+				    nflows, acks, linux_impl.qlen(), ours_impl.qlen(),
+				    trace_now_ns / 1e9);
+				printf("  last drops sch_cake:");
+				for (i = ndrops_linux > 4 ? ndrops_linux - 4 : 0; i < ndrops_linux; i++)
+					printf(" %u (flow %u)", drops_linux[i], pkts[drops_linux[i] - 1].flow);
+				printf("\n  last drops dn_sched_cake:");
+				for (i = ndrops_ours > 4 ? ndrops_ours - 4 : 0; i < ndrops_ours; i++)
+					printf(" %u (flow %u)", drops_ours[i], pkts[drops_ours[i] - 1].flow);
+				printf("\n");
+			}
+			t->mismatches++;
+			dump_flow(pkts, npkts);
+			free(pkts);
+			return (1);
 		}
 		t->steps++;
 	}
 	t->drops += ndrops_linux;
 	free(pkts);
-	(void)cd;
 	return (0);
 }
 
+/*
+ * Ingress mode is compared but not required to match: a drop charges
+ * sch_cake's own shaper, which it checks again when DRR finds an empty
+ * flow, so a dequeue can end after a drop without sending; dn_sched_cake
+ * is paced from outside by the pipe's credit, and finishes the call. The
+ * two then drift apart by their release mechanisms, not their decisions.
+ */
 int
 main(int argc, char **argv)
 {
@@ -212,14 +461,27 @@ main(int argc, char **argv)
 	int runs = argc > 1 ? atoi(argv[1]) : 50;
 	int secs = argc > 2 ? atoi(argv[2]) : 2;
 	uint64_t seed = argc > 3 ? strtoull(argv[3], NULL, 0) : 1;
-	int r, bad = 0;
+	int r, bad = 0, verbose = getenv("SD_VERBOSE") != NULL;
+	uint64_t before;
 
 	memset(&t, 0, sizeof(t));
-	for (r = 0; r < runs; r++)
-		bad += run(seed + r, secs, &t, bad < 5);
+	for (r = 0; r < runs; r++) {
+		before = t.sent;
+		if (run(seed + r, secs, &t, verbose) != 0) {
+			if (run_ingress) {
+				t.ingress_mismatches++;
+				t.ingress_sent += t.sent - before;
+			} else
+				bad++;
+		}
+	}
 	printf("%d runs of %d s: %" PRIu64 " packets sent and %" PRIu64
 	    " dropped in step: %d runs mismatched\n", runs, secs, t.sent,
 	    t.drops, bad);
+	printf("ingress mode (not required to match): %d runs, %d drifted"
+	    " apart after %.0f matching packets on average\n", t.ingress_runs,
+	    t.ingress_mismatches, t.ingress_mismatches ?
+	    (double)t.ingress_sent / t.ingress_mismatches : 0.0);
 #ifdef CAKE_DEBUG
 	printf("dn_sched_cake consistency errors: %u\n", ours_check_errors());
 	bad += ours_check_errors() != 0;

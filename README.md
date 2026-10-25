@@ -137,10 +137,10 @@ kernel. See *Status* at the top for where it has been tested.
   about 60 MB with 8 tins and 65536 flows). Allocation fails cleanly, but a
   mask on traffic from the Internet lets outsiders create instances. CAKE's
   host isolation does what masks were used for.
-- **Floods past the packet or byte limit** make every arriving packet search
-  the active flows for the fattest one. fq_codel scans all of its queues in
-  the same case, so this is no worse than today, but a heap would make it
-  cheaper.
+- **Floods past the packet or byte limit** pick the fattest flow from a
+  max-heap, as sch_cake does (from 1.4; before, a scan of the active
+  flows): each drop costs O(log n), and the heap is rebuilt, O(n), only on
+  the first overflow after 65535 packets without one.
 - **The ACK filter** looks at no more than 128 queued packets of a flow per
   new ACK, so its cost per packet is bounded.
 - **Packets are parsed defensively:** headers outside the first mbuf are
@@ -166,7 +166,7 @@ kernel. See *Status* at the top for where it has been tested.
 | DRR between flows, sparse (new) flows served first | yes |
 | COBALT: CoDel with ECN marking + BLUE on overflow | yes, ported from sch_cake |
 | Per-tin target/interval stretched for slow tin rates (`cake_set_rate`) | yes, from pipe `bw` |
-| Drop from the fattest flow at the packet or byte limit (`limit`, `memlimit`) | yes, linear scan over active flows; bytes counted, not mbuf memory |
+| Drop from the fattest flow at the packet or byte limit (`limit`, `memlimit`) | yes, from sch_cake's max-heap of flow backlogs; bytes counted, not mbuf memory, and a packet limit as well (sch_cake has only the byte limit, on memory) |
 | Microsecond sojourn timestamps (`sbinuptime`, not dummynet ticks) | yes |
 | Link-layer overhead compensation: `overhead`, `mpu`, ATM / PTM framing, tc-cake presets | yes: through the `wire_len` hook of the src patch, or with a stock dummynet by adjusting the pipe credit |
 | ACK filter (`ack-filter`, `ack-filter-aggressive`) | yes, ported from `cake_ack_filter()`, with SACK, timestamp and ECN checks; IPv4, IPv6 and 6in4 |
@@ -544,6 +544,10 @@ queue 10001 config pipe 10001 weight 100
   packet over the target. The control law is also split so that it cannot
   overflow for very long intervals (slow pipes), where `reciprocal_scale()`
   truncates the interval to 32 bits.
+- **Ingress drops** charge the link as if the packet had been sent (the
+  tin clock, and with a stock dummynet the pipe credit), and, as in
+  sch_cake, a COBALT drop in ingress mode charges the flow's deficit and
+  sends DRR back to choose a flow again (from 1.4).
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
 - **Instance expiry.** dummynet destroys a scheduler instance as soon as
@@ -596,7 +600,7 @@ queue 10001 config pipe 10001 weight 100
   | accepted | `cake_flow_enqueue` | appended to its flow, timestamp tag added | queued: flow, tin, queue and instance length and bytes |
   | no timestamp tag (allocation failure) | `cake_flow_enqueue` | freed; `enqueue` returns 1, so dummynet clears its pointer without freeing | drop, once (dummynet undoes its own count) |
   | ACK filter | `cake_enqueue` | an older ACK of the same connection unlinked and freed; the scan stops at the new packet, which is never chosen | drop, ACK drop |
-  | over the packet or byte limit | `cake_drop_fattest` | head of the fattest flow freed, which can be the new packet; `enqueue` returns 0 and dummynet does not touch it again (it only compares the pointer with packets still queued) | drop |
+  | over the packet or byte limit | `cake_drop_fattest` | head of the fattest flow (top of the overflow heap) freed, which can be the new packet; `enqueue` returns 0 and dummynet does not touch it again (it only compares the pointer with packets still queued) | drop |
   | dequeued | `cake_extract_head` | unlinked and its tag removed, then handed to dummynet, which owns it | dequeued |
   | COBALT drop | `cake_flow_dequeue` | freed, never the flow's last packet (which may be marked instead) | drop |
   | receiving interface gone | `cake_extract_head` | freed | drop (from 1.3; before, only dequeued) |
@@ -722,6 +726,42 @@ queue 10001 config pipe 10001 weight 100
     won instead of the last;
   - COBALT and the tin clocks ran in microseconds, and the tin clocks used
     a different fixed-point rate, so rounding drifted after many drops.
+
+  Stage 2 adds overhead compensation (raw, ethernet, docsis, pppoe-ptm,
+  atm and random overhead/mpu), the ACK filter (on and aggressive; the
+  trace carries real IPv4/TCP headers with timestamps, SACK blocks, ECN
+  flags, duplicate ACKs and data), ingress mode and overflow (random small
+  memory limits, up to 1.6 times the rate offered). Both use upstream's
+  own ACK filter and overhead code; our ACK filter's 128-packet scan cap
+  is lifted for the comparison, as differences past it are intended. To
+  compare the same accounting, both see IP-length packets (sch_cake sees
+  layer-2 lengths and limits memory by truesize; dummynet sees IP lengths,
+  and has a packet limit as well, set out of the way). Result: 300 random
+  scenarios, 11.39 million packets and 857,538 drops (overflow, ACK filter
+  and COBALT), identical outside ingress mode, 0 consistency errors.
+  Stage 2 found three more differences, fixed in 1.4:
+  - overflow picked the fattest flow by an exact scan; sch_cake keeps a
+    max-heap that is only kept up to date while overflow is recent, so
+    with ties or a stale heap it can pick another flow. dn_sched_cake now
+    uses the same heap, laid out the same way;
+  - in ingress mode, after a COBALT drop sch_cake chooses the flow again
+    (the drop used up deficit); dn_sched_cake carried on with the same
+    flow;
+  - the ACK filter matched except past the scan cap (intended).
+
+  Ingress mode is compared but not required to match: a drop also charges
+  sch_cake's own link shaper, which it checks again when DRR comes to an
+  empty flow, so a dequeue can end after a drop without sending, while
+  dn_sched_cake, paced from outside by the pipe's credit, finishes the
+  call. In the 300 runs, 97 were in ingress mode; 57 matched throughout,
+  40 drifted apart after 4,900 identical packets on average.
+
+  How much of each side is production code: `sched-diff.sh` prints every
+  extracted line that is not a line of its source. Of sch_cake's 2164
+  lines, 3 are not (the DSCP stub); of dn_sched_cake's 1786, 1 (the
+  renamed hash function's signature). The rest of the shims sit outside
+  the extracted code: kernel and dummynet types, the clock, the flow
+  dissector's hashes, and drop logging.
 - COBALT against sch_cake (`test/cobalt-diff.sh`, sch_cake at
   `torvalds/linux` 700b4c6c70d6): both implementations are extracted from
   their sources, built side by side and driven with the same random
@@ -827,7 +867,7 @@ queue 10001 config pipe 10001 weight 100
   That doubles the dequeue cost at 256 flows, as it does in sch_cake, which
   is about 6% of one CPU at 65k packets/s. The overflow path is cheaper than
   fq_codel's, because the fattest-flow scan only visits active flows, not
-  the whole table, so a heap isn't needed at these flow counts. The
+  the whole table (1.4 replaced the scan with sch_cake's heap). The
   multi-millisecond maxima show up for every scheduler; they're the VM being
   descheduled, not scheduler work.
 - Overhead compensation (2026-10-24), checked with `test/overhead.sh`. It
@@ -941,5 +981,4 @@ queue 10001 config pipe 10001 weight 100
     on 2.5 Gbit/s NICs shaping 1950 Mbit/s, it would gain little (see
     *Release bursts on real hardware*); it matters for 10 Gbit/s NICs
     feeding much slower links.
-12. A heap for fattest-flow selection, only if much larger flow counts show
-    up in profiles; at 256 flows the linear scan is cheaper than fq_codel's.
+12. ~~A heap for fattest-flow selection.~~ Done in 1.4, as sch_cake's.

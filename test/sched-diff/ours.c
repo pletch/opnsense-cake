@@ -13,13 +13,26 @@ static struct {
 static struct cake_si *si;
 
 static void
-o_init(int diffserv, int flow_mode, uint64_t rate_bps)
+o_init(const struct sd_config *c)
 {
-	sched.s.link.bandwidth = (uint32_t)rate_bps;
+	sched.s.link.bandwidth = (uint32_t)c->rate;
 	sched.c.cfg = cake_sysctl;
-	sched.c.cfg.diffserv = diffserv;
-	sched.c.cfg.flow_mode = flow_mode;
+	sched.c.cfg.diffserv = c->diffserv;
+	sched.c.cfg.flow_mode = c->flow_mode;
 	sched.c.cfg.flows_cnt = 1024;	/* sch_cake's CAKE_QUEUES */
+	sched.c.cfg.overhead = c->overhead;
+	sched.c.cfg.mpu = c->mpu;
+	sched.c.cfg.atm = c->atm;
+	if (c->ingress)
+		sched.c.cfg.flags |= CAKE_INGRESS;
+	if (c->ack_filter)
+		sched.c.cfg.flags |= CAKE_ACK_FILTER;
+	if (c->ack_filter == 2)
+		sched.c.cfg.flags |= CAKE_ACK_AGGRESSIVE;
+	sched.c.cfg.memlimit = c->memlimit >> 10;
+	/* sch_cake has no packet limit, only the byte one; ours is an
+	 * addition (memory per packet), kept out of the way here */
+	sched.c.cfg.limit = 1000000;
 	sched.c.gen = 1;
 
 	si = calloc(1, sizeof(*si));
@@ -33,14 +46,10 @@ static void
 o_enqueue(struct trace_pkt *p)
 {
 	struct mbuf *m = calloc(1, sizeof(*m));
-	struct ip *ip = (struct ip *)m->buf;
 
-	/* an IPv4 header, so that ECN marking has something to mark */
-	ip->ip_v = 4;
-	ip->ip_hl = 5;
-	ip->ip_tos = (p->dscp << 2) | (p->ecn ? IPTOS_ECN_ECT0 : 0);
-	ip->ip_len = htons(p->len);
-	ip->ip_p = IPPROTO_TCP;
+	/* the trace's IPv4 and TCP headers, for ECN marking and the ACK
+	 * filter; marking changes this copy only */
+	memcpy(m->buf, p->hdr, sizeof(m->buf));
 	m->m_data = m->buf;
 	m->m_len = sizeof(m->buf);
 	m->m_pkthdr.len = p->len;
@@ -93,6 +102,28 @@ o_debug(void)
 	printf("\n");
 }
 
+static void
+o_debug_flow(uint32_t flow)
+{
+	struct mbuf *m;
+	uint32_t i;
+
+	for (i = 0; i < si->tin_cnt * si->flows_cnt; i++) {
+		m = si->flows[i].mq.head;
+		if (m == NULL || m->trace->flow != flow)
+			continue;
+		printf("    dn_sched_cake tin %u slot %u def %d set %d cnt %u drp %d next %+lld p %u q:",
+		    i / si->flows_cnt, i % si->flows_cnt, si->flows[i].deficit,
+		    si->flows[i].set, si->flows[i].cvars.count, si->flows[i].cvars.dropping,
+		    (long long)(si->flows[i].cvars.drop_next - trace_now_ns),
+		    si->flows[i].cvars.p_drop);
+		for (; m != NULL; m = m->m_nextpkt)
+			printf(" %u", m->trace->id);
+		printf("\n");
+	}
+}
+
 const struct sched_impl ours_impl = {
-	"dn_sched_cake", o_init, o_enqueue, o_dequeue, o_qlen, o_debug
+	"dn_sched_cake", o_init, o_enqueue, o_dequeue, o_qlen, o_debug,
+	o_debug_flow
 };

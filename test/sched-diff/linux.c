@@ -8,9 +8,16 @@
 static struct net_device dev;
 static struct Qdisc *sch;
 
-/* cake_init() without netlink: defaults, then the stage's settings */
+/* dn_sched_cake's diffserv numbers to sch_cake's */
+static const int diffserv_map[] = {
+	CAKE_DIFFSERV_BESTEFFORT, CAKE_DIFFSERV_DIFFSERV3,
+	CAKE_DIFFSERV_DIFFSERV4, CAKE_DIFFSERV_DIFFSERV8,
+	CAKE_DIFFSERV_PRECEDENCE
+};
+
+/* cake_init() without netlink: defaults, then the run's settings */
 static void
-l_init(int diffserv, int flow_mode, uint64_t rate_bps)
+l_init(const struct sd_config *c)
 {
 	struct cake_sched_data *qd;
 	struct cake_sched_config *q;
@@ -21,9 +28,20 @@ l_init(int diffserv, int flow_mode, uint64_t rate_bps)
 	qd = qdisc_priv(sch);
 	q = &qd->initial_config;
 	cake_config_init(q, false);
-	q->tin_mode = diffserv;
-	q->flow_mode = flow_mode;
-	q->rate_bps = rate_bps / 8;	/* despite the name, bytes per second */
+	q->tin_mode = diffserv_map[c->diffserv];
+	q->flow_mode = c->flow_mode;
+	q->rate_bps = c->rate / 8;	/* despite the name, bytes per second */
+	/* as tc's overhead keywords set them */
+	if (c->overhead || c->mpu || c->atm) {
+		q->rate_flags |= CAKE_FLAG_OVERHEAD;
+		q->rate_overhead = c->overhead;
+		q->rate_mpu = c->mpu;
+		q->atm_mode = c->atm;
+	}
+	if (c->ingress)
+		q->rate_flags |= CAKE_FLAG_INGRESS;
+	q->ack_filter = c->ack_filter;
+	q->buffer_config_limit = c->memlimit;
 	sch->limit = 10240;
 	qd->config = q;
 
@@ -103,6 +121,29 @@ l_debug(void)
 	printf("\n");
 }
 
+static void
+l_debug_flow(uint32_t flow)
+{
+	struct cake_sched_data *qd = qdisc_priv(sch);
+	struct sk_buff *skb;
+	int t, i;
+
+	for (t = 0; t < qd->tin_cnt; t++)
+		for (i = 0; i < CAKE_QUEUES; i++) {
+			skb = qd->tins[t].flows[i].head;
+			if (skb == NULL || skb->trace->flow != flow)
+				continue;
+			printf("    sch_cake      tin %d slot %d def %d set %d cnt %u drp %d next %+lld p %u q:",
+			    t, i, qd->tins[t].flows[i].deficit, qd->tins[t].flows[i].set,
+			    qd->tins[t].flows[i].cvars.count, qd->tins[t].flows[i].cvars.dropping,
+			    (long long)(qd->tins[t].flows[i].cvars.drop_next - (s64)trace_now_ns),
+			    qd->tins[t].flows[i].cvars.p_drop);
+			for (; skb != NULL; skb = skb->next)
+				printf(" %u", skb->trace->id);
+			printf("\n");
+		}
+}
+
 const struct sched_impl linux_impl = {
-	"sch_cake", l_init, l_enqueue, l_dequeue, l_qlen, l_debug
+	"sch_cake", l_init, l_enqueue, l_dequeue, l_qlen, l_debug, l_debug_flow
 };

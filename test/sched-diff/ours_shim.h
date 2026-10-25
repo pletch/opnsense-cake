@@ -76,7 +76,7 @@ struct mbuf {
 	struct { int len; void *rcvif; } m_pkthdr;
 	struct m_tag	*tags;
 	struct dn_pkt_tag dn_tag;
-	char		buf[64];	/* the IP header */
+	char		buf[128];	/* the IP and TCP headers */
 	struct trace_pkt *trace;
 };
 #define mtod(m, t)	((t)((m)->m_data))

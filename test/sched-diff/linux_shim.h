@@ -95,6 +95,8 @@ struct sk_buff {
 	u32		mark;
 	u32		priority;
 	char		cb[48];
+	u8		encapsulation;
+	struct { unsigned short a, b; unsigned int c; } shinfo;
 	struct trace_pkt *trace;	/* who this packet is */
 };
 struct qdisc_skb_cb { unsigned int pkt_len; unsigned int pkt_segs; u16 slave_dev_queue_mapping;
@@ -114,7 +116,95 @@ typedef u64 netdev_features_t;
 #define skb_list_walk_safe(first, skb, next_skb) \
 	for ((skb) = (first), (next_skb) = (skb) ? (skb)->next : NULL; (skb); \
 	    (skb) = (next_skb), (next_skb) = (skb) ? (skb)->next : NULL)
-#define consume_skb(skb)	free(skb)
+#define consume_skb(skb)	(trace_dropped_linux((skb)->trace), free(skb))
+/*
+ * The packet's headers, for the ACK filter: the trace's IPv4 and TCP
+ * headers at offset 0, as sched-diff gives both sides IP packets.
+ */
+#define skb_network_offset(skb)	0
+static inline void *skb_header_pointer(const struct sk_buff *skb, int off,
+	int len, void *buf)
+{
+	if (off < 0 || off + len > (int)skb->len || off + len > 128)
+		return (NULL);
+	memcpy(buf, skb->trace->hdr + off, len);
+	return (buf);
+}
+static inline u32 get_unaligned_be32(const void *p)
+{ const u8 *b = p; return ((u32)b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]; }
+static inline u16 shim_bswap16(u16 x) { return (u16)((x << 8) | (x >> 8)); }
+static inline u32 shim_bswap32(u32 x) { return __builtin_bswap32(x); }
+#define htons(x)	shim_bswap16(x)
+#define ntohs(x)	shim_bswap16(x)
+#define htonl(x)	shim_bswap32(x)
+#define ntohl(x)	shim_bswap32(x)
+#define cpu_to_be32(x)	shim_bswap32(x)
+#define before(a, b)	((s32)((a) - (b)) < 0)
+#define after(a, b)	before(b, a)
+#define IPPROTO_TCP	6
+#define IPPROTO_UDP	17
+#define IPPROTO_IPV6	41
+typedef u16 __sum16;
+struct iphdr {
+	u8	ihl:4, version:4;
+	u8	tos;
+	__be16	tot_len, id, frag_off;
+	u8	ttl, protocol;
+	__sum16	check;
+	__be32	saddr, daddr;
+};
+struct in6_addr { union { u8 u6_addr8[16]; __be32 u6_addr32[4]; } in6_u; };
+struct ipv6hdr {
+	u8	priority:4, version:4;
+	u8	flow_lbl[3];
+	__be16	payload_len;
+	u8	nexthdr, hop_limit;
+	struct in6_addr saddr, daddr;
+};
+#define ipv6_addr_cmp(a, b)	memcmp((a), (b), sizeof(struct in6_addr))
+struct tcphdr {
+	__be16	source, dest;
+	__be32	seq, ack_seq;
+	u16	res1:4, doff:4, fin:1, syn:1, rst:1, psh:1, ack:1, urg:1,
+		ece:1, cwr:1;
+	__be16	window;
+	__sum16	check;
+	__be16	urg_ptr;
+};
+struct udphdr { __be16 source, dest, len; __sum16 check; };
+struct tcp_sack_block_wire { __be32 start_seq, end_seq; };
+#define iph_totlen(skb, iph)	ntohs((iph)->tot_len)
+#define ipv6_payload_len(skb, ip6)	ntohs((ip6)->payload_len)
+#define __tcp_hdrlen(th)	((th)->doff * 4)
+#define tcp_flag_word(tp)	(((const u32 *)(tp))[3])
+#define TCP_FLAG_CWR	cpu_to_be32(0x00800000)
+#define TCP_FLAG_ECE	cpu_to_be32(0x00400000)
+#define TCP_FLAG_URG	cpu_to_be32(0x00200000)
+#define TCP_FLAG_ACK	cpu_to_be32(0x00100000)
+#define TCP_FLAG_PSH	cpu_to_be32(0x00080000)
+#define TCP_FLAG_RST	cpu_to_be32(0x00040000)
+#define TCP_FLAG_SYN	cpu_to_be32(0x00020000)
+#define TCP_FLAG_FIN	cpu_to_be32(0x00010000)
+#define TCPOPT_NOP	1
+#define TCPOPT_EOL	0
+#define TCPOPT_MSS	2
+#define TCPOPT_WINDOW	3
+#define TCPOPT_SACK_PERM 4
+#define TCPOPT_SACK	5
+#define TCPOPT_TIMESTAMP 8
+#define TCPOPT_MD5SIG	19
+#define TCPOPT_FASTOPEN	34
+#define TCPOPT_EXP	254
+#define TCPOLEN_TIMESTAMP 10
+#define TCPOLEN_SACK_BASE 2
+/* GSO packets never reach cake_overhead()'s segment path here */
+struct skb_shared_info { unsigned short gso_size, gso_segs; unsigned int gso_type; };
+#define SKB_GSO_TCPV4	1
+#define SKB_GSO_TCPV6	2
+#define skb_shinfo(skb)	((struct skb_shared_info *)&(skb)->shinfo)
+#define skb_transport_offset(skb)	0
+#define skb_inner_transport_offset(skb)	0
+
 /* CoDel marks the packets the trace calls ECN-capable */
 static inline bool INET_ECN_set_ce(struct sk_buff *skb) { return skb->trace->ecn; }
 
