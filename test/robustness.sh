@@ -13,6 +13,9 @@
 #             second under RRUL load
 #   allocfail tin count changed under RRUL while table allocations fail:
 #             the old tables stay in use, then the rebuild succeeds
+#   expiry    idle instances expired and their kept state adopted, about
+#             200 times, while the statistics are read in a loop; then the
+#             scheduler deleted while its state is kept (no memory left)
 #   unload    kldunload refused while in use, and while a CAKE scheduler
 #             is only configured (no instance yet), works once released
 #             (skipped when CAKE is built into dummynet.ko)
@@ -179,6 +182,29 @@ printf '%s\n' "$a" | awk '$1 == "held_rebuilds" && $2 == 0 && $4 > 0 &&
     $6 > 0 && $10 == 2 && $12 >= 2 && $14 == 0 { ok = 1 } END { exit !ok }' &&
     consistent && [ "$r" = "flent-exit 0" ] && ok=1 || ok=0
 result allocfail $ok "$(printf '%s\n' "$a" | grep held_), $r, check_errors $(stat check_errors)"
+
+echo "== expiry"
+# dummynet expires an instance as soon as nothing is queued; CAKE keeps the
+# scheduler's state and the next instance adopts it. A 10 Hz ping makes
+# nearly every packet do both.
+opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
+m0=$(stat dnmem)
+opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
+a0=$(opn 'sysctl -n net.inet.ip.dummynet.cake.adoptions')
+opn '(end=$(( $(date +%s) + 13 )); while [ $(date +%s) -lt $end ]; do
+    sysctl -n net.inet.ip.dummynet.cake.stats >/dev/null; done) >/dev/null 2>&1 &' >/dev/null
+r=$(cli 'sudo ip netns exec cli ping -q -c 100 -i 0.1 10.10.2.2 | grep -o "[0-9.]*% packet loss"')
+sleep 4
+a1=$(opn 'sysctl -n net.inet.ip.dummynet.cake.adoptions')
+kept=$(opn 'sysctl -n net.inet.ip.dummynet.cake.stats | grep -c " tin 0 "')
+# delete the schedulers while their state is kept
+opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
+m1=$(stat dnmem)
+opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
+ad=$(( ${a1:-0} - ${a0:-0} ))
+consistent && [ "$ad" -ge 100 ] && [ "$m1" = "$m0" ] && [ "$r" = "0% packet loss" ] &&
+    ok=1 || ok=0
+result expiry $ok "$ad adoptions, $kept states kept while idle, $r, dummynet mem without CAKE $m0 -> $m1 after deleting kept states, check_errors $(stat check_errors)"
 
 echo "== unload"
 if [ $builtin = 1 ]; then

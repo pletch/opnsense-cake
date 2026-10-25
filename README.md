@@ -519,13 +519,29 @@ queue 10001 config pipe 10001 weight 100
   instance adopts them: 0 table allocations in the same test, and the
   statistics keep counting. With a mask, each instance belongs to one
   host, so they are freed as before. dummynet's FQ-CoDel has the same
-  churn.
+  churn. The kept state is created in `free_sched`, adopted in
+  `new_sched` and freed in `destroy`, all called under dummynet's lock,
+  and dummynet destroys a scheduler's instances before calling `destroy`,
+  so it is adopted or freed exactly once. The robustness suite's `expiry`
+  test runs about 200 expire/adopt cycles while reading the statistics in
+  a loop, then deletes the scheduler while its state is kept, and checks
+  that dummynet's memory returns to what it was without CAKE.
   - Since instances now outlive their creation, CAKE also notices a pipe
     rate changed on its own (`dnctl pipe N config bw`), which dummynet
     does not report to the scheduler, and recomputes its tin rates and
     COBALT parameters. Before, only a new instance or a scheduler
     reconfiguration picked it up; OPNsense's Apply always does the
     latter.
+- **Statistics** (`net.inet.ip.dummynet.cake.stats`) come from a list of
+  instances and kept states with its own mutex, as the list spans every
+  vnet. Lock order: dummynet's lock, then the list's; the callbacks that
+  add and remove entries already hold dummynet's. From 1.3.3 the sysctl
+  takes both while it copies the counters, as dnctl's own statistics do,
+  so a snapshot is consistent, and it reports only the reader's vnet. It
+  formats and copies out after releasing them, as that may sleep. Up to
+  1.3.1 it took only the list's mutex: memory safe (an entry cannot be
+  freed while listed, and only fields embedded in it are read), but a
+  snapshot could mix counters from different moments.
 - **Packet ownership.** All callbacks run under dummynet's lock
   (`DN_BH_WLOCK`, held by `dummynet_io`, `dummynet_task`, `config_sched` and
   the delete paths), so each packet is in exactly one place at a time. Every
@@ -624,6 +640,7 @@ queue 10001 config pipe 10001 weight 100
   | ipv6 | ping6 + TCP download | 0% loss, 47 Mbit/s of 50 |
   | churn | 45 reconfigs in 45 s (cake/fq_codel/fifo, all diffserv modes, 50↔30 Mbit/s) under RRUL | clean, RRUL completes |
   | allocfail (1.1) | tin count changed under RRUL while every table allocation fails for 8 s, then one host and one flow allocation fail | old tables kept (0 rebuilds in about 125,000 failed attempts, traffic flowing), then both instances rebuild; 0 check errors |
+  | expiry (1.3.3) | 10 Hz ping so that nearly every packet expires and re-creates the instances, statistics read in a loop, then the schedulers deleted while their state is kept | 198 adoptions, 0% loss, dummynet memory back to its value without CAKE (13 allocations, 5888 bytes), 0 check errors |
   | unload | `kldunload` during RRUL, then after switching to fifo | refused while busy, unloads when idle, reloads |
   | leaks | after all of the above | dummynet malloc back to baseline, 0 queued, mbufs flat across further runs |
 

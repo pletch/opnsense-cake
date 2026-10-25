@@ -71,6 +71,9 @@
 #include <sys/module.h>
 #include <sys/time.h>
 #include <sys/sbuf.h>
+#include <sys/ucred.h>
+#include <sys/jail.h>		/* TD_TO_VNET */
+#include <net/vnet.h>
 #include <sys/libkern.h>
 #include <sys/endian.h>
 #include <net/if.h>	/* IFNAMSIZ */
@@ -1527,11 +1530,12 @@ cake_check(struct cake_si *si, const char *where)
  * Allocation failure injection for test builds: fail_alloc fails the
  * table allocations whose bits are set, bit 0 the next one, and is
  * consumed one bit per allocation; fail_alloc_all fails all of them
- * while set, leaving fail_alloc for when it is cleared. rebuilds and rebuild_failures count the outcomes of
- * reconfigurations that need new tables.
+ * while set, leaving fail_alloc for when it is cleared. rebuilds and
+ * rebuild_failures count the outcomes of reconfigurations that need new
+ * tables, adoptions the instances that took over a kept state.
  */
 static u_int cake_fail_alloc, cake_fail_alloc_all;
-static u_int cake_rebuilds, cake_rebuild_failures;
+static u_int cake_rebuilds, cake_rebuild_failures, cake_adoptions;
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, fail_alloc,
 	CTLFLAG_RW, &cake_fail_alloc, 0, "CAKE_DEBUG allocations to fail");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, fail_alloc_all,
@@ -1540,6 +1544,8 @@ SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, rebuilds,
 	CTLFLAG_RD, &cake_rebuilds, 0, "CAKE_DEBUG table rebuilds");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, rebuild_failures,
 	CTLFLAG_RD, &cake_rebuild_failures, 0, "CAKE_DEBUG failed rebuilds");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, adoptions,
+	CTLFLAG_RD, &cake_adoptions, 0, "CAKE_DEBUG kept states adopted");
 
 static void *
 cake_alloc(size_t n, size_t size)
@@ -2030,9 +2036,11 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 }
 
 /*
- * Every CAKE instance, for net.inet.ip.dummynet.cake.stats. Its own lock
- * (taken inside dummynet's in new_sched and free_sched), so that reading
- * the statistics never holds up packet processing.
+ * Every CAKE instance and kept state, for net.inet.ip.dummynet.cake.stats.
+ * The list has its own lock, as it spans every vnet's dummynet. Lock order:
+ * dummynet's (DN_BH_WLOCK) first, then cake_instances_mtx; new_sched,
+ * free_sched and destroy are called with dummynet's held, and the
+ * statistics take both, so they copy counters no callback is changing.
  */
 static LIST_HEAD(, cake_si) cake_instances =
     LIST_HEAD_INITIALIZER(cake_instances);
@@ -2085,6 +2093,7 @@ cake_stash(struct cake_si *si, struct cake_schk *schk)
 	s->bw = si->bw;
 	s->shaped = si->shaped;
 	s->sched = si->_si.sched;
+	s->vnet = si->vnet;
 	si->flows = NULL;
 	si->hosts = NULL;
 
@@ -2123,6 +2132,7 @@ cake_adopt(struct cake_si *si, struct cake_schk *schk)
 	si->shaped = s->shaped;
 	s->flows = NULL;
 	s->hosts = NULL;
+	CAKE_COUNT(cake_adoptions);
 }
 
 /*
@@ -2163,6 +2173,7 @@ cake_new_sched(struct dn_sch_inst *_si)
 			return error;
 	}
 
+	si->vnet = curvnet;
 	mtx_lock(&cake_instances_mtx);
 	LIST_INSERT_HEAD(&cake_instances, si, all);
 	si->listed = 1;
@@ -2328,10 +2339,13 @@ cake_destroy(struct dn_schk *_schk)
 }
 
 /*
- * net.inet.ip.dummynet.cake.stats: a line per tin of every CAKE instance,
- * for the plugin's statistics: the scheduler (pipe) number, an instance
- * number, the diffserv mode and tin, then the counters as "name value"
- * pairs. Copied out from a snapshot, as the copy may sleep.
+ * net.inet.ip.dummynet.cake.stats: a line per tin of every CAKE instance
+ * of the reader's vnet, for the plugin's statistics: the scheduler (pipe)
+ * number, an instance number, the diffserv mode and tin, then the
+ * counters as "name value" pairs. The snapshot is taken under dummynet's
+ * lock, as dnctl's own statistics are, so it is consistent; it is
+ * formatted and copied out after both locks are released, as that may
+ * sleep.
  */
 struct cake_tin_snap {
 	uint32_t	sched, inst, diffserv, tin;
@@ -2360,8 +2374,12 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	cap += 4 * CAKE_MAX_TINS;
 	snap = malloc(cap * sizeof(*snap), M_TEMP, M_WAITOK | M_ZERO);
 
+	CURVNET_SET(TD_TO_VNET(curthread));
+	DN_BH_WLOCK();
 	mtx_lock(&cake_instances_mtx);
 	LIST_FOREACH(si, &cake_instances, all) {
+		if (si->vnet != curvnet)
+			continue;
 		for (t = 0; t < si->tin_cnt && n < cap; t++, n++) {
 			snap[n].sched = si->_si.sched->sch.sched_nr;
 			snap[n].inst = inst;
@@ -2375,6 +2393,8 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	}
 	/* kept from an expired instance: its counters, nothing queued */
 	LIST_FOREACH(s, &cake_stashes, all) {
+		if (s->vnet != curvnet)
+			continue;
 		for (t = 0; t < s->tin_cnt && n < cap; t++, n++) {
 			snap[n].sched = s->sched->sch.sched_nr;
 			snap[n].inst = inst;
@@ -2387,6 +2407,8 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 		inst++;
 	}
 	mtx_unlock(&cake_instances_mtx);
+	DN_BH_WUNLOCK();
+	CURVNET_RESTORE();
 
 	sbuf_new_for_sysctl(&sb, NULL, 512, req);
 	for (i = 0; i < n; i++) {

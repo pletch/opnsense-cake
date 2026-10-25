@@ -245,6 +245,7 @@ struct cake_stash {
 	uint32_t	bw;
 	uint8_t		shaped;
 	struct dn_schk	*sched;		/* its scheduler, for the statistics */
+	struct vnet	*vnet;
 	LIST_ENTRY(cake_stash) all;
 };
 
@@ -277,6 +278,7 @@ struct cake_si {
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */
 	uint8_t	listed;		/* on cake_instances, for the statistics */
+	struct vnet *vnet;	/* whose dummynet (and lock) it belongs to */
 	LIST_ENTRY(cake_si) all;
 };
 
