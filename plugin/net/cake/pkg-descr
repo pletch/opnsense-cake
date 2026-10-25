@@ -10,6 +10,13 @@ the shaper keeps running with the pipes' own scheduler.
 Plugin Changelog
 ================
 
+1.3
+
+* Only load CAKE if the dummynet.ko in use is the one cake-kmod was
+  built against (recorded from cake-kmod 1.2 on), so an update that
+  changes dummynet within a FreeBSD release cannot meet a mismatched
+  module
+
 1.2
 
 * The CAKE page warns when kern.hz is below 1000, as it is by default

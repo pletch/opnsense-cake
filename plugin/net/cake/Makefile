@@ -1,5 +1,5 @@
 PLUGIN_NAME=		cake
-PLUGIN_VERSION=		1.2
+PLUGIN_VERSION=		1.3
 PLUGIN_COMMENT=		CAKE scheduler for the traffic shaper
 PLUGIN_DEPENDS=		cake-kmod
 PLUGIN_MAINTAINER=	Tim Pletcher

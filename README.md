@@ -67,7 +67,7 @@ updates. There are two packages:
 in `/usr/local/etc/rc.conf.d/dnctl`). The wrapper switches the pipes listed on
 the CAKE page to `type cake` with their options, loads `dn_cake.ko` and runs
 the CAKE capable dnctl. If no pipe uses CAKE, or the module is missing or was
-built for another FreeBSD release, it passes the rules on unchanged to
+built for another FreeBSD release or another `dummynet.ko`, it passes the rules on unchanged to
 `/sbin/dnctl`, logs why, and the shaper keeps running with each pipe's own
 scheduler.
 
@@ -120,10 +120,17 @@ kernel. See *Status* at the top for where it has been tested.
 - **It runs in the kernel.** A bug in `dn_cake.ko` can crash the firewall.
   Keep a way back: a VM snapshot, or console access to run
   `pkg delete -y os-cake cake-kmod`.
-- **Release compatibility is checked by FreeBSD release only** (e.g. 15.1).
-  A patch-level update that changed dummynet's internal structures would
-  not be detected. dummynet rarely changes, but after an OPNsense update,
-  check the status line on the CAKE page and `dmesg` for errors.
+- **Compatibility is checked against the exact `dummynet.ko`.** The module
+  depends on dummynet's internal structures, which no interface version
+  covers. From `cake-kmod` 1.2, the package records the SHA256 of the
+  `dummynet.ko` it was built against, and the plugin only loads CAKE if the
+  `dummynet.ko` in use matches (as well as the FreeBSD release). OPNsense
+  builds its kernels reproducibly: 26.7 and 26.7.7, 485 commits apart, ship
+  a byte-identical `dummynet.ko`. So the file changes only when dummynet or
+  a header it uses does, and an OPNsense update that changes it switches
+  the pipes back to their own scheduler, with the reason on the CAKE page,
+  until `cake-kmod` is rebuilt. With `cake-kmod` 1.0 or 1.1 only the
+  release is checked.
 - **Don't combine CAKE with pipe masks.** A mask creates a scheduler
   instance per host, and each CAKE instance allocates its flow tables (up to
   about 60 MB with 8 tins and 65536 flows). Allocation fails cleanly, but a

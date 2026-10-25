@@ -4,12 +4,15 @@ Two packages, built on an OPNsense machine of the series they are for:
 
 | package | contents |
 |---|---|
-| `cake-kmod` | `/boot/modules/dn_cake.ko`, a CAKE capable dnctl in `/usr/local/libexec/cake/`, and the FreeBSD release they are built for |
+| `cake-kmod` | `/boot/modules/dn_cake.ko`, a CAKE capable dnctl in `/usr/local/libexec/cake/`, and the FreeBSD release and `dummynet.ko` (SHA256) they are built for |
 | `os-cake` | the Firewall → Shaper → CAKE page and the dnctl wrapper; depends on `cake-kmod` |
 
 Neither changes a file of OPNsense itself, so they survive its updates. If the
 module doesn't match the running kernel, e.g. after an upgrade to a new
-series, the pipes keep their own scheduler until `cake-kmod` is rebuilt.
+series or an update that changed `dummynet.ko`, the pipes keep their own
+scheduler until `cake-kmod` is rebuilt. Build on a machine that runs the
+kernel of the source tree: `kmod/build.sh` records that machine's
+`/boot/kernel/dummynet.ko` (or `DUMMYNET=path`).
 
 ## Build
 

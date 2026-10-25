@@ -26,6 +26,7 @@
     Shared code for the CAKE plugin: the CAKE settings of traffic shaper pipes and the
     state of the cake-kmod kernel module.
 """
+import hashlib
 import os
 import subprocess
 import xml.etree.ElementTree as ET
@@ -33,6 +34,8 @@ import xml.etree.ElementTree as ET
 CONFIG = '/conf/config.xml'
 KMOD = '/boot/modules/dn_cake.ko'
 KMOD_KERNEL = '/usr/local/libexec/cake/kernel'
+KMOD_DUMMYNET = '/usr/local/libexec/cake/dummynet.sha256'
+DUMMYNET = '/boot/kernel/dummynet.ko'
 DNCTL = '/usr/local/libexec/cake/dnctl'
 
 
@@ -129,6 +132,43 @@ def cake_pipes(errors=None):
     return result
 
 
+def dummynet_file():
+    """ the dummynet.ko in use: the loaded one, else the one kldload picks
+    :return: path, or None if dummynet is built into the kernel
+    """
+    out = subprocess.run(['/sbin/kldstat', '-v', '-n', 'dummynet.ko'], capture_output=True, text=True)
+    if out.returncode == 0:
+        for line in out.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) == 6 and parts[4] == 'dummynet.ko':
+                return parts[5].strip('()')
+    elif subprocess.run(['/sbin/kldstat', '-q', '-m', 'dummynet']).returncode == 0:
+        return None
+    return DUMMYNET
+
+
+def dummynet_check():
+    """ whether the dummynet.ko in use is one cake-kmod is built against
+    :return: (state, reason): state is 'match', 'unchecked' for a cake-kmod
+             that records no dummynet.ko (before 1.2), or 'mismatch'
+    """
+    if not os.path.isfile(KMOD_DUMMYNET):
+        return 'unchecked', ''
+    with open(KMOD_DUMMYNET) as f_in:
+        known = [line.strip() for line in f_in if line.strip()]
+    path = dummynet_file()
+    if path is None:
+        return 'mismatch', 'dummynet is built into this kernel, cake-kmod is built against dummynet.ko'
+    try:
+        with open(path, 'rb') as f_in:
+            digest = hashlib.sha256(f_in.read()).hexdigest()
+    except OSError:
+        return 'mismatch', 'cannot read %s' % path
+    if digest not in known:
+        return 'mismatch', '%s is not the one cake-kmod is built against (kernel updated?)' % path
+    return 'match', ''
+
+
 def kmod_status(load=False):
     """ whether dn_cake.ko is installed, built for the running kernel and loaded
     :param load: load the module if it is usable but not loaded yet
@@ -139,6 +179,7 @@ def kmod_status(load=False):
         'kernel_built': None,
         'kernel_running': os.uname().release,
         'loaded': subprocess.run(['/sbin/kldstat', '-q', '-m', 'dn_cake']).returncode == 0,
+        'dummynet': None,
         'reason': ''
     }
     if os.path.isfile(KMOD_KERNEL):
@@ -152,11 +193,14 @@ def kmod_status(load=False):
         result['reason'] = 'cake-kmod is built for FreeBSD %s, this is %s' % (
             result['kernel_built'], result['kernel_running']
         )
-    elif not result['loaded'] and load:
-        if subprocess.run(['/sbin/kldload', '-n', KMOD], capture_output=True).returncode == 0:
-            result['loaded'] = True
-        else:
-            result['reason'] = 'loading %s failed' % KMOD
+    else:
+        # the release alone misses a dummynet changed by an update within it
+        result['dummynet'], result['reason'] = dummynet_check()
+        if result['reason'] == '' and not result['loaded'] and load:
+            if subprocess.run(['/sbin/kldload', '-n', KMOD], capture_output=True).returncode == 0:
+                result['loaded'] = True
+            else:
+                result['reason'] = 'loading %s failed' % KMOD
 
     result['usable'] = result['reason'] == '' and (result['loaded'] or not load)
     return result

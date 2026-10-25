@@ -32,7 +32,7 @@
 
 set -e
 
-VERSION=1.1
+VERSION=1.2
 # where the sources of the package are published
 WWW=${WWW:-https://github.com/pletch/opnsense-cake}
 SRCDIR=${SRCDIR:-/usr/src}
@@ -74,6 +74,13 @@ install -m 555 "$(${IPFW_MAKE} -V .OBJDIR)/ipfw" \
     "${STAGE}/usr/local/libexec/cake/dnctl"
 # the FreeBSD release the module is built for, checked before it is loaded
 uname -r | cut -d- -f1 > "${STAGE}/usr/local/libexec/cake/kernel"
+# and the dummynet.ko it is built against: the module depends on dummynet's
+# internal structures, which only show in that file (OPNsense builds its
+# kernels reproducibly, so it changes only when dummynet or a header it uses
+# does). One SHA256 per line; more can be added for dummynet.ko builds known
+# to match.
+sha256 -q "${DUMMYNET:-/boot/kernel/dummynet.ko}" \
+    > "${STAGE}/usr/local/libexec/cake/dummynet.sha256"
 sed -n '/^\/\*-/,/^ \*\//p' "${TOP}/sys/netpfil/ipfw/dn_sched_cake.c" \
     > "${STAGE}/usr/local/share/licenses/cake-kmod/LICENSE"
 
