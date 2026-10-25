@@ -39,12 +39,28 @@ On an OPNsense machine of the target series (a VM will do), as root:
 
 ## Install
 
-Copy the two packages to the firewall and install `cake-kmod` first:
+Copy the two packages to the firewall and install `cake-kmod` first, then
+register `os-cake` as an installed plugin:
 
 ```sh
-pkg add cake-kmod-1.1.pkg
-pkg add os-cake-1.1.pkg
+pkg add cake-kmod-<version>.pkg
+pkg add os-cake-<version>.pkg
+/usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
+
+The last step is what the Plugins page does after installing from a
+repository; `pkg add` from the shell skips it, and System → Firmware →
+Plugins then lists `os-cake` as *misconfigured* (installed, but not in the
+configuration's list of plugins). It changes nothing else, and is only
+needed once: upgrading either package with `pkg add` keeps the
+registration. Instead of the command, the Plugins page's conflicts menu
+has **Reset all local conflicts**, which registers every installed plugin
+(and drops listed ones that are gone); not **Run the automatic resolver**,
+which looks for configured plugins in the repositories, and `os-cake` is in
+none. Registered, it is listed as *orphaned*, from *unknown-repository*:
+installed and configured, but not provided by any of the firewall's package
+repositories, as for any plugin installed from a file. That is the expected
+state; *installed* would need `os-cake` served from a configured repository.
 
 Then set up the shaper as described in the main README (*Install on
 OPNsense*): pipes and queues on Firewall → Shaper, rules pointing at the
@@ -78,7 +94,9 @@ in a VM*.
 
 - `pkg delete os-cake cake-kmod` puts the pipes back on their own scheduler
   and unloads the module. The CAKE entries stay in the configuration and are
-  used again if the plugin is reinstalled.
+  used again if the plugin is reinstalled. Then run
+  `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`, or
+  the Plugins page lists it as *missing*.
 - A newer `cake-kmod` replaces the module file, but the module already
   loaded stays in use as long as a pipe uses CAKE. To switch without a
   reboot, disable the CAKE entries and Apply (the wrapper then unloads the

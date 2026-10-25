@@ -71,7 +71,11 @@ built for another FreeBSD release or another `dummynet.ko`, it passes the rules 
 `/sbin/dnctl`, logs why, and the shaper keeps running with each pipe's own
 scheduler.
 
-Build and install: see [`plugin/README.md`](plugin/README.md). Then:
+Build and install: see [`plugin/README.md`](plugin/README.md). After
+`pkg add`, register the plugin with
+`/usr/local/opnsense/scripts/firmware/register.php install os-cake`, or
+System → Firmware → Plugins lists it as *misconfigured*; registered, it is
+listed as *orphaned*, as any plugin installed from a file (see there). Then:
 
 1. On **Firewall → Shaper**, set up pipes and queues as for FQ-CoDel, and point
    the shaper rules at the **queues**. Rules that target a pipe itself go
