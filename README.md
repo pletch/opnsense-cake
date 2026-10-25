@@ -428,6 +428,27 @@ queue 10001 config pipe 10001 weight 100
   discourages `precedence`, so they are kept as they are but marked
   experimental. In `diffserv3` and `diffserv4` the priority shares add up to
   31% and 81%, so Best Effort always gets the rest.
+
+  Linux behaves the same. Checked 2026-10-25 with Linux's own `sch_cake`
+  (kernel 6.12, iproute2 6.15) on a veth pair between two network
+  namespaces, shaped 50/10 Mbit/s like the bench, with the same RRUL test:
+
+  | mode | Linux `sch_cake`, ICMP median | this port, ICMP median |
+  |---|---|---|
+  | `diffserv4` | 0.70, 0.84 ms | 2.6–2.7 ms |
+  | `diffserv8` | 0.72, 0.82 ms | 2.6–2.8 ms |
+  | `precedence` | 22.4, 23.8, 778 ms | 72–618 ms in most runs, 2.7 ms in some |
+
+  The absolute numbers differ (the Linux test has no router hop), but the
+  pattern is the same: in `precedence`, RRUL's CS1 flows (tin 1, 43.75
+  Mbit/s) and CS5/EF flows (tin 5, 25.6 Mbit/s) sit above Best Effort
+  (tin 0) and their thresholds add up to more than the link, so Best Effort
+  starves, by a varying amount from run to run. In `diffserv8` CS1 is the
+  lowest tin, below Best Effort, so with this traffic only one busy tin is
+  above it; another mix could starve it there too. Linux also reported
+  more throughput than the shaped rate while starving (12.4 Mbit/s up
+  through 10, 56.8 down through 50), so those readings are a flent
+  artifact, not a dummynet one.
 - **Flags** share `par[2]`: the flags given in the low 16 bits and which ones
   they are in the next 16, so `wash` alone leaves ECN at its default. A mask
   of 0 is the older ECN-only form. `memlimit` (KB) is in the upper 32 bits of
