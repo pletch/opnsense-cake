@@ -22,8 +22,10 @@ What it adds over FQ-CoDel:
 - COBALT AQM, DSCP wash, ingress mode and a byte memory limit.
 
 **Status:** tested on OPNsense 26.7 (FreeBSD 15.1) in a VM with the test
-suites below, and in use on one OPNsense 26.7 router on a 2 Gbit/s
-symmetric fiber link. `dn_cake.ko` is an unofficial kernel module: it runs
+suites below, and in use on one OPNsense 26.7 router (a Proxmox VM) on a
+2 Gbit/s symmetric fiber link. **Running OPNsense in a VM? Set
+`kern.hz=1000`** ([why](#opnsense-in-a-vm-set-kernhz1000)); it helps
+FQ-CoDel too. `dn_cake.ko` is an unofficial kernel module: it runs
 in your firewall's kernel and is not supported by OPNsense or FreeBSD. If
 it can't be used, the plugin leaves the shaper on each pipe's own
 scheduler.
@@ -81,6 +83,34 @@ Build and install: see [`plugin/README.md`](plugin/README.md). Then:
    use, or why not.
 3. With a link type set, the pipe bandwidth can be close to the line or sync
    rate; without one, set it 5–15% below.
+4. **If OPNsense runs in a VM, set `kern.hz` to 1000.** See below.
+
+### OPNsense in a VM: set `kern.hz=1000`
+
+FreeBSD runs its clock at 100 Hz instead of 1000 when it detects a
+hypervisor (`HZ_VM` in `kern/subr_param.c`): Proxmox, KVM, ESXi, Hyper-V,
+bhyve and others. dummynet does all its timing in clock ticks, so at 100 Hz
+every shaper suffers, not only CAKE:
+
+- A saturated pipe sends 10 ms of traffic at once, e.g. 2.5 MB at
+  2 Gbit/s, instead of 1 ms worth.
+- dummynet's own FQ-CoDel and CoDel measure queue delay in ticks, so they
+  see it in 10 ms steps against a 5 ms target.
+- CAKE measures delay with a precise clock, but has to raise its target to
+  15 ms (1.5 ticks), or the release bursts alone would look like a
+  standing queue.
+
+Check with `sysctl kern.hz`. To set it to 1000:
+
+1. On **System → Settings → Tunables**, add `kern.hz` with value `1000`,
+   and save.
+2. Reboot, then check `sysctl kern.hz`. OPNsense writes the tunable to
+   `/boot/loader.conf` during boot, so the first reboot may still come up
+   at 100; if so, reboot once more.
+
+On a 2 Gbit/s link at 1000 Hz, the timer cost is negligible (measured on a
+Proxmox VM; see *Release bursts on real hardware*). Bare-metal installs
+already run at 1000 Hz.
 
 `dn_cake.ko` is an unofficial kernel module running in your firewall's
 kernel. See *Status* at the top for where it has been tested.
@@ -388,8 +418,9 @@ queue 10001 config pipe 10001 weight 100
 - **Tick granularity.** dummynet releases packets once per tick. As
   `cake_set_rate()` does for slow links, each tin's target is raised to at
   least 1.5 × max(MTU time, tick), and the interval is raised to match. With
-  `kern.hz=100` that gives a 15 ms target. For tighter control, set
-  `kern.hz=1000`.
+  `kern.hz=100`, FreeBSD's default in a VM, that gives a 15 ms target. For
+  tighter control, set `kern.hz=1000` (see
+  [OPNsense in a VM](#opnsense-in-a-vm-set-kernhz1000)).
 - **Release bursts on real hardware.** The pipe sends a tick's worth of
   packets at once, so a saturated pipe releases in bursts. Measured
   2026-10-25 on an OPNsense 26.7 VM on Proxmox: Intel `igc` 2.5 Gbit/s NICs

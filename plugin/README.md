@@ -48,10 +48,20 @@ OPNsense*): pipes and queues on Firewall → Shaper, rules pointing at the
 queues, and a CAKE entry for each pipe on Firewall → Shaper → CAKE, then
 Apply.
 
+**In a VM, set `kern.hz` to 1000.** FreeBSD defaults to 100 Hz under a
+hypervisor, which makes dummynet release traffic in 10 ms bursts and
+coarsens every shaper's delay control, FQ-CoDel's included. Add the tunable
+`kern.hz` = `1000` on System → Settings → Tunables and reboot. Check with
+`sysctl kern.hz`; if it still says 100, reboot once more (the tunable is
+written to `/boot/loader.conf` during boot). See the main README, *OPNsense
+in a VM*.
+
 ## Check
 
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used.
+- `sysctl kern.hz` should say 1000; in a VM it defaults to 100 (see
+  *Install*).
 - `/usr/local/libexec/cake/dnctl sched show` lists the CAKE schedulers with
   their options; the stock `dnctl` lists them as `type CAKE` without options.
 - If the module can't be used, the reason is logged in the system log with
