@@ -559,9 +559,7 @@ cake_wire_bytes(const struct dn_sch_cake_parms *cfg, struct mbuf *m)
 static uint32_t
 cake_wire_len(struct dn_sch_inst *_si, struct mbuf *m)
 {
-	struct cake_schk *schk = (struct cake_schk *)(_si->sched+1);
-
-	return (cake_wire_bytes(&schk->cfg, m));
+	return (cake_wire_bytes(&((struct cake_si *)_si)->cfg, m));
 }
 #endif
 
@@ -1246,7 +1244,6 @@ cake_lookup_flow(struct cake_si *si, uint8_t tin, uint32_t hash)
 static int
 cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 {
-	struct cake_schk *schk = (struct cake_schk *)(si->_si.sched+1);
 	struct cake_flow *f, *fat = NULL;
 	uint32_t t;
 
@@ -1263,9 +1260,9 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 
 	cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
 	    now_ns / 1000);
-	if (schk->cfg.flags & CAKE_INGRESS)
+	if (si->cfg.flags & CAKE_INGRESS)
 		cake_charge_link(si, &si->tins[fat->tin],
-		    cake_wire_bytes(&schk->cfg, fat->mq.head), now_ns);
+		    cake_wire_bytes(&si->cfg, fat->mq.head), now_ns);
 	cake_drop_head(fat, si);
 	return (1);
 }
@@ -1276,17 +1273,16 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 static struct mbuf *
 cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
 {
-	struct cake_schk *schk = (struct cake_schk *)(si->_si.sched+1);
 	struct cake_tin *tin = &si->tins[f->tin];
 	struct mbuf *m;
 	uint64_t pkt_ts;
 	uint32_t len;
 	int drop, marked, ingress;
 
-	ingress = (schk->cfg.flags & CAKE_INGRESS) != 0;
+	ingress = (si->cfg.flags & CAKE_INGRESS) != 0;
 	while ((m = cake_extract_head(f, si, &pkt_ts)) != NULL) {
 		drop = cobalt_should_drop(&f->cvars, &tin->cparams,
-		    now_ns / 1000, pkt_ts, m, schk->cfg.flags & CAKE_ECN_ENABLED,
+		    now_ns / 1000, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
 		    &marked, ingress ? tin->bulk_flows : 0);
 		if (marked)
 			tin->ecn_marks++;
@@ -1297,7 +1293,7 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
 
 		/* in ingress mode the dropped packet still used the link */
 		if (ingress) {
-			len = cake_wire_bytes(&schk->cfg, m);
+			len = cake_wire_bytes(&si->cfg, m);
 			cake_charge_link(si, tin, len, now_ns);
 			f->deficit -= len;
 			tin->tin_deficit -= len;
@@ -1398,8 +1394,42 @@ cake_check(struct cake_si *si, const char *where)
 	}
 }
 #define	CAKE_CHECK(si, where)	cake_check(si, where)
+
+/*
+ * Allocation failure injection for test builds: fail_alloc fails the
+ * table allocations whose bits are set, bit 0 the next one, and is
+ * consumed one bit per allocation; fail_alloc_all fails all of them
+ * while set, leaving fail_alloc for when it is cleared. rebuilds and rebuild_failures count the outcomes of
+ * reconfigurations that need new tables.
+ */
+static u_int cake_fail_alloc, cake_fail_alloc_all;
+static u_int cake_rebuilds, cake_rebuild_failures;
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, fail_alloc,
+	CTLFLAG_RW, &cake_fail_alloc, 0, "CAKE_DEBUG allocations to fail");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, fail_alloc_all,
+	CTLFLAG_RW, &cake_fail_alloc_all, 0, "CAKE_DEBUG fail all allocations");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, rebuilds,
+	CTLFLAG_RD, &cake_rebuilds, 0, "CAKE_DEBUG table rebuilds");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, rebuild_failures,
+	CTLFLAG_RD, &cake_rebuild_failures, 0, "CAKE_DEBUG failed rebuilds");
+
+static void *
+cake_alloc(size_t n, size_t size)
+{
+	if (cake_fail_alloc_all)
+		return (NULL);
+	if (cake_fail_alloc & 1) {
+		cake_fail_alloc >>= 1;
+		return (NULL);
+	}
+	cake_fail_alloc >>= 1;
+	return (mallocarray(n, size, M_DUMMYNET, M_NOWAIT | M_ZERO));
+}
+#define	CAKE_COUNT(c)		((c)++)
 #else
 #define	CAKE_CHECK(si, where)	do { } while (0)
+#define	cake_alloc(n, size)	mallocarray(n, size, M_DUMMYNET, M_NOWAIT | M_ZERO)
+#define	CAKE_COUNT(c)		do { } while (0)
 #endif
 
 /*
@@ -1429,7 +1459,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	    &srch, &dsth);
 	t = si->dscp_map[dscp];
 	tin = &si->tins[t];
-	if ((schk->cfg.flags & CAKE_WASH) && dscp != 0)
+	if ((si->cfg.flags & CAKE_WASH) && dscp != 0)
 		cake_wash(m);
 	f = cake_lookup_flow(si, t, hash);
 	if (cake_dsrc(si->flow_mode) || cake_ddst(si->flow_mode))
@@ -1451,18 +1481,18 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	if (!f->active) {
 		STAILQ_INSERT_TAIL(&tin->newflows, f, flowchain);
 		f->set = CAKE_SET_SPARSE;
-		f->deficit = cake_flow_quantum(si, f, schk->cfg.quantum);
+		f->deficit = cake_flow_quantum(si, f, si->cfg.quantum);
 		f->active = 1;
 	}
 
-	if (schk->cfg.flags & CAKE_ACK_FILTER) {
+	if (si->cfg.flags & CAKE_ACK_FILTER) {
 		ack = cake_ack_filter(f,
-		    (schk->cfg.flags & CAKE_ACK_AGGRESSIVE) != 0);
+		    (si->cfg.flags & CAKE_ACK_AGGRESSIVE) != 0);
 		if (ack != NULL) {
 			tin->ack_drops++;
-			if (schk->cfg.flags & CAKE_INGRESS)
+			if (si->cfg.flags & CAKE_INGRESS)
 				cake_charge_link(si, tin,
-				    cake_wire_bytes(&schk->cfg, ack), now_ns);
+				    cake_wire_bytes(&si->cfg, ack), now_ns);
 			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
 			FREE_PKT(ack);
 		}
@@ -1472,7 +1502,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	 * is usually not the one this packet went to, so report the enqueue
 	 * as a success.
 	 */
-	while (si->main_q.ni.length > schk->cfg.limit ||
+	while (si->main_q.ni.length > si->cfg.limit ||
 	    si->main_q.ni.len_bytes > si->buffer_limit)
 		if (!cake_drop_fattest(si, now_ns))
 			break;
@@ -1548,6 +1578,10 @@ cake_dequeue(struct dn_sch_inst *_si)
 	now_ns = cake_now_ns();
 	now = now_ns / 1000;
 
+	/* a rate change reaches a backlog without waiting for new packets */
+	if (__predict_false(si->gen != schk->gen))
+		cake_reconfig(si, schk);
+
 	for (;;) {
 		/* packets may have been dropped by COBALT on the way */
 		if (si->main_q.ni.length == 0) {
@@ -1593,7 +1627,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 				tin->bulk_flows++;
 				cake_host_bulk(si, f, 1);
 			}
-			f->deficit += cake_flow_quantum(si, f, schk->cfg.quantum);
+			f->deficit += cake_flow_quantum(si, f, si->cfg.quantum);
 			STAILQ_REMOVE_HEAD(list, flowchain);
 			STAILQ_INSERT_TAIL(&tin->oldflows, f, flowchain);
 			continue;
@@ -1621,7 +1655,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 		}
 
 		/* account in link bytes, as the pipe charges them */
-		len = cake_wire_bytes(&schk->cfg, m);
+		len = cake_wire_bytes(&si->cfg, m);
 		f->deficit -= len;
 		if (si->shaped)
 			cake_charge_tin(tin, len, now_ns);
@@ -1707,18 +1741,20 @@ cake_buffer_limit(struct cake_si *si, struct dn_sch_cake_parms *cfg,
 static int
 cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 {
+	static struct timeval lastfail;
+	static int failpps;
 	struct dn_sch_cake_parms *cfg = &schk->cfg;
 	struct cake_flow *flows;
 	struct cake_host *hosts;
 	uint32_t i, n, bw;
 
 	n = cake_tin_cnt[cfg->diffserv] * cfg->flows_cnt;
-	flows = mallocarray(n, sizeof(struct cake_flow), M_DUMMYNET,
-	    M_NOWAIT | M_ZERO);
-	hosts = mallocarray(n, sizeof(struct cake_host), M_DUMMYNET,
-	    M_NOWAIT | M_ZERO);
+	flows = cake_alloc(n, sizeof(struct cake_flow));
+	hosts = cake_alloc(n, sizeof(struct cake_host));
 	if (flows == NULL || hosts == NULL) {
-		D("cannot allocate memory for cake flows");
+		/* a failed rebuild is retried on every packet */
+		if (ppsratecheck(&lastfail, &failpps, 1))
+			D("cannot allocate memory for cake flows");
 		free(flows, M_DUMMYNET);
 		free(hosts, M_DUMMYNET);
 		return ENOMEM ;
@@ -1731,6 +1767,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 	si->dscp_map = cake_dscp_maps[cfg->diffserv];
 	si->flow_mode = cfg->flow_mode;
 	si->cur_tin = 0;
+	si->cfg = *cfg;
 	si->gen = schk->gen;
 
 	bw = si->_si.sched->link.bandwidth;
@@ -1789,6 +1826,8 @@ cake_free_tables(struct cake_si *si, struct cake_flow *flows,
  * configuration (and pipe rate) when it next sees a packet. Rates and AQM
  * parameters change live; a new tin count, flow count or isolation mode
  * needs new tables, and the packets queued in the old ones are dropped.
+ * If they cannot be allocated the instance keeps running on its old
+ * tables and its own copy of the old configuration, and tries again.
  */
 static void
 cake_reconfig(struct cake_si *si, struct cake_schk *schk)
@@ -1805,14 +1844,18 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 		cake_buffer_limit(si, cfg, bw);
 		for (i = 0; i < si->tin_cnt; i++)
 			cake_tin_params(si, i, cfg, bw);
+		si->cfg = *cfg;
 		si->gen = schk->gen;
 		return;
 	}
 
 	n = si->tin_cnt * si->flows_cnt;
-	if (cake_new_tables(si, schk) != 0)
+	if (cake_new_tables(si, schk) != 0) {
+		CAKE_COUNT(cake_rebuild_failures);
 		return;		/* keep the old tables, try again later */
+	}
 	cake_free_tables(si, flows, hosts, n);
+	CAKE_COUNT(cake_rebuilds);
 }
 
 /*

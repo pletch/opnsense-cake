@@ -39,8 +39,8 @@ On an OPNsense machine of the target series (a VM will do), as root:
 Copy the two packages to the firewall and install `cake-kmod` first:
 
 ```sh
-pkg add cake-kmod-1.0.pkg
-pkg add os-cake-1.0.pkg
+pkg add cake-kmod-1.1.pkg
+pkg add os-cake-1.1.pkg
 ```
 
 Then set up the shaper as described in the main README (*Install on

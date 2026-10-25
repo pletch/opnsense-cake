@@ -231,6 +231,7 @@ struct cake_si {
 	uint32_t flow_mode;	/* mode the host counts were kept for */
 	uint32_t dither;	/* PRNG state for quantum dithering */
 	uint32_t gen;		/* cake_schk.gen the tables were built for */
+	struct dn_sch_cake_parms cfg; /* configuration of this instance */
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */
 };

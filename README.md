@@ -301,13 +301,21 @@ queue 10001 config pipe 10001 weight 100
 - **Reconfiguring live instances.** If the type and mask are unchanged,
   dummynet reconfigures a scheduler in place and keeps its instances; only
   `config()` runs. OPNsense's Apply does exactly that. `cake_config()`
-  bumps a generation counter, and the next enqueue on each instance picks
-  up the change:
+  bumps a generation counter, and the next enqueue or dequeue on each
+  instance picks up the change:
   - A new rate, target, interval or quantum is applied in place, without
     dropping anything.
   - A new tin count, flow count or isolation mode builds new tables, then
     drops what was queued in the old ones. A type change drops queued
     packets as well.
+  - Each instance runs on its own copy of the configuration, which changes
+    only when the change has been applied. If the new tables cannot be
+    allocated, the instance keeps its old tables and the old configuration
+    and tries again on the next packet, logging at most once a second.
+    Before 1.1 the packet paths read flags, quantum, limit and overhead
+    from the scheduler's configuration, so such a failure mixed old tables
+    with new parameters, and a backlog drained at the old rate until a new
+    packet arrived.
 
   Before this was added, a GUI change to the diffserv mode or the flow count
   did nothing until the instance was recreated, e.g. by a reboot.
@@ -450,6 +458,7 @@ queue 10001 config pipe 10001 weight 100
   | flood | unpaced 8000-byte UDP (IP fragments) both ways + 4000-byte ping | recovers, 0% loss after |
   | ipv6 | ping6 + TCP download | 0% loss, 47 Mbit/s of 50 |
   | churn | 45 reconfigs in 45 s (cake/fq_codel/fifo, all diffserv modes, 50↔30 Mbit/s) under RRUL | clean, RRUL completes |
+  | allocfail (1.1) | tin count changed under RRUL while every table allocation fails for 8 s, then one host and one flow allocation fail | old tables kept (0 rebuilds in about 125,000 failed attempts, traffic flowing), then both instances rebuild; 0 check errors |
   | unload | `kldunload` during RRUL, then after switching to fifo | refused while busy, unloads when idle, reloads |
   | leaks | after all of the above | dummynet malloc back to baseline, 0 queued, mbufs flat across further runs |
 

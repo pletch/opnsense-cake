@@ -11,6 +11,8 @@
 #   ipv6      TCP and ping over IPv6
 #   churn     scheduler type, diffserv mode and pipe rate changed every
 #             second under RRUL load
+#   allocfail tin count changed under RRUL while table allocations fail:
+#             the old tables stay in use, then the rebuild succeeds
 #   unload    kldunload refused while in use, and while a CAKE scheduler
 #             is only configured (no instance yet), works once released
 #             (skipped when CAKE is built into dummynet.ko)
@@ -162,6 +164,21 @@ opn '/root/work/opn-robust.sh params diffserv=1 flowmode=7 && ipfw -q pipe 1 con
 /root/work/lul-sched.sh cake' >/dev/null
 consistent && [ "$r" = "flent-exit 0" ] && ok=1 || ok=0
 result churn $ok "$c, $r, check_errors $(stat check_errors)"
+
+echo "== allocfail"
+rrul 45 >"$serve/allocfail.out" &
+rpid=$!
+sleep 5
+a=$(opn '/root/work/opn-robust.sh allocfail 8' 60)
+wait $rpid
+r=$(cat "$serve/allocfail.out")
+opn '/root/work/opn-robust.sh params diffserv=1 && /root/work/lul-sched.sh cake' >/dev/null
+# two instances (one per direction) rebuilt; the failures include the
+# held ones that raced the switch, so check the mask was used up instead
+printf '%s\n' "$a" | awk '$1 == "held_rebuilds" && $2 == 0 && $4 > 0 &&
+    $6 > 0 && $10 == 2 && $12 >= 2 && $14 == 0 { ok = 1 } END { exit !ok }' &&
+    consistent && [ "$r" = "flent-exit 0" ] && ok=1 || ok=0
+result allocfail $ok "$(printf '%s\n' "$a" | grep held_), $r, check_errors $(stat check_errors)"
 
 echo "== unload"
 if [ $builtin = 1 ]; then

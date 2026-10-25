@@ -5,6 +5,9 @@
 #   params KEY=VAL..  set cake sysctl defaults (limit, flows, quantum, diffserv)
 #   churn SECONDS     keep switching scheduler type, diffserv, isolation
 #                     mode and pipe rate
+#   allocfail SECONDS change the tin count with every table allocation
+#                     failing for SECONDS, then with one flow and one host
+#                     allocation failing (CAKE_DEBUG)
 #   v6up              IPv6 on the test links, shaped like IPv4
 #   cpu SECONDS       all-CPU busy share over SECONDS, from kern.cp_time
 #   prof SCHED SECONDS  time SCHED_enqueue/SCHED_dequeue (cake, fq_codel)
@@ -46,6 +49,33 @@ churn)
 		sleep 1
 	done
 	echo "churn: $i reconfigurations"
+	;;
+allocfail)
+	# the instances must keep their old tables while rebuilds fail, then
+	# rebuild once allocations work again
+	n() { sysctl -n $SYSCTL.$1; }
+	# idle instances are expired: wait for traffic to bring them back,
+	# or the failures hit new_sched instead of a rebuild
+	i=0
+	until [ "$("$0" status | sed -n 's/^sched_backlog //p')" -gt 0 ]; do
+		i=$((i + 1))
+		[ $i -gt 40 ] && { echo "allocfail: no backlog"; exit 1; }
+		sleep 0.5
+	done
+	r0=$(n rebuilds); f0=$(n rebuild_failures)
+	sysctl -q $SYSCTL.fail_alloc_all=1 >/dev/null
+	sysctl -q $SYSCTL.diffserv=2 >/dev/null
+	/root/work/lul-sched.sh cake >/dev/null || exit 1
+	sleep "${2:-8}"
+	r1=$(n rebuilds); f1=$(n rebuild_failures)
+	b=$("$0" status | sed -n 's/^sched_backlog //p')
+	# bits 1 and 2: the first attempt loses its hosts, the second its flows
+	sysctl -q $SYSCTL.fail_alloc=6 $SYSCTL.fail_alloc_all=0 >/dev/null
+	sleep 3
+	echo "held_rebuilds $((r1 - r0)) held_failures $((f1 - f0))" \
+	    "held_backlog $b after_wait ${i}" \
+	    "rebuilds $(($(n rebuilds) - r1))" \
+	    "failures $(($(n rebuild_failures) - f1)) left $(n fail_alloc)"
 	;;
 v6up)
 	sysctl -q net.inet6.ip6.forwarding=1
