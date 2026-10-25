@@ -26,6 +26,86 @@
 
 <script>
     $( document ).ready(function() {
+        function fmtRate(bits) {
+            if (!bits) {
+                return "{{ lang._('unshaped') }}";
+            }
+            return bits >= 1e9 ? (bits / 1e9).toFixed(2) + " Gbit/s" : (bits / 1e6).toFixed(1) + " Mbit/s";
+        }
+
+        function fmtTime(us) {
+            return (us / 1000).toFixed(us < 10000 ? 2 : 1) + " ms";
+        }
+
+        function fmtBytes(bytes) {
+            let units = ["B", "KB", "MB", "GB", "TB"], i = 0;
+            while (bytes >= 1000 && i < units.length - 1) {
+                bytes /= 1000;
+                i++;
+            }
+            return (i ? bytes.toFixed(1) : bytes) + " " + units[i];
+        }
+
+        /* rows of a pipe's statistics table, one column per tin, as tc -s shows them */
+        const statRows = [
+            ["{{ lang._('Rate threshold') }}", t => fmtRate(t.rate)],
+            ["{{ lang._('Target') }}", t => fmtTime(t.target)],
+            ["{{ lang._('Interval') }}", t => fmtTime(t.interval)],
+            ["{{ lang._('Peak delay') }}", t => fmtTime(t.peak_delay)],
+            ["{{ lang._('Average delay') }}", t => fmtTime(t.avg_delay)],
+            ["{{ lang._('Base delay') }}", t => fmtTime(t.base_delay)],
+            ["{{ lang._('Packets sent') }}", t => t.pkts],
+            ["{{ lang._('Bytes sent') }}", t => fmtBytes(t.bytes)],
+            ["{{ lang._('Backlog') }}", t => t.backlog + " / " + fmtBytes(t.backlog_bytes)],
+            ["{{ lang._('Drops') }}", t => t.drops],
+            ["{{ lang._('ECN marks') }}", t => t.marks],
+            ["{{ lang._('ACK filter drops') }}", t => t.ack_drops],
+            ["{{ lang._('Sparse flows') }}", t => t.sparse],
+            ["{{ lang._('Bulk flows') }}", t => t.bulk],
+            ["{{ lang._('Decaying flows') }}", t => t.decaying],
+            ["{{ lang._('Unresponsive flows') }}", t => t.unresponsive],
+            ["{{ lang._('Hash collisions') }}", t => t.collisions]
+        ];
+
+        /**
+         * per-tin statistics of each pipe that uses CAKE
+         */
+        function showStats(data) {
+            let $stats = $("#cake_stats").empty();
+            if (!data.usable || !data.schedulers || data.schedulers.length == 0) {
+                $stats.hide();
+                return;
+            }
+            if (!data.stats_available) {
+                $stats.append($("<div/>").addClass("alert alert-info").text(
+                    "{{ lang._('Statistics need cake-kmod 1.3 or later.') }}"
+                )).show();
+                return;
+            }
+            data.schedulers.forEach(function(sched) {
+                sched.instances.forEach(function(tins, inst) {
+                    let title = "{{ lang._('Pipe') }} " + sched.sched +
+                        (sched.description ? ": " + sched.description : "") +
+                        (sched.instances.length > 1 ? " ({{ lang._('instance') }} " + (inst + 1) + ")" : "");
+                    let $head = $("<tr/>").append($("<th/>").text(title));
+                    tins.forEach(t => $head.append($("<th/>").text(t.name)));
+                    let $body = $("<tbody/>");
+                    statRows.forEach(function(row) {
+                        let $tr = $("<tr/>").append($("<td/>").text(row[0]));
+                        tins.forEach(t => $tr.append($("<td/>").text(row[1](t))));
+                        $body.append($tr);
+                    });
+                    $stats.append($("<div/>").addClass("content-box").append(
+                        $("<div/>").addClass("table-responsive").append(
+                            $("<table/>").addClass("table table-condensed table-striped")
+                                .append($("<thead/>").append($head), $body)
+                        )
+                    ));
+                });
+            });
+            $stats.show();
+        }
+
         /**
          * show whether the kernel module can be used
          */
@@ -61,6 +141,8 @@
                 } else {
                     $hz.hide();
                 }
+
+                showStats(data);
             });
         }
 
@@ -81,6 +163,12 @@
         });
 
         updateStatus();
+        /* keep the statistics current while the page is visible */
+        setInterval(function() {
+            if (!document.hidden) {
+                updateStatus();
+            }
+        }, 5000);
     });
 </script>
 
@@ -95,4 +183,6 @@
 </div>
 
 {{ partial('layout_partials/base_apply_button', {'data_endpoint': '/api/cake/service/reconfigure'}) }}
+
+<div id="cake_stats" style="display: none;"></div>
 {{ partial('layout_partials/base_dialog', ['fields': formDialogPipe, 'id': formGridPipe['edit_dialog_id'], 'label': lang._('Edit CAKE pipe')]) }}

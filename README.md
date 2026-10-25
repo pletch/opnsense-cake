@@ -122,7 +122,7 @@ kernel. See *Status* at the top for where it has been tested.
   `pkg delete -y os-cake cake-kmod`.
 - **Compatibility is checked against the exact `dummynet.ko`.** The module
   depends on dummynet's internal structures, which no interface version
-  covers. From `cake-kmod` 1.2, the package records the SHA256 of the
+  covers. From `cake-kmod` 1.3, the package records the SHA256 of the
   `dummynet.ko` it was built against, and the plugin only loads CAKE if the
   `dummynet.ko` in use matches (as well as the FreeBSD release). OPNsense
   builds its kernels reproducibly: 26.7 and 26.7.7, 485 commits apart, ship

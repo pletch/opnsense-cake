@@ -70,6 +70,7 @@
 #include <sys/mbuf.h>
 #include <sys/module.h>
 #include <sys/time.h>
+#include <sys/sbuf.h>
 #include <sys/libkern.h>
 #include <sys/endian.h>
 #include <net/if.h>	/* IFNAMSIZ */
@@ -79,6 +80,7 @@
 #include <netinet/ip_dummynet.h>
 
 #include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/rwlock.h>
 
@@ -526,6 +528,7 @@ cake_update_stats(struct cake_flow *q, struct cake_si *si, int len,
 		q->stats.length += inc;
 		q->stats.len_bytes += len;
 		si->tins[q->tin].backlog += inc;
+		si->tins[q->tin].backlog_bytes += len;
 
 		/* update scheduler instance stats */
 		si->_si.ni.length += inc;
@@ -1298,6 +1301,7 @@ cake_lookup_flow(struct cake_si *si, uint8_t tin, uint32_t hash)
 	}
 
 	/* every way is busy: share the default way */
+	si->tins[tin].way_collisions++;
 	f = &flows[idx];
 	f->tag = hash;
 	return (f);
@@ -1334,6 +1338,31 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 	return (1);
 }
 
+/* sch_cake's cake_ewma() */
+static __inline uint64_t
+cake_ewma(uint64_t avg, uint64_t sample, int shift)
+{
+	avg -= avg >> shift;
+	avg += sample >> shift;
+	return (avg);
+}
+
+/* count a packet the tin sends, and its queue delay as sch_cake does */
+static __inline void
+cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now,
+	uint64_t pkt_ts)
+{
+	uint64_t delay = now > pkt_ts && pkt_ts != 0 ? now - pkt_ts : 0;
+
+	tin->tx_pkts++;
+	tin->tx_bytes += m->m_pkthdr.len;
+	tin->avg_delay = cake_ewma(tin->avg_delay, delay, 8);
+	tin->peak_delay = cake_ewma(tin->peak_delay, delay,
+	    delay > tin->peak_delay ? 2 : 8);
+	tin->base_delay = cake_ewma(tin->base_delay, delay,
+	    delay < tin->base_delay ? 2 : 8);
+}
+
 /*
  * Dequeue from a flow, applying COBALT. Return NULL if the flow is empty.
  */
@@ -1355,8 +1384,10 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
 			tin->ecn_marks++;
 
 		/* last packet in queue may be marked, shouldn't be dropped */
-		if (!drop || f->mq.head == NULL)
+		if (!drop || f->mq.head == NULL) {
+			cake_tin_sent(tin, m, now_ns / 1000, pkt_ts);
 			return m;
+		}
 
 		/* in ingress mode the dropped packet still used the link */
 		if (ingress) {
@@ -1391,16 +1422,16 @@ cake_check(struct cake_si *si, const char *where)
 	static u_int calls;
 	struct cake_flow *f;
 	struct mbuf *m;
-	uint64_t pkts = 0, bytes = 0, tpkts;
+	uint64_t pkts = 0, bytes = 0, tpkts, tbytes;
 	uint32_t t, i, n, listed = 0, active = 0;
 	int bad = 0;
 
 	for (t = 0; t < si->tin_cnt; t++) {
-		tpkts = 0;
+		tpkts = tbytes = 0;
 		TAILQ_FOREACH(f, &si->tins[t].newflows, flowchain) {
 			listed++;
 			tpkts += f->stats.length;
-			bytes += f->stats.len_bytes;
+			tbytes += f->stats.len_bytes;
 			if (!f->active || f->tin != t ||
 			    f->set == CAKE_SET_DECAYING)
 				bad |= 0x01;
@@ -1408,7 +1439,7 @@ cake_check(struct cake_si *si, const char *where)
 		TAILQ_FOREACH(f, &si->tins[t].oldflows, flowchain) {
 			listed++;
 			tpkts += f->stats.length;
-			bytes += f->stats.len_bytes;
+			tbytes += f->stats.len_bytes;
 			if (!f->active || f->tin != t ||
 			    f->set == CAKE_SET_DECAYING)
 				bad |= 0x01;
@@ -1419,9 +1450,11 @@ cake_check(struct cake_si *si, const char *where)
 			    f->set != CAKE_SET_DECAYING || f->mq.head != NULL)
 				bad |= 0x01;
 		}
-		if (tpkts != si->tins[t].backlog)
+		if (tpkts != si->tins[t].backlog ||
+		    tbytes != si->tins[t].backlog_bytes)
 			bad |= 0x02;
 		pkts += tpkts;
+		bytes += tbytes;
 	}
 	if (pkts != si->main_q.ni.length || pkts != si->_si.ni.length)
 		bad |= 0x04;
@@ -1903,6 +1936,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 		TAILQ_INIT(&si->tins[i].decayingflows);
 		si->tins[i].time_next = 0;
 		si->tins[i].backlog = 0;
+		si->tins[i].backlog_bytes = 0;
 		si->tins[i].sparse_flows = 0;
 		si->tins[i].bulk_flows = 0;
 		si->tins[i].decaying_flows = 0;
@@ -1987,6 +2021,17 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 }
 
 /*
+ * Every CAKE instance, for net.inet.ip.dummynet.cake.stats. Its own lock
+ * (taken inside dummynet's in new_sched and free_sched), so that reading
+ * the statistics never holds up packet processing.
+ */
+static LIST_HEAD(, cake_si) cake_instances =
+    LIST_HEAD_INITIALIZER(cake_instances);
+static struct mtx cake_instances_mtx;
+MTX_SYSINIT(cake_instances, &cake_instances_mtx, "dn_cake instances",
+    MTX_DEF);
+
+/*
  * Initialize cake scheduler instance.
  * also, allocate memory for flows array.
  */
@@ -2020,6 +2065,11 @@ cake_new_sched(struct dn_sch_inst *_si)
 	if (error != 0)
 		return error;
 
+	mtx_lock(&cake_instances_mtx);
+	LIST_INSERT_HEAD(&cake_instances, si, all);
+	si->listed = 1;
+	mtx_unlock(&cake_instances_mtx);
+
 	cake_desc.ref_count++;
 	return 0;
 }
@@ -2033,6 +2083,12 @@ cake_free_sched(struct dn_sch_inst *_si)
 	struct cake_si *si = (struct cake_si *)_si ;
 	uint32_t i;
 
+	if (si->listed) {
+		mtx_lock(&cake_instances_mtx);
+		LIST_REMOVE(si, all);
+		si->listed = 0;
+		mtx_unlock(&cake_instances_mtx);
+	}
 	if (si->flows != NULL) {
 		for (i = 0; i < si->tin_cnt * si->flows_cnt; i++)
 			dn_free_pkts(si->flows[i].mq.head);
@@ -2153,6 +2209,79 @@ cake_destroy(struct dn_schk *_schk)
 	}
 	return 0;
 }
+
+/*
+ * net.inet.ip.dummynet.cake.stats: a line per tin of every CAKE instance,
+ * for the plugin's statistics: the scheduler (pipe) number, an instance
+ * number, the diffserv mode and tin, then the counters as "name value"
+ * pairs. Copied out from a snapshot, as the copy may sleep.
+ */
+struct cake_tin_snap {
+	uint32_t	sched, inst, diffserv, tin;
+	uint64_t	rate;		/* bit/s, the tin's threshold; 0 unshaped */
+	struct cake_tin	b;
+};
+
+static int
+cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
+{
+	struct cake_tin_snap *snap;
+	struct cake_si *si;
+	struct cake_tin *b;
+	struct sbuf sb;
+	u_int cap = 0, n = 0, inst = 0, i, t;
+	int error;
+
+	mtx_lock(&cake_instances_mtx);
+	LIST_FOREACH(si, &cake_instances, all)
+		cap += si->tin_cnt;
+	mtx_unlock(&cake_instances_mtx);
+	/* room for instances created in between; any beyond are left out */
+	cap += 4 * CAKE_MAX_TINS;
+	snap = malloc(cap * sizeof(*snap), M_TEMP, M_WAITOK | M_ZERO);
+
+	mtx_lock(&cake_instances_mtx);
+	LIST_FOREACH(si, &cake_instances, all) {
+		for (t = 0; t < si->tin_cnt && n < cap; t++, n++) {
+			snap[n].sched = si->_si.sched->sch.sched_nr;
+			snap[n].inst = inst;
+			snap[n].diffserv = si->cfg.diffserv;
+			snap[n].tin = t;
+			snap[n].rate = ((uint64_t)si->_si.sched->link.bandwidth *
+			    cake_tin_share[si->cfg.diffserv][t]) >> 16;
+			snap[n].b = si->tins[t];
+		}
+		inst++;
+	}
+	mtx_unlock(&cake_instances_mtx);
+
+	sbuf_new_for_sysctl(&sb, NULL, 512, req);
+	for (i = 0; i < n; i++) {
+		b = &snap[i].b;
+		sbuf_printf(&sb, "sched %u inst %u diffserv %u tin %u "
+		    "rate %ju target %ju interval %ju pkts %ju bytes %ju "
+		    "drops %ju marks %ju ack_drops %ju backlog %u "
+		    "backlog_bytes %ju sparse %u bulk %u decaying %u "
+		    "unresponsive %u collisions %ju peak_delay %ju "
+		    "avg_delay %ju base_delay %ju\n",
+		    snap[i].sched, snap[i].inst, snap[i].diffserv, snap[i].tin,
+		    (uintmax_t)snap[i].rate, (uintmax_t)b->cparams.target,
+		    (uintmax_t)b->cparams.interval, (uintmax_t)b->tx_pkts,
+		    (uintmax_t)b->tx_bytes, (uintmax_t)b->drops,
+		    (uintmax_t)b->ecn_marks, (uintmax_t)b->ack_drops,
+		    b->backlog, (uintmax_t)b->backlog_bytes, b->sparse_flows,
+		    b->bulk_flows, b->decaying_flows, b->unresponsive_flows,
+		    (uintmax_t)b->way_collisions, (uintmax_t)b->peak_delay,
+		    (uintmax_t)b->avg_delay, (uintmax_t)b->base_delay);
+	}
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	free(snap, M_TEMP);
+	return (error);
+}
+SYSCTL_PROC(_net_inet_ip_dummynet_cake, OID_AUTO, stats,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    cake_sysctl_stats, "A", "CAKE per-tin statistics of every instance");
 
 /*
  * Return cake scheduler configurations

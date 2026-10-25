@@ -150,7 +150,7 @@ def dummynet_file():
 def dummynet_check():
     """ whether the dummynet.ko in use is one cake-kmod is built against
     :return: (state, reason): state is 'match', 'unchecked' for a cake-kmod
-             that records no dummynet.ko (before 1.2), or 'mismatch'
+             that records no dummynet.ko (before 1.3), or 'mismatch'
     """
     if not os.path.isfile(KMOD_DUMMYNET):
         return 'unchecked', ''

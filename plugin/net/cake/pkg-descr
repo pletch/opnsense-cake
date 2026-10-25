@@ -12,10 +12,17 @@ Plugin Changelog
 
 1.3
 
+* Per-tin statistics on the CAKE page, as tc -s shows them: rate
+  threshold, peak, average and base delay, packets, bytes, backlog,
+  drops, ECN marks, ACK filter drops, flow counts and hash collisions
+  (needs cake-kmod 1.3)
 * Only load CAKE if the dummynet.ko in use is the one cake-kmod was
-  built against (recorded from cake-kmod 1.2 on), so an update that
+  built against (recorded from cake-kmod 1.3 on), so an update that
   changes dummynet within a FreeBSD release cannot meet a mismatched
   module
+* cake-kmod 1.3: COBALT and the flow lifecycle as in Linux sch_cake,
+  checked bit for bit against it; ECN marking only changes a writable
+  header within the first mbuf
 
 1.2
 

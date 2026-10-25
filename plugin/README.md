@@ -63,6 +63,9 @@ in a VM*.
 
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used.
+- Below the pipes, the page shows each CAKE pipe's statistics per tin, as
+  `tc -s qdisc` does on Linux, refreshed every 5 seconds. The same numbers
+  come from `sysctl net.inet.ip.dummynet.cake.stats` (cake-kmod 1.3 on).
 - `sysctl kern.hz` should say 1000; in a VM it defaults to 100 (see
   *Install*). From 1.2 the CAKE page shows a warning below the status line
   when it is lower.

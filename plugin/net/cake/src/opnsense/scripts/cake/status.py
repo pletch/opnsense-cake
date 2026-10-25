@@ -25,11 +25,23 @@
     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
     POSSIBILITY OF SUCH DAMAGE.
     --------------------------------------------------------------------------------------
-    CAKE kernel module status and the active CAKE schedulers, for the GUI.
+    CAKE kernel module status and the active CAKE schedulers, with their
+    per-tin statistics, for the GUI.
 """
 import json
 import subprocess
-from lib import kmod_status, DNCTL
+import xml.etree.ElementTree as ET
+from lib import kmod_status, CONFIG, DNCTL
+
+# tin names by diffserv mode, in the kernel's tin order, and the order
+# tc(8) shows them in (by priority)
+TINS = {
+    0: (['Best Effort'], [0]),
+    1: (['Best Effort', 'Bulk', 'Voice'], [1, 0, 2]),
+    2: (['Best Effort', 'Bulk', 'Video', 'Voice'], [1, 0, 2, 3]),
+    3: (['Tin %d' % i for i in range(8)], list(range(8))),
+    4: (['Tin %d' % i for i in range(8)], list(range(8)))
+}
 
 
 def sysctl(name):
@@ -39,6 +51,48 @@ def sysctl(name):
     """
     out = subprocess.run(['/sbin/sysctl', '-n', name], capture_output=True, text=True)
     return out.stdout.strip() if out.returncode == 0 else None
+
+
+def tin_stats():
+    """ per-tin statistics of every CAKE instance (cake-kmod 1.3 on)
+    :return: {scheduler number: [instance: [tin: dict]]}, None without them
+    """
+    out = sysctl('net.inet.ip.dummynet.cake.stats')
+    if out is None:
+        return None
+    result = dict()
+    for line in out.split('\n'):
+        parts = line.split()
+        if len(parts) < 8 or len(parts) % 2 != 0:
+            continue
+        try:
+            tin = {key: int(value) for key, value in zip(parts[0::2], parts[1::2])}
+        except ValueError:
+            continue
+        names = TINS.get(tin['diffserv'], ([], []))[0]
+        tin['name'] = names[tin['tin']] if tin['tin'] < len(names) else 'Tin %d' % tin['tin']
+        result.setdefault(str(tin['sched']), dict()).setdefault(tin['inst'], dict())[tin['tin']] = tin
+    # each instance's tins in display order
+    for sched, instances in result.items():
+        for inst, tins in instances.items():
+            order = TINS.get(next(iter(tins.values()))['diffserv'], ([], sorted(tins)))[1]
+            instances[inst] = [tins[i] for i in order if i in tins]
+        result[sched] = [instances[inst] for inst in sorted(instances)]
+    return result
+
+
+def pipe_descriptions():
+    """ traffic shaper pipe descriptions by pipe number
+    :return: dict
+    """
+    result = dict()
+    try:
+        for pipe in ET.parse(CONFIG).getroot().findall('./OPNsense/TrafficShaper/pipes/pipe'):
+            if (pipe.findtext('number') or '').isdigit():
+                result[str(int(pipe.findtext('number')))] = pipe.findtext('description') or ''
+    except (OSError, ET.ParseError):
+        pass
+    return result
 
 
 if __name__ == '__main__':
@@ -59,4 +113,11 @@ if __name__ == '__main__':
             elif sched is not None and parts and parts[0] == 'CAKE':
                 result['schedulers'].append({'sched': sched, 'config': line.strip()})
                 sched = None
+    # None: the module has no statistics (cake-kmod before 1.3)
+    stats = tin_stats() if result['loaded'] else None
+    result['stats_available'] = stats is not None
+    descriptions = pipe_descriptions()
+    for scheduler in result['schedulers']:
+        scheduler['description'] = descriptions.get(scheduler['sched'], '')
+        scheduler['instances'] = stats.get(scheduler['sched'], []) if stats else []
     print(json.dumps(result))

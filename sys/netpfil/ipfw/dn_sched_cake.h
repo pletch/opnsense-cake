@@ -205,6 +205,7 @@ struct cake_tin {
 	int32_t		tin_deficit;	/* WDRR, only used without a rate */
 	uint32_t	tin_quantum;	/* WDRR weight between tins */
 	uint32_t	backlog;	/* packets queued in this tin */
+	uint64_t	backlog_bytes;
 	uint32_t	sparse_flows;	/* CAKE_SET_SPARSE and _SPARSE_WAIT */
 	uint32_t	bulk_flows;	/* flows in CAKE_SET_BULK */
 	uint32_t	decaying_flows;	/* flows in CAKE_SET_DECAYING */
@@ -212,6 +213,13 @@ struct cake_tin {
 	uint64_t	ecn_marks;
 	uint64_t	drops;
 	uint64_t	ack_drops;	/* removed by the ACK filter */
+	uint64_t	tx_pkts;	/* dequeued and sent */
+	uint64_t	tx_bytes;
+	uint64_t	way_collisions;	/* flows that had to share a queue */
+	/* queue delay of sent packets, us, as sch_cake's EWMAs */
+	uint64_t	peak_delay;
+	uint64_t	avg_delay;
+	uint64_t	base_delay;
 };
 
 /* extra cake scheduler configurations */
@@ -240,6 +248,8 @@ struct cake_si {
 	struct dn_sch_cake_parms cfg; /* configuration of this instance */
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */
+	uint8_t	listed;		/* on cake_instances, for the statistics */
+	LIST_ENTRY(cake_si) all;
 };
 
 #endif /* _IP_DN_SCHED_CAKE_H */
