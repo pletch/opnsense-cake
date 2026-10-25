@@ -421,10 +421,15 @@ queue 10001 config pipe 10001 weight 100
   not in the first mbuf are copied out with `m_copydata()`.
 - **Ingress mode** charges dropped packets (COBALT, overflow, ACK filter) to
   the tin clock and the pipe credit, and lets COBALT's target grow with the
-  tin's bulk flows, as sch_cake does. Unlike sch_cake, what drops can owe is
-  capped at one interval of link time: traffic that has crossed the
-  bottleneck can't arrive faster than it, but a flood into a misused pipe
-  owed ~6 minutes of link time at 10 Mbit/s and stalled the pipe.
+  tin's bulk flows, as sch_cake does. Also as sch_cake (from 1.4.2), a
+  failsafe that only sends advance, by 1.5 times their duration, bounds
+  that debt: it never delays the pipe's next send past the failsafe time,
+  so at least 2/3 of the rate goes out however much is dropped. Up to
+  1.4.1 there was no failsafe, only a cap of one interval of link time on
+  the debt (kept as well); with drops charged as fast as the cap renewed,
+  mostly overflow drops under a flood, the pipe sent next to nothing:
+  `test/sched-diff.sh pace-random` found runs at 19 Mbit/s where sch_cake
+  sent 112.
 - **Tins borrow idle capacity.** A tin's rate threshold only decides
   whether it has priority; a tin over its threshold is still served when
   the higher tins have nothing due, as in sch_cake. Checked in diffserv4
@@ -441,7 +446,7 @@ queue 10001 config pipe 10001 weight 100
   | scenario | | Linux sch_cake | this port |
   |---|---|---|---|
   | Voice flow + greedy Bulk | Voice flow / Bulk | 5.0 (0% loss) / 43.2 | 5.0 (0% loss) / 43.4 |
-  | Bulk flow + greedy Voice | Bulk flow / Voice | 4.2 (16% loss), 3 runs alike / 44.1 | 1.3.4: 3.5, 4.6, 3.6 (7–29% loss); 1.4: 3.6, 3.6, 3.5 (29% loss) / 45.0 |
+  | Bulk flow + greedy Voice | Bulk flow / Voice | 4.2 (16% loss), 3 runs alike / 44.1 | 1.3.4: 3.5, 4.6, 3.6 (7–29% loss); 1.4: 3.6, 3.6, 3.5 (29% loss) / 45.0; 1.4.2: 4.0–4.1 (19–21% loss) in 6 of 8 runs, 4.4–5.0 in the others / 44.5 |
   | Voice flow + greedy Video, Best Effort, Bulk | Voice / Video / BE / Bulk | 5.0 (0% loss) / 23.9 / 16.3 / 3.0 | 5.0 (0% loss) / 24.1 / 16.2 / 3.0 |
 
   A Voice flow within its threshold gets all it offers while the other
@@ -449,12 +454,47 @@ queue 10001 config pipe 10001 weight 100
   agree to a few percent. A Bulk flow over its 3.1 Mbit/s threshold, up
   against greedy Voice, gets somewhat more than the threshold in both;
   with 1.4, whose scheduling decisions match sch_cake's packet for packet
-  (`test/sched-diff.sh`), it is as steady as on Linux but gets 3.6 rather
-  than 4.2 Mbit/s. As the schedulers decide alike given the same release
-  times, the gap is in how packets are released, most likely dummynet's
-  batches: it sends a tick's worth (1 ms) at once, so every packet of a
-  batch sees the same time, and the Bulk tin's clock comes due less often
-  than with sch_cake's per-packet shaper. (Not yet measured.)
+  (`test/sched-diff.sh`), it is as steady as on Linux but gets 3.5–3.6
+  rather than 4.2 Mbit/s. Measured, this is dummynet's tick:
+  - It is not the path. Linux's sch_cake on the bench's own path (`test/
+    contention.sh path`: shaping the client VM's interfaces, the router's
+    pipes opened to 1 Gbit/s) gives the same 4.2 Mbit/s (16% loss) as
+    between namespaces, at this port's 15.8 ms RTT.
+  - It is the release times. dummynet asks the scheduler for a tick's
+    worth of packets at once, all at the same time, where sch_cake's
+    shaper asks for each when the link is free. With both tins over their
+    thresholds, the tin with the earlier clock sends, and sending sets its
+    clock to now plus the packet's time at the tin's rate. So Bulk sends
+    again once Voice's clock passes Bulk's, which in batches is only at
+    the next tick. `test/sched-diff.sh pace` drives the same two
+    schedulers with the same trace of this scenario, sch_cake on its own
+    shaper and dn_sched_cake on dummynet's `serve_sched()` credit per
+    tick, and reproduces the gap without any network. Bulk gets, in
+    Mbit/s:
+
+    | kern.hz | sch_cake | dn_sched_cake (harness) | bench |
+    |---|---|---|---|
+    | 1000 | 3.93 | 3.41 | 3.5 (29% loss), 5 of 6 runs |
+    | 4000 | 3.93 | 3.77 | 3.6–3.8 (23–28% loss) |
+    | 10000 | 3.93 | 3.90 | |
+    | 100000 | 3.93 | 3.93 | |
+
+    (The harness counts IP lengths and has no TCP, hence 3.93 rather than
+    4.2.) With release times as fine as sch_cake's, the shares are
+    identical; the scheduler's decisions are not the cause.
+  - 1.4.2 takes the tick out of those decisions with the link clock (see
+    the design notes): the harness gives 3.92–3.93 Mbit/s at `kern.hz`
+    100, 1000 and 4000, and the bench 4.0–4.1 Mbit/s in 6 of 8 runs
+    (Linux 4.2), the others higher, 4.4–5.0. `test/sched-diff.sh
+    pace-random` checks it against 300 random scenarios released the
+    same way: each tin's throughput is as before (mean deviation from
+    sch_cake 0.26% of the rate), so it costs nothing elsewhere. Those
+    runs also found the missing ingress failsafe (from 87 ingress runs,
+    the mean deviation went from 7.1% to 0.25% of the rate, the worst
+    from 65% to 5.7%). What is left is the tick's own: with the
+    harness's small memory limits (32–512 KB), a tick's arrivals held
+    back overflow sooner, and at `kern.hz=100000` the same scenarios
+    match.
 - **The 8-tin modes can starve a tin.** Each tin may use its share of the
   rate at priority, and in `diffserv8` and `precedence` each share is 7/8 of
   the one below (87.5%, 77%, 67%, ...), so together they claim far more
@@ -545,9 +585,19 @@ queue 10001 config pipe 10001 weight 100
   overflow for very long intervals (slow pipes), where `reciprocal_scale()`
   truncates the interval to 32 bits.
 - **Ingress drops** charge the link as if the packet had been sent (the
-  tin clock, and with a stock dummynet the pipe credit), and, as in
-  sch_cake, a COBALT drop in ingress mode charges the flow's deficit and
-  sends DRR back to choose a flow again (from 1.4).
+  tin clock, the link clock and the pipe credit), within sch_cake's
+  failsafe (from 1.4.2), and, as in sch_cake, a COBALT drop in ingress
+  mode charges the flow's deficit and sends DRR back to choose a flow
+  again (from 1.4).
+- **The link clock** (from 1.4.2). dummynet asks the scheduler for a
+  tick's worth of packets at once, at one time; sch_cake's shaper asks for
+  each when the link is free. Tin selection and the tin clocks go by that
+  time, so tin shares changed with the tick: Bulk against greedy Voice got
+  13% less at `kern.hz=1000`. They now use the time each packet would
+  leave a link paced at the pipe's rate (the previous packet's plus its
+  own duration, at most a tick behind the real time and never ahead);
+  COBALT keeps the real time. `net.inet.ip.dummynet.cake.link_clock=0`
+  turns it off, for comparison.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
 - **Instance expiry.** dummynet destroys a scheduler instance as soon as
@@ -736,9 +786,10 @@ queue 10001 config pipe 10001 weight 100
   is lifted for the comparison, as differences past it are intended. To
   compare the same accounting, both see IP-length packets (sch_cake sees
   layer-2 lengths and limits memory by truesize; dummynet sees IP lengths,
-  and has a packet limit as well, set out of the way). Result: 300 random
-  scenarios, 11.39 million packets and 857,538 drops (overflow, ACK filter
-  and COBALT), identical outside ingress mode, 0 consistency errors.
+  and has a packet limit as well, set out of the way). Result
+  (`test/sched-diff.sh 300 2`): 300 random scenarios, 12.76 million
+  packets and 1,054,452 drops (overflow, ACK filter and COBALT),
+  identical outside ingress mode, 0 consistency errors.
   Stage 2 found three more differences, fixed in 1.4:
   - overflow picked the fattest flow by an exact scan; sch_cake keeps a
     max-heap that is only kept up to date while overflow is recent, so
@@ -753,15 +804,28 @@ queue 10001 config pipe 10001 weight 100
   sch_cake's own link shaper, which it checks again when DRR comes to an
   empty flow, so a dequeue can end after a drop without sending, while
   dn_sched_cake, paced from outside by the pipe's credit, finishes the
-  call. In the 300 runs, 97 were in ingress mode; 57 matched throughout,
-  40 drifted apart after 4,900 identical packets on average.
+  call. In the 300 runs, 87 were in ingress mode; 58 matched throughout,
+  29 drifted apart after 7,673 identical packets on average.
 
   How much of each side is production code: `sched-diff.sh` prints every
-  extracted line that is not a line of its source. Of sch_cake's 2164
-  lines, 3 are not (the DSCP stub); of dn_sched_cake's 1786, 1 (the
+  extracted line not matched, in order, to its source, and fails before
+  comparing if any is not one of the documented substitutions. Of
+  sch_cake's 2164
+  lines, 3 are not (the DSCP stub); of dn_sched_cake's 1881, 1 (the
   renamed hash function's signature). The rest of the shims sit outside
   the extracted code: kernel and dummynet types, the clock, the flow
   dissector's hashes, and drop logging.
+- The link clock (1.4.2) against sch_cake: the lockstep comparison above
+  asks dn_sched_cake for a packet whenever sch_cake's shaper sends one,
+  so the real time is already the link's and runs with the link clock
+  off. `test/sched-diff.sh link` runs it on: the clock goes from event to
+  event (each arrival, and the moment sch_cake's shaper or failsafe next
+  lets a packet out) instead of in 10 µs steps, so sch_cake decides at the
+  times the link clock computes, from the same rate (the full-rate tin's
+  `rate_ns`, as sch_cake's global shaper). 300 random scenarios, 12.1
+  million packets and 1,006,675 drops, identical outside ingress mode.
+  It fails within a few packets with the link clock's step 10% short or
+  without its restart after an idle link.
 - COBALT against sch_cake (`test/cobalt-diff.sh`, sch_cake at
   `torvalds/linux` 700b4c6c70d6): both implementations are extracted from
   their sources, built side by side and driven with the same random
@@ -912,7 +976,7 @@ queue 10001 config pipe 10001 weight 100
   | ACK filter with collisions (1.3.4) | two TCP downloads over a 0.2 Mbit/s upload in `flowblind` mode, so both connections' ACKs share one queue | 8.5 + 8.4 → 23.1 + 22.2 Mbit/s with 9576 ACKs filtered: each connection's ACKs are only replaced by its own, so neither stalls |
   | `ack-filter` | TCP download, 50 Mbit/s down, 0.2 Mbit/s up | 17.95 → 47.65 Mbit/s, aggressive 48.20 |
   | `memlimit 32k` | UDP flood | largest backlog 31500 bytes |
-  | `ingress` | UDP flood, then ping | flood is charged its drops (0 delivered), ping right after: 0% loss |
+  | `ingress` | UDP flood, then ping | flood is charged its drops (up to 1.4.1 0 delivered; 1.4.2, with sch_cake's failsafe, 548 of egress mode's 829 pps, i.e. 2/3), ping right after: 0% loss |
   | `diffserv8`, `precedence` | RRUL | runs, but a later rerun showed tin starvation (see the 8-tin note under design notes); both are now marked experimental |
 
   The ingress run found the uncapped debt: before the cap, the flood left
@@ -976,7 +1040,10 @@ queue 10001 config pipe 10001 weight 100
    and above. In nested KVM the virtio interrupt cost hides the scheduler's.
 10. Run `make style` (phpcs) on a machine with current packages.
 11. Sub-tick release timing, i.e. an integrated shaper. dummynet sends a
-    tick's worth of packets at once (1 ms at `kern.hz=1000`). It needs
+    tick's worth of packets at once (1 ms at `kern.hz=1000`). The link
+    clock (1.4.2) takes the tick out of CAKE's decisions, but the packets
+    still leave in batches, and a small memory limit overflows sooner
+    with a tick's arrivals held back. It needs
     dummynet's timer reworked, so it can't be part of the plugin. Measured
     on 2.5 Gbit/s NICs shaping 1950 Mbit/s, it would gain little (see
     *Release bursts on real hardware*); it matters for 10 Gbit/s NICs

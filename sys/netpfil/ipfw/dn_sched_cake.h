@@ -283,6 +283,10 @@ struct cake_si {
 	uint32_t flow_mode;	/* mode the host counts were kept for */
 	uint32_t gen;		/* cake_schk.gen the tables were built for */
 	uint32_t bw;		/* pipe rate the tin parameters are for */
+	uint64_t link_time;	/* when the last packet left a paced link */
+	uint64_t link_rate_ns;	/* ns per byte at the pipe's rate, */
+	uint8_t	link_rate_shft;	/* shifted left by link_rate_shft */
+	uint64_t failsafe_time;	/* ingress: next send allowed despite drops */
 	struct dn_sch_cake_parms cfg; /* configuration of this instance */
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */

@@ -125,6 +125,8 @@ static int cake_ecn_mark(struct mbuf *m);
 static void cake_heapify(struct cake_si *si, uint32_t i);
 static __inline void cake_charge_tin(struct cake_tin *tin, int len,
     uint64_t now);
+static __inline uint64_t cake_link_now(struct cake_si *si, uint64_t now);
+static __inline uint64_t cake_link_dur(struct cake_si *si, uint32_t len);
 
 /* cake default parameters */
 static struct dn_sch_cake_parms
@@ -587,32 +589,42 @@ cake_wire_len(struct dn_sch_inst *_si, struct mbuf *m)
 
 /*
  * Charge a packet that was dropped after crossing the link (ingress mode)
- * to the tin clock and the pipe, as sch_cake does with
- * cake_advance_shaper() for its drops. Unlike sch_cake, the debt is capped
- * at one interval of link time: traffic that has crossed the bottleneck
- * cannot arrive faster than it, but a flood into a misused pipe could
- * otherwise stall it for minutes.
+ * to the tin clock, the link clock and the pipe, as sch_cake does with
+ * cake_advance_shaper() for its drops. As sch_cake's failsafe, which only
+ * sends advance (cake_failsafe()), the pipe's debt from drops never
+ * delays its next send past the failsafe time: so it sends at least 2/3
+ * of the rate however much is dropped, at dequeue (COBALT) or at enqueue
+ * (overflow). The debt is also capped at one interval of link time.
  */
 static void
 cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 	uint64_t now_ns)
 {
 	uint64_t interval = tin->cparams.interval, last = tin->time_next;
-	int64_t credit = si->_si.credit, debt;
+	uint64_t link_ns;
+	int64_t credit = si->_si.credit, debt, ahead, failsafe;
 
 	if (!si->shaped)
 		return;
 
 	/* drops only add debt up to the cap, never take any away */
-	cake_charge_tin(tin, len, now_ns);
-	if (tin->time_next > now_ns + interval)
-		tin->time_next = MAX(last, now_ns + interval);
+	link_ns = cake_link_now(si, now_ns);
+	cake_charge_tin(tin, len, link_ns);
+	if (tin->time_next > link_ns + interval)
+		tin->time_next = MAX(last, link_ns + interval);
+	si->link_time = MAX(si->link_time, link_ns) + cake_link_dur(si, len);
 
-	/* pipe credit is in bits * hz */
+	/* pipe credit is in bits * hz, gained at bw per tick. The failsafe
+	 * time ahead of now is debt drops may add; behind now, it is credit
+	 * owed to sends, which drops may not take. Up to a second either
+	 * way counts, which keeps the product in range. */
 	debt = (int64_t)hz * si->_si.sched->link.bandwidth / 1000000 *
 	    (interval / 1000);
+	ahead = (int64_t)(si->failsafe_time - now_ns);
+	ahead = MAX(MIN(ahead, 1000000000LL), -1000000000LL);
+	failsafe = -(ahead / 1000) * (int64_t)(si->bw / 1000) * hz / 1000;
 	si->_si.credit = MAX(credit - (int64_t)hz * 8 * len,
-	    MIN(credit, -debt));
+	    MIN(credit, MAX(-debt, failsafe)));
 }
 
 /*
@@ -1706,9 +1718,20 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	if (cake_dsrc(si->flow_mode) || cake_ddst(si->flow_mode))
 		cake_set_hosts(si, f, srch, dsth);
 
-	/* an idle tin's clock is stale: do not let it claim old credit */
-	if (si->shaped && tin->backlog == 0 && tin->time_next < now_ns)
-		tin->time_next = now_ns;
+	/* as sch_cake's shaper: an idle link without debt starts again now */
+	if (si->main_q.ni.length == 0 && si->link_time < now_ns) {
+		si->link_time = now_ns;
+		si->failsafe_time = now_ns;
+	}
+
+	/* an idle tin's clock is stale: do not let it claim old credit, but
+	 * let it be due on the link clock that cake_dequeue() goes by */
+	if (si->shaped && tin->backlog == 0) {
+		uint64_t link_ns = cake_link_now(si, now_ns);
+
+		if (tin->time_next < link_ns)
+			tin->time_next = link_ns;
+	}
 
 	/* cake_flow_enqueue() only fails when it cannot timestamp a packet */
 	if (cake_flow_enqueue(f, m, si)) {
@@ -1767,6 +1790,61 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 
 	CAKE_CHECK(si, "enqueue");
 	return 0;
+}
+
+/*
+ * The link clock: dummynet asks for a tick's worth of packets at once,
+ * all at the same time, where sch_cake's shaper asks for each when the
+ * link is free. Tin selection and the tin clocks depend on that time:
+ * with every tin over its threshold, the earliest clock sends and moves
+ * to now plus the packet's time at the tin's rate, so in batches a tin
+ * waits for the next tick where sch_cake would send it earlier (Bulk
+ * against greedy Voice got 13% less at kern.hz=1000). So they use the
+ * time each packet would leave a link paced at the pipe's rate: the
+ * previous one's plus its own length at that rate (and in ingress mode
+ * the drops', up to the failsafe), at most one tick behind now and never
+ * ahead of it. COBALT keeps the real time, as a packet may have arrived
+ * after its slot on the link. link_clock=0 goes back to dummynet's time.
+ */
+static u_int cake_link_clock = 1;
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_clock,
+	CTLFLAG_RW, &cake_link_clock, 0,
+	"Pace tin selection by the link's time, not dummynet's tick");
+
+/* a packet's time on the link, at the pipe's rate, as sch_cake's shaper */
+static __inline uint64_t
+cake_link_dur(struct cake_si *si, uint32_t len)
+{
+	return (((uint64_t)len * si->link_rate_ns) >> si->link_rate_shft);
+}
+
+static __inline uint64_t
+cake_link_now(struct cake_si *si, uint64_t now)
+{
+	uint64_t tick_ns = 1000000000ULL / hz, t = si->link_time;
+
+	if (!cake_link_clock)
+		return (now);
+	if (si->cfg.flags & CAKE_INGRESS)
+		t = MIN(t, si->failsafe_time);
+	return (MIN(MAX(t, now - MIN(now, tick_ns)), now));
+}
+
+/*
+ * sch_cake's failsafe, for ingress mode, where drops charge the link: its
+ * shaper sends at the earlier of the time the link is free, drops
+ * included, and the failsafe time, which only sends advance, by 1.5 times
+ * their duration. cake_charge_link() keeps the pipe's drop debt within it.
+ * Sends advance it from their time on the link clock: from dummynet's,
+ * a tick's batch would put it 1.5 ticks ahead, and the pipe would send
+ * every other tick.
+ */
+static __inline void
+cake_failsafe(struct cake_si *si, uint32_t len, uint64_t link_ns)
+{
+	uint64_t dur = cake_link_dur(si, len);
+
+	si->failsafe_time = MAX(si->failsafe_time, link_ns) + dur + dur / 2;
 }
 
 /*
@@ -1832,7 +1910,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 	struct cake_flow *f;
 	struct cake_flow_list *list;
 	struct mbuf *m;
-	uint64_t now_ns;
+	uint64_t now_ns, link_ns = 0;
 	uint32_t len, idle_tins = 0;
 	int first_flow = 1, retry;
 
@@ -1852,7 +1930,8 @@ cake_dequeue(struct dn_sch_inst *_si)
 		}
 
 		if (si->shaped) {
-			si->cur_tin = cake_select_tin(si, now_ns);
+			link_ns = cake_link_now(si, now_ns);
+			si->cur_tin = cake_select_tin(si, link_ns);
 			tin = &si->tins[si->cur_tin];
 		} else {
 			/* WDRR between the tins with flows, as sch_cake's
@@ -1949,9 +2028,10 @@ retry:
 		/* account in link bytes, as the pipe charges them */
 		len = cake_wire_bytes(&si->cfg, m);
 		f->deficit -= len;
-		if (si->shaped)
-			cake_charge_tin(tin, len, now_ns);
-		else
+		if (si->shaped) {
+			cake_charge_tin(tin, len, link_ns);
+			si->link_time = link_ns + cake_link_dur(si, len);
+		} else
 			tin->tin_deficit -= len;
 #ifndef DN_WIRE_LEN
 		/* the pipe charges the packet length; charge it the rest */
@@ -1959,6 +2039,8 @@ retry:
 			si->_si.credit -= (int64_t)hz * 8 *
 			    ((int64_t)len - m->m_pkthdr.len);
 #endif
+		if (si->shaped && (si->cfg.flags & CAKE_INGRESS))
+			cake_failsafe(si, len, link_ns);
 		/* a heap untouched for 65535 packets has gone cold */
 		if (si->overflow_timeout)
 			si->overflow_timeout--;
@@ -1968,6 +2050,36 @@ retry:
 
 	/* unreachable point */
 	return NULL;
+}
+
+/*
+ * A share (of 65536) of the pipe's rate bw, in bit/s, as sch_cake's
+ * cake_set_rate() keeps a rate: ns per byte, scaled to stay below 2^34.
+ * Returns the rate in bytes per second, as sch_cake's.
+ */
+static uint64_t
+cake_rate_ns(uint32_t bw, uint32_t share, uint64_t *ns, uint8_t *shft)
+{
+	uint64_t rate = MAX((((uint64_t)bw * share) >> 16) / 8, 64);
+
+	*shft = 34;
+	*ns = (1000000000ULL << 34) / rate;
+	while (*ns >> 34) {
+		*ns >>= 1;
+		(*shft)--;
+	}
+	return (rate);
+}
+
+/* the link clock's rate: sch_cake's global shaper's, its full-rate tin's */
+static void
+cake_link_params(struct cake_si *si)
+{
+	si->link_rate_ns = 0;
+	si->link_rate_shft = 0;
+	if (si->bw != 0)
+		cake_rate_ns(si->bw, 65536, &si->link_rate_ns,
+		    &si->link_rate_shft);
 }
 
 /*
@@ -1996,15 +2108,7 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 
 	cp->mtu_time = 0;
 	if (bw != 0) {
-		/* the tin's rate in bytes per second, as sch_cake's */
-		rate = MAX((((uint64_t)bw * share) >> 16) / 8, 64);
-		/* as cake_set_rate(): ns per byte, scaled to stay below 2^34 */
-		tin->rate_shft = 34;
-		tin->rate_ns = (1000000000ULL << 34) / rate;
-		while (tin->rate_ns >> 34) {
-			tin->rate_ns >>= 1;
-			tin->rate_shft--;
-		}
+		rate = cake_rate_ns(bw, share, &tin->rate_ns, &tin->rate_shft);
 		cp->mtu_time = ((uint64_t)CAKE_MTU * tin->rate_ns) >>
 		    tin->rate_shft;
 		/* the tin's bytes per second over 4096, at least 300 and at
@@ -2087,6 +2191,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 	bw = si->_si.sched->link.bandwidth;
 	si->bw = bw;
 	si->shaped = bw != 0;
+	cake_link_params(si);
 	cake_buffer_limit(si, cfg, bw);
 	for (i = 0; i < si->tin_cnt; i++) {
 		TAILQ_INIT(&si->tins[i].newflows);
@@ -2172,6 +2277,7 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 		bw = si->_si.sched->link.bandwidth;
 		si->bw = bw;
 		si->shaped = bw != 0;
+		cake_link_params(si);
 		cake_buffer_limit(si, cfg, bw);
 		for (i = 0; i < si->tin_cnt; i++)
 			cake_tin_params(si, i, cfg, bw);
@@ -2286,6 +2392,7 @@ cake_adopt(struct cake_si *si, struct cake_schk *schk)
 	si->gen = s->gen;
 	si->bw = s->bw;
 	si->shaped = s->shaped;
+	cake_link_params(si);
 	s->flows = NULL;
 	s->hosts = NULL;
 	s->overflow_heap = NULL;
