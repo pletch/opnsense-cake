@@ -569,7 +569,11 @@ queue 10001 config pipe 10001 weight 100
   In that build, `cake_check()` walks every tin and flow list after each
   enqueue and dequeue and counts mismatches in
   `net.inet.ip.dummynet.cake.check_errors`. All tests passed on 2026-10-24
-  with 0 check errors:
+  with 0 check errors, and again on 2026-10-25 for 1.3, where the checker
+  also verifies each flow's state against its list (decaying flows empty)
+  and the per-tin sparse, bulk, decaying and unresponsive flow counts and
+  byte backlog. For 1.3, 20,681 reads of the statistics sysctl during 30
+  reconfigurations under RRUL also left 0 check errors:
 
   | test | load | result |
   |---|---|---|
@@ -733,6 +737,7 @@ queue 10001 config pipe 10001 weight 100
   | option | test | result |
   |---|---|---|
   | `wash` | EF + ECT(1) pings, IPv4 and IPv6 | DSCP cleared, ECN kept, no bad checksums |
+  | ECN (1.3) | TCP download with ECN negotiated at both ends | 67 packets marked CE at the client, 48 Mbit/s |
   | `ack-filter` | TCP download, 50 Mbit/s down, 0.2 Mbit/s up | 17.95 → 47.65 Mbit/s, aggressive 48.20 |
   | `memlimit 32k` | UDP flood | largest backlog 31500 bytes |
   | `ingress` | UDP flood, then ping | flood is charged its drops (0 delivered), ping right after: 0% loss |
