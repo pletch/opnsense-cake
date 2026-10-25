@@ -8,6 +8,11 @@
 #   allocfail SECONDS change the tin count with every table allocation
 #                     failing for SECONDS, then with one flow and one host
 #                     allocation failing (CAKE_DEBUG)
+#   vnet SECONDS      two vnet jails joined by an epair, each with its own
+#                     dummynet and a CAKE pipe (7 and 8): traffic between
+#                     them, reconfigurations and scheduler deletions, and
+#                     statistics read in a loop in both and in the host;
+#                     prints which pipes each vnet saw, then removes them
 #   v6up              IPv6 on the test links, shaped like IPv4
 #   cpu SECONDS       all-CPU busy share over SECONDS, from kern.cp_time
 #   prof SCHED SECONDS  time SCHED_enqueue/SCHED_dequeue (cake, fq_codel)
@@ -24,6 +29,9 @@ status)
 	echo "sched_backlog $(ipfw sched show 2>/dev/null |
 	    awk '$1 ~ /^[0-9]+$/ && NF >= 9 { p += $(NF-2) } END { print p + 0 }')"
 	echo "dmesg_bad $(dmesg | grep -cE 'cake_check|has backlog|panic')"
+	# packets CAKE sent on the bench pipes, from the statistics
+	echo "cake_pkts $(sysctl -n $SYSCTL.stats 2>/dev/null |
+	    awk '$2 == 1 || $2 == 2 { p += $16 } END { print p + 0 }')"
 	;;
 params)
 	shift
@@ -76,6 +84,58 @@ allocfail)
 	    "held_backlog $b after_wait ${i}" \
 	    "rebuilds $(($(n rebuilds) - r1))" \
 	    "failures $(($(n rebuild_failures) - f1)) left $(n fail_alloc)"
+	;;
+vnet)
+	D=/usr/local/libexec/cake/dnctl		# a dnctl that knows CAKE
+	[ -x $D ] || D=/root/work/bin/ipfw
+	secs=${2:-30}
+	jail -c name=cva vnet persist path=/ >/dev/null || exit 1
+	jail -c name=cvb vnet persist path=/ >/dev/null || exit 1
+	ep=$(ifconfig epair create)
+	ifconfig $ep vnet cva
+	ifconfig ${ep%a}b vnet cvb
+	jexec cva ifconfig $ep 10.98.0.1/24 up
+	jexec cvb ifconfig ${ep%a}b 10.98.0.2/24 up
+	n=7
+	for j in cva cvb; do
+		jexec $j ipfw -q add 65000 allow ip from any to any
+		jexec $j $D pipe $n config bw 20Mbit/s
+		jexec $j $D sched $n config pipe $n type cake
+		jexec $j $D queue $n config sched $n queue 100
+		jexec $j ipfw -q add 100 queue $n ip from any to any out
+		n=8
+	done
+	rm -f /tmp/vnet-*.txt
+	end=$(( $(date +%s) + secs ))
+	jexec cva ping -q -i 0.005 -s 1200 -t "$secs" 10.98.0.2 >/tmp/vnet-ping.txt 2>&1 &
+	for j in host cva cvb; do
+		(while [ "$(date +%s)" -lt $end ]; do
+			if [ $j = host ]; then sysctl -n $SYSCTL.stats
+			else jexec $j sysctl -n $SYSCTL.stats; fi
+		done | cut -d" " -f2 | sort -u >/tmp/vnet-$j.txt) &
+	done
+	i=0
+	while [ "$(date +%s)" -lt $end ]; do
+		[ $((i % 2)) -eq 0 ] && d=diffserv4 || d=besteffort
+		jexec cva $D sched 7 config pipe 7 type cake $d
+		if [ $((i % 5)) -eq 4 ]; then
+			jexec cvb $D sched 8 delete
+			jexec cvb $D sched 8 config pipe 8 type cake
+			jexec cvb $D queue 8 config sched 8 queue 100
+		fi
+		i=$((i + 1))
+		sleep 0.5
+	done
+	wait
+	echo "vnet_reconfigurations $i"
+	for j in host cva cvb; do
+		echo "${j}_pipes $(grep -v '^$' /tmp/vnet-$j.txt | tr '\n' ' ' | sed 's/ $//')"
+	done
+	echo "vnet_ping $(grep -o '[0-9.]*% packet loss' /tmp/vnet-ping.txt)"
+	# removing the jails destroys their dummynet, CAKE state included
+	jail -r cva cvb >/dev/null
+	ifconfig $ep destroy 2>/dev/null
+	echo vnet_done
 	;;
 v6up)
 	sysctl -q net.inet6.ip6.forwarding=1

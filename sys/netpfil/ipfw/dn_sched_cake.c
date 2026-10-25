@@ -2345,7 +2345,9 @@ cake_destroy(struct dn_schk *_schk)
  * counters as "name value" pairs. The snapshot is taken under dummynet's
  * lock, as dnctl's own statistics are, so it is consistent; it is
  * formatted and copied out after both locks are released, as that may
- * sleep.
+ * sleep. Its buffer is allocated with the locks released, so the entries
+ * are counted again once they are held, and the allocation retried if
+ * they no longer fit: nothing is left out.
  */
 struct cake_tin_snap {
 	uint32_t	sched, inst, diffserv, tin;
@@ -2361,26 +2363,39 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	struct cake_stash *s;
 	struct cake_tin *b;
 	struct sbuf sb;
-	u_int cap = 0, n = 0, inst = 0, i, t;
+	u_int cap = 0, need, n = 0, inst = 0, i, t, tries;
 	int error;
 
-	mtx_lock(&cake_instances_mtx);
-	LIST_FOREACH(si, &cake_instances, all)
-		cap += si->tin_cnt;
-	LIST_FOREACH(s, &cake_stashes, all)
-		cap += s->tin_cnt;
-	mtx_unlock(&cake_instances_mtx);
-	/* room for instances created in between; any beyond are left out */
-	cap += 4 * CAKE_MAX_TINS;
-	snap = malloc(cap * sizeof(*snap), M_TEMP, M_WAITOK | M_ZERO);
-
+	snap = NULL;
 	CURVNET_SET(TD_TO_VNET(curthread));
-	DN_BH_WLOCK();
-	mtx_lock(&cake_instances_mtx);
+	for (tries = 0;; tries++) {
+		DN_BH_WLOCK();
+		mtx_lock(&cake_instances_mtx);
+		need = 0;
+		LIST_FOREACH(si, &cake_instances, all)
+			if (si->vnet == curvnet)
+				need += si->tin_cnt;
+		LIST_FOREACH(s, &cake_stashes, all)
+			if (s->vnet == curvnet)
+				need += s->tin_cnt;
+		if (snap != NULL && need <= cap)
+			break;		/* it fits; both locks stay held */
+		mtx_unlock(&cake_instances_mtx);
+		DN_BH_WUNLOCK();
+		free(snap, M_TEMP);
+		if (tries == 10) {	/* instances keep appearing faster */
+			CURVNET_RESTORE();
+			return (EAGAIN);
+		}
+		/* with room for an instance or two created meanwhile */
+		cap = need + 2 * CAKE_MAX_TINS;
+		snap = malloc(cap * sizeof(*snap), M_TEMP, M_WAITOK);
+	}
+
 	LIST_FOREACH(si, &cake_instances, all) {
 		if (si->vnet != curvnet)
 			continue;
-		for (t = 0; t < si->tin_cnt && n < cap; t++, n++) {
+		for (t = 0; t < si->tin_cnt; t++, n++) {
 			snap[n].sched = si->_si.sched->sch.sched_nr;
 			snap[n].inst = inst;
 			snap[n].diffserv = si->cfg.diffserv;
@@ -2395,7 +2410,7 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	LIST_FOREACH(s, &cake_stashes, all) {
 		if (s->vnet != curvnet)
 			continue;
-		for (t = 0; t < s->tin_cnt && n < cap; t++, n++) {
+		for (t = 0; t < s->tin_cnt; t++, n++) {
 			snap[n].sched = s->sched->sch.sched_nr;
 			snap[n].inst = inst;
 			snap[n].diffserv = s->cfg.diffserv;

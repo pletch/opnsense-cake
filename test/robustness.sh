@@ -16,6 +16,10 @@
 #   expiry    idle instances expired and their kept state adopted, about
 #             200 times, while the statistics are read in a loop; then the
 #             scheduler deleted while its state is kept (no memory left)
+#   vnet      CAKE in the host and in two vnet jails at once, with traffic,
+#             reconfigurations and statistics reads in all three; each vnet
+#             must see only its own pipes, and removing the jails must
+#             leave no memory behind
 #   unload    kldunload refused while in use, and while a CAKE scheduler
 #             is only configured (no instance yet), works once released
 #             (skipped when CAKE is built into dummynet.ko)
@@ -113,10 +117,15 @@ echo "   baseline: mbufs $base_mbufs, dummynet mem $base_dnmem"
 
 echo "== normal"
 opn '/root/work/lul-sched.sh cake' >/dev/null
+p0=$(stat cake_pkts)
 r=$(rrul 30)
+p1=$(stat cake_pkts)
 consistent && ok=1 || ok=0
 [ "$r" = "flent-exit 0" ] || ok=0
-result normal $ok "$r, check_errors $(stat check_errors)"
+# the bench's rules must send the traffic through CAKE (an OPNsense
+# shaper reload replaces them; run lul-setup.sh again then)
+[ $(( ${p1:-0} - ${p0:-0} )) -gt 10000 ] || ok=0
+result normal $ok "$r, $(( ${p1:-0} - ${p0:-0} )) packets through CAKE, check_errors $(stat check_errors)"
 
 echo "== overflow"
 d0=$(stat drops)
@@ -205,6 +214,28 @@ ad=$(( ${a1:-0} - ${a0:-0} ))
 consistent && [ "$ad" -ge 100 ] && [ "$m1" = "$m0" ] && [ "$r" = "0% packet loss" ] &&
     ok=1 || ok=0
 result expiry $ok "$ad adoptions, $kept states kept while idle, $r, dummynet mem without CAKE $m0 -> $m1 after deleting kept states, check_errors $(stat check_errors)"
+
+echo "== vnet"
+opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
+m0=$(stat dnmem)
+opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
+rrul 45 >"$serve/vnet.out" &
+rpid=$!
+sleep 5
+v=$(opn '/root/work/opn-robust.sh vnet 30' 180)
+wait $rpid
+r=$(cat "$serve/vnet.out")
+opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
+m1=$(stat dnmem)
+opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
+vv() { printf '%s\n' "$v" | sed -n "s/^$1 //p"; }
+# each vnet sees only its own pipes (empty reads are fine)
+[ -z "$(vv host_pipes | tr ' ' '\n' | grep -vxE '1|2')" ] &&
+    [ -n "$(vv host_pipes)" ] &&
+    [ "$(vv cva_pipes)" = 7 ] && [ -z "$(vv cvb_pipes | tr ' ' '\n' | grep -vx 8)" ] &&
+    printf '%s\n' "$v" | grep -q '^vnet_done' &&
+    [ "$m1" = "$m0" ] && consistent && [ "$r" = "flent-exit 0" ] && ok=1 || ok=0
+result vnet $ok "host saw pipes $(vv host_pipes), jail A $(vv cva_pipes), jail B $(vv cvb_pipes); $(vv vnet_reconfigurations) jail reconfigurations, jail ping $(vv vnet_ping); dummynet mem without CAKE $m0 -> $m1 after removing the jails; $r, check_errors $(stat check_errors)"
 
 echo "== unload"
 if [ $builtin = 1 ]; then

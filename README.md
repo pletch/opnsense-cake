@@ -417,6 +417,12 @@ queue 10001 config pipe 10001 weight 100
   capped at one interval of link time: traffic that has crossed the
   bottleneck can't arrive faster than it, but a flood into a misused pipe
   owed ~6 minutes of link time at 10 Mbit/s and stalled the pipe.
+- **Tins borrow idle capacity.** A tin's rate threshold only decides
+  whether it has priority; a tin over its threshold is still served when
+  the higher tins have nothing due, as in sch_cake. Checked in diffserv4
+  at 50 Mbit/s with a single TCP download at a time: marked CS1 (Bulk,
+  threshold 3.1 Mbit/s), CS4 or EF (Voice, 12.5 Mbit/s), or unmarked, each
+  got 48.26 Mbit/s.
 - **The 8-tin modes can starve a tin.** Each tin may use its share of the
   rate at priority, and in `diffserv8` and `precedence` each share is 7/8 of
   the one below (87.5%, 77%, 67%, ...), so together they claim far more
@@ -541,7 +547,11 @@ queue 10001 config pipe 10001 weight 100
   formats and copies out after releasing them, as that may sleep. Up to
   1.3.1 it took only the list's mutex: memory safe (an entry cannot be
   freed while listed, and only fields embedded in it are read), but a
-  snapshot could mix counters from different moments.
+  snapshot could mix counters from different moments. Its buffer has to
+  be allocated with the locks released; from 1.3.4 the entries are
+  counted again once the locks are held and the allocation is retried if
+  they no longer fit, so instances created meanwhile are never left out
+  (1.3.3 allowed a fixed margin).
 - **Packet ownership.** All callbacks run under dummynet's lock
   (`DN_BH_WLOCK`, held by `dummynet_io`, `dummynet_task`, `config_sched` and
   the delete paths), so each packet is in exactly one place at a time. Every
@@ -641,6 +651,7 @@ queue 10001 config pipe 10001 weight 100
   | churn | 45 reconfigs in 45 s (cake/fq_codel/fifo, all diffserv modes, 50↔30 Mbit/s) under RRUL | clean, RRUL completes |
   | allocfail (1.1) | tin count changed under RRUL while every table allocation fails for 8 s, then one host and one flow allocation fail | old tables kept (0 rebuilds in about 125,000 failed attempts, traffic flowing), then both instances rebuild; 0 check errors |
   | expiry (1.3.3) | 10 Hz ping so that nearly every packet expires and re-creates the instances, statistics read in a loop, then the schedulers deleted while their state is kept | 198 adoptions, 0% loss, dummynet memory back to its value without CAKE (13 allocations, 5888 bytes), 0 check errors |
+  | vnet (1.3.4) | CAKE in the host (RRUL) and in two vnet jails joined by an epair (pipes 7 and 8), with jail traffic, 58 reconfigurations and scheduler deletions, and statistics read in a loop in all three vnets; then the jails removed with their CAKE state kept | each vnet saw only its own pipes (host 1 and 2, jails 7 and 8), no jail ping loss, dummynet memory back to its value without CAKE, 0 check errors |
   | unload | `kldunload` during RRUL, then after switching to fifo | refused while busy, unloads when idle, reloads |
   | leaks | after all of the above | dummynet malloc back to baseline, 0 queued, mbufs flat across further runs |
 
