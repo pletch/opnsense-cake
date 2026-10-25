@@ -308,15 +308,9 @@ SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, flowmode,
 
 /*
  * dummynet only advances its clock once per tick, which is too coarse
- * for sojourn times at the default 5ms target, so use the uptime clock.
+ * for sojourn times at the default 5ms target, so COBALT and the tin
+ * clocks use the uptime clock, in nanoseconds as sch_cake does.
  */
-static __inline uint64_t
-cake_now_us(void)
-{
-	return (sbttous(sbinuptime()));
-}
-
-/* tin virtual clocks need sub-microsecond resolution at high rates */
 static __inline uint64_t
 cake_now_ns(void)
 {
@@ -610,12 +604,12 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 
 	/* drops only add debt up to the cap, never take any away */
 	cake_charge_tin(tin, len, now_ns);
-	if (tin->time_next > now_ns + interval * 1000)
-		tin->time_next = MAX(last, now_ns + interval * 1000);
+	if (tin->time_next > now_ns + interval)
+		tin->time_next = MAX(last, now_ns + interval);
 
 	/* pipe credit is in bits * hz */
 	debt = (int64_t)hz * si->_si.sched->link.bandwidth / 1000000 *
-	    interval;
+	    (interval / 1000);
 	si->_si.credit = MAX(credit - (int64_t)hz * 8 * len,
 	    MIN(credit, -debt));
 }
@@ -1063,7 +1057,7 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 			goto drop;
 		m_tag_prepend(m, mtag);
 	}
-	*(uint64_t *)(mtag + 1) = cake_now_us();
+	*(uint64_t *)(mtag + 1) = cake_now_ns();
 
 	if (m->m_pkthdr.rcvif != NULL)
 		m_rcvif_serialize(m);
@@ -1257,27 +1251,24 @@ cake_set_hosts(struct cake_si *si, struct cake_flow *f, uint32_t srch,
 }
 
 /*
- * A flow's deficit refill: the quantum shared between the bulk flows of
- * its busiest host, as cake_get_flow_quantum(). Dithering keeps the
- * average exact; the result is at least 1 so a flow always progresses.
+ * A flow's deficit refill: its tin's quantum shared between the bulk
+ * flows of its busiest host, as cake_get_flow_quantum(): 65535 / load in
+ * 16 bits, plus a random 16-bit dither so that the average refill is
+ * exact. Under a heavy host load it can round down to 0; the flow then
+ * waits for its next turn.
  */
 static uint32_t
-cake_flow_quantum(struct cake_si *si, struct cake_flow *f, uint32_t quantum)
+cake_flow_quantum(struct cake_si *si, struct cake_flow *f)
 {
 	struct cake_host *hosts = &si->hosts[f->tin * si->flows_cnt];
 	uint32_t load = 1;
-	uint64_t q;
 
 	if (cake_dsrc(si->flow_mode))
 		load = MAX(load, hosts[f->srchost].srchost_bulk);
 	if (cake_ddst(si->flow_mode))
 		load = MAX(load, hosts[f->dsthost].dsthost_bulk);
-	if (load == 1)
-		return (quantum);
-
-	si->dither = si->dither * 1103515245 + 12345;
-	q = (((uint64_t)quantum << 16) / load + (si->dither >> 16)) >> 16;
-	return (MAX(q, 1));
+	return ((si->tins[f->tin].flow_quantum * (65535 / load) +
+	    (arc4random() & 0xffff)) >> 16);
 }
 
 /*
@@ -1339,7 +1330,7 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 		return (0);
 
 	if (cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
-	    now_ns / 1000))
+	    now_ns))
 		si->tins[fat->tin].unresponsive_flows++;
 	if (si->cfg.flags & CAKE_INGRESS)
 		cake_charge_link(si, &si->tins[fat->tin],
@@ -1357,12 +1348,13 @@ cake_ewma(uint64_t avg, uint64_t sample, int shift)
 	return (avg);
 }
 
-/* count a packet the tin sends, and its queue delay as sch_cake does */
+/* count a packet the tin sends, and its queue delay (us) as sch_cake does */
 static __inline void
-cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now,
+cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now_ns,
 	uint64_t pkt_ts)
 {
-	uint64_t delay = now > pkt_ts && pkt_ts != 0 ? now - pkt_ts : 0;
+	uint64_t delay = now_ns > pkt_ts && pkt_ts != 0 ?
+	    (now_ns - pkt_ts) / 1000 : 0;
 
 	tin->tx_pkts++;
 	tin->tx_bytes += m->m_pkthdr.len;
@@ -1388,14 +1380,14 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
 	ingress = (si->cfg.flags & CAKE_INGRESS) != 0;
 	while ((m = cake_extract_head(f, si, &pkt_ts)) != NULL) {
 		drop = cobalt_should_drop(&f->cvars, &tin->cparams,
-		    now_ns / 1000, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
+		    now_ns, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
 		    &marked, ingress ? tin->bulk_flows : 0);
 		if (marked)
 			tin->ecn_marks++;
 
 		/* last packet in queue may be marked, shouldn't be dropped */
 		if (!drop || f->mq.head == NULL) {
-			cake_tin_sent(tin, m, now_ns / 1000, pkt_ts);
+			cake_tin_sent(tin, m, now_ns, pkt_ts);
 			return m;
 		}
 
@@ -1623,7 +1615,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 		TAILQ_INSERT_TAIL(&tin->newflows, f, flowchain);
 		f->set = CAKE_SET_SPARSE;
 		tin->sparse_flows++;
-		f->deficit = cake_flow_quantum(si, f, si->cfg.quantum);
+		f->deficit = cake_flow_quantum(si, f);
 		f->active = 1;
 	} else if (f->set == CAKE_SET_SPARSE_WAIT) {
 		f->set = CAKE_SET_BULK;
@@ -1661,10 +1653,12 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 /*
  * Select a tin when the pipe has a rate, as sch_cake does in shaped mode.
  * Tins are numbered in priority order (Best Effort < Bulk < Video < Voice,
- * as in sch_cake), so pick the highest-numbered backlogged tin whose
- * virtual clock is due, i.e. that is within its rate share; otherwise the
- * backlogged tin with the earliest clock. Bulk thus gets priority over
- * Best Effort up to its 1/16 share, and nothing beyond it.
+ * as in sch_cake), so pick the highest-numbered tin whose virtual clock is
+ * due, i.e. that is within its rate share; otherwise the tin with the
+ * earliest clock, the last of equal ones. Bulk thus gets priority over
+ * Best Effort up to its 1/16 share, and nothing beyond it. As in sch_cake,
+ * a tin counts while it has sparse or bulk flows, even empty ones, so that
+ * flows that emptied are visited and stop counting as bulk.
  */
 static uint32_t
 cake_select_tin(struct cake_si *si, uint64_t now)
@@ -1674,12 +1668,12 @@ cake_select_tin(struct cake_si *si, uint64_t now)
 
 	for (t = 0; t < (int)si->tin_cnt; t++) {
 		tin = &si->tins[t];
-		if (tin->backlog == 0)
+		if (tin->sparse_flows + tin->bulk_flows == 0)
 			continue;
 		if (tin->time_next <= now)
 			due = t;
 		else if (earliest < 0 ||
-		    tin->time_next < si->tins[earliest].time_next)
+		    tin->time_next <= si->tins[earliest].time_next)
 			earliest = t;
 	}
 	if (due >= 0)
@@ -1696,7 +1690,7 @@ cake_select_tin(struct cake_si *si, uint64_t now)
 static __inline void
 cake_charge_tin(struct cake_tin *tin, int len, uint64_t now)
 {
-	uint64_t dur = ((uint64_t)len * tin->ns_per_byte) >> 16;
+	uint64_t dur = ((uint64_t)len * tin->rate_ns) >> tin->rate_shft;
 
 	if (tin->time_next < now)
 		tin->time_next += dur;
@@ -1719,14 +1713,13 @@ cake_dequeue(struct dn_sch_inst *_si)
 	struct cake_flow *f;
 	struct cake_flow_list *list;
 	struct mbuf *m;
-	uint64_t now, now_ns;
-	uint32_t len;
+	uint64_t now_ns;
+	uint32_t len, idle_tins = 0;
 	int first_flow = 1;
 
 	si = (struct cake_si *)_si;
 	schk = (struct cake_schk *)(si->_si.sched+1);
 	now_ns = cake_now_ns();
-	now = now_ns / 1000;
 
 	/* a rate change reaches a backlog without waiting for new packets */
 	if (__predict_false(CAKE_STALE(si, schk)))
@@ -1743,12 +1736,18 @@ cake_dequeue(struct dn_sch_inst *_si)
 			si->cur_tin = cake_select_tin(si, now_ns);
 			tin = &si->tins[si->cur_tin];
 		} else {
-			/* select a tin with backlog and deficit left */
+			/* WDRR between the tins with flows, as sch_cake's
+			 * unlimited mode: skip a tin while its deficit is
+			 * negative, refilling it while not positive */
 			tin = &si->tins[si->cur_tin];
-			if (tin->backlog == 0 || tin->tin_deficit <= 0) {
+			if (tin->tin_deficit < 0 ||
+			    tin->sparse_flows + tin->bulk_flows == 0) {
 				if (tin->tin_deficit <= 0)
 					tin->tin_deficit += tin->tin_quantum;
 				si->cur_tin = (si->cur_tin + 1) % si->tin_cnt;
+				if (tin->sparse_flows + tin->bulk_flows == 0 &&
+				    ++idle_tins > 2 * si->tin_cnt)
+					return NULL;	/* no tin has flows */
 				continue;
 			}
 		}
@@ -1764,7 +1763,8 @@ cake_dequeue(struct dn_sch_inst *_si)
 
 		f = TAILQ_FIRST(list);
 		if (f == NULL) {
-			/* backlog without active flows: stats are broken */
+			/* packets queued but no flows listed: stats are
+			 * broken */
 			D("tin %u has backlog %u but no flows", si->cur_tin,
 			    tin->backlog);
 			return NULL;
@@ -1785,7 +1785,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 				} else
 					f->set = CAKE_SET_SPARSE_WAIT;
 			}
-			f->deficit += cake_flow_quantum(si, f, si->cfg.quantum);
+			f->deficit += cake_flow_quantum(si, f);
 			TAILQ_REMOVE(list, f, flowchain);
 			TAILQ_INSERT_TAIL(&tin->oldflows, f, flowchain);
 			continue;
@@ -1801,7 +1801,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 			 * otherwise it is deactivated. Either way its next
 			 * packet puts it among the new flows.
 			 */
-			if (cobalt_queue_empty(&f->cvars, &tin->cparams, now))
+			if (cobalt_queue_empty(&f->cvars, &tin->cparams, now_ns))
 				tin->unresponsive_flows--;
 			TAILQ_REMOVE(list, f, flowchain);
 			if (f->set == CAKE_SET_BULK) {
@@ -1812,7 +1812,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 			else
 				tin->sparse_flows--;
 			if (f->cvars.p_drop || f->cvars.count ||
-			    (int64_t)(now - f->cvars.drop_next) < 0) {
+			    (int64_t)(now_ns - f->cvars.drop_next) < 0) {
 				TAILQ_INSERT_TAIL(&tin->decayingflows, f,
 				    flowchain);
 				f->set = CAKE_SET_DECAYING;
@@ -1865,18 +1865,32 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 
 	tin->tin_quantum = ((uint64_t)(cfg->quantum << CAKE_TIN_QUANTUM_SHIFT) *
 	    share) >> 16;
-	tin->ns_per_byte = 0;
+	tin->rate_ns = 0;
+	tin->rate_shft = 0;
+	tin->flow_quantum = cfg->quantum;
 
 	cp->mtu_time = 0;
 	if (bw != 0) {
-		rate = MAX(((uint64_t)bw * share) >> 16, 1);
-		cp->mtu_time = (CAKE_MTU * 8 * 1000000ULL) / rate;
-		tin->ns_per_byte = ((8 * 1000000000ULL) << 16) / rate;
+		/* the tin's rate in bytes per second, as sch_cake's */
+		rate = MAX((((uint64_t)bw * share) >> 16) / 8, 64);
+		/* as cake_set_rate(): ns per byte, scaled to stay below 2^34 */
+		tin->rate_shft = 34;
+		tin->rate_ns = (1000000000ULL << 34) / rate;
+		while (tin->rate_ns >> 34) {
+			tin->rate_ns >>= 1;
+			tin->rate_shft--;
+		}
+		cp->mtu_time = ((uint64_t)CAKE_MTU * tin->rate_ns) >>
+		    tin->rate_shft;
+		/* the tin's bytes per second over 4096, at least 300 and at
+		 * most the configured quantum (sch_cake's is fixed at 1514),
+		 * so slow tins interleave their flows in smaller pieces */
+		tin->flow_quantum = MIN(MAX(rate >> 12, 300), cfg->quantum);
 	}
-	granularity = MAX(cp->mtu_time, (uint64_t)tick);
-	cp->target = MAX(granularity * 3 / 2, cfg->target);
-	cp->interval = MAX(cfg->interval + cp->target - cfg->target,
-	    cp->target * 2);
+	granularity = MAX(cp->mtu_time, (uint64_t)tick * 1000);
+	cp->target = MAX(granularity * 3 / 2, cfg->target * 1000);
+	cp->interval = MAX(cfg->interval * 1000 + cp->target -
+	    cfg->target * 1000, cp->target * 2);
 	cp->p_inc = 1 << 24;
 	cp->p_dec = 1 << 20;
 }
@@ -2088,7 +2102,6 @@ cake_stash(struct cake_si *si, struct cake_schk *schk)
 	s->cur_tin = si->cur_tin;
 	s->perturbation = si->perturbation;
 	s->flow_mode = si->flow_mode;
-	s->dither = si->dither;
 	s->gen = si->gen;
 	s->bw = si->bw;
 	s->shaped = si->shaped;
@@ -2126,7 +2139,6 @@ cake_adopt(struct cake_si *si, struct cake_schk *schk)
 	si->cur_tin = s->cur_tin;
 	si->perturbation = s->perturbation;
 	si->flow_mode = s->flow_mode;
-	si->dither = s->dither;
 	si->gen = s->gen;
 	si->bw = s->bw;
 	si->shaped = s->shaped;
@@ -2166,7 +2178,6 @@ cake_new_sched(struct dn_sch_inst *_si)
 	else {
 		/* init perturbation for this si */
 		si->perturbation = random();
-		si->dither = random();
 
 		error = cake_new_tables(si, schk);
 		if (error != 0)
@@ -2435,8 +2446,8 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 		    "unresponsive %u collisions %ju peak_delay %ju "
 		    "avg_delay %ju base_delay %ju\n",
 		    snap[i].sched, snap[i].inst, snap[i].diffserv, snap[i].tin,
-		    (uintmax_t)snap[i].rate, (uintmax_t)b->cparams.target,
-		    (uintmax_t)b->cparams.interval, (uintmax_t)b->tx_pkts,
+		    (uintmax_t)snap[i].rate, (uintmax_t)b->cparams.target / 1000,
+		    (uintmax_t)b->cparams.interval / 1000, (uintmax_t)b->tx_pkts,
 		    (uintmax_t)b->tx_bytes, (uintmax_t)b->drops,
 		    (uintmax_t)b->ecn_marks, (uintmax_t)b->ack_drops,
 		    b->backlog, (uintmax_t)b->backlog_bytes, b->sparse_flows,

@@ -52,7 +52,7 @@
 #define CAKE_MAX_TINS	8
 #define CAKE_SET_WAYS	8	/* set-associative flow hash */
 
-#define DN_CAKE_MTAG_TS	55346	/* uint64_t enqueue timestamp, usec */
+#define DN_CAKE_MTAG_TS	55346	/* uint64_t enqueue timestamp, ns */
 
 /*
  * flags, par[2]. ipfw(8) sends the bits it was given in the low 16 bits
@@ -133,9 +133,9 @@ struct dn_sch_cake_parms {
 
 /* per-tin COBALT parameters, derived from config and link rate */
 struct cobalt_params {
-	uint64_t	target;		/* us */
-	uint64_t	interval;	/* us */
-	uint64_t	mtu_time;	/* us to send one MTU at tin rate */
+	uint64_t	target;		/* ns */
+	uint64_t	interval;	/* ns */
+	uint64_t	mtu_time;	/* ns to send one MTU at tin rate */
 	uint32_t	p_inc;		/* BLUE increment */
 	uint32_t	p_dec;		/* BLUE decrement */
 };
@@ -201,9 +201,11 @@ struct cake_tin {
 	struct cake_flow_list decayingflows; /* empty, COBALT decaying */
 	struct cobalt_params cparams;
 	uint64_t	time_next;	/* ns, virtual clock at the tin's rate */
-	uint64_t	ns_per_byte;	/* Q16 at the tin's rate share */
+	uint64_t	rate_ns;	/* ns per byte at the tin's rate share, */
+	uint8_t		rate_shft;	/* shifted left by rate_shft */
 	int32_t		tin_deficit;	/* WDRR, only used without a rate */
 	uint32_t	tin_quantum;	/* WDRR weight between tins */
+	uint32_t	flow_quantum;	/* DRR quantum of its flows, bytes */
 	uint32_t	backlog;	/* packets queued in this tin */
 	uint64_t	backlog_bytes;
 	uint32_t	sparse_flows;	/* CAKE_SET_SPARSE and _SPARSE_WAIT */
@@ -240,7 +242,6 @@ struct cake_stash {
 	uint32_t	cur_tin;
 	uint32_t	perturbation;
 	uint32_t	flow_mode;
-	uint32_t	dither;
 	uint32_t	gen;
 	uint32_t	bw;
 	uint8_t		shaped;
@@ -271,7 +272,6 @@ struct cake_si {
 	uint32_t cur_tin;	/* tin being served */
 	uint32_t perturbation;	/* random value */
 	uint32_t flow_mode;	/* mode the host counts were kept for */
-	uint32_t dither;	/* PRNG state for quantum dithering */
 	uint32_t gen;		/* cake_schk.gen the tables were built for */
 	uint32_t bw;		/* pipe rate the tin parameters are for */
 	struct dn_sch_cake_parms cfg; /* configuration of this instance */
