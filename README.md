@@ -423,6 +423,26 @@ queue 10001 config pipe 10001 weight 100
   at 50 Mbit/s with a single TCP download at a time: marked CS1 (Bulk,
   threshold 3.1 Mbit/s), CS4 or EF (Voice, 12.5 Mbit/s), or unmarked, each
   got 48.26 Mbit/s.
+- **Sharing under contention matches sch_cake.** `test/contention.sh`
+  runs the same scenarios on the bench and on Linux's own sch_cake
+  (veth between namespaces, kernel 6.12), diffserv4 at 50 Mbit/s each
+  way: a 5 Mbit/s isochronous flow (irtt, 1250-byte packets every 2 ms)
+  against greedy TCP downloads in other tins. Rates in Mbit/s
+  (2026-10-25):
+
+  | scenario | | Linux sch_cake | this port |
+  |---|---|---|---|
+  | Voice flow + greedy Bulk | Voice flow / Bulk | 5.0 (0% loss) / 43.2 | 5.0 (0% loss) / 43.4 |
+  | Bulk flow + greedy Voice | Bulk flow / Voice | 4.2 (16% loss), 3 runs alike / 44.1 | 3.5, 4.6, 3.6 (7–29% loss) / 45.0 |
+  | Voice flow + greedy Video, Best Effort, Bulk | Voice / Video / BE / Bulk | 5.0 (0% loss) / 23.9 / 16.3 / 3.0 | 5.0 (0% loss) / 24.1 / 16.2 / 3.0 |
+
+  A Voice flow within its threshold gets all it offers while the other
+  tins share the rest, and the shares between Video, Best Effort and Bulk
+  agree to a few percent. A Bulk flow over its 3.1 Mbit/s threshold, up
+  against greedy Voice, gets somewhat more than the threshold in both,
+  but varies from run to run on the bench where Linux is steady; whether
+  a small real difference lies under that noise is for a deterministic
+  comparison of the schedulers to settle.
 - **The 8-tin modes can starve a tin.** Each tin may use its share of the
   rate at priority, and in `diffserv8` and `precedence` each share is 7/8 of
   the one below (87.5%, 77%, 67%, ...), so together they claim far more
