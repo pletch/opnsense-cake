@@ -485,6 +485,26 @@ queue 10001 config pipe 10001 weight 100
   truncates the interval to 32 bits.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
+- **Instance expiry.** dummynet destroys a scheduler instance as soon as
+  nothing is queued in it (`drain_scheduler_cb`, swept every tick with the
+  default `net.inet.ip.dummynet.expire=1`), and creates a new one for the
+  next packet. On a quiet link that is nearly every packet: with a 10 Hz
+  ping, DTrace counted 198 instances in 10 s. Up to 1.3, each new
+  instance allocated and zeroed CAKE's flow and host tables (over 500 KB
+  with diffserv4 and 1024 flows) in the packet path, and lost the flow
+  tags, COBALT and host state and the statistics. From 1.3.1, for a
+  scheduler without a mask, `cake_free_sched` keeps the tables, tins
+  (with their flow lists) and state with the scheduler, and the next
+  instance adopts them: 0 table allocations in the same test, and the
+  statistics keep counting. With a mask, each instance belongs to one
+  host, so they are freed as before. dummynet's FQ-CoDel has the same
+  churn.
+  - Since instances now outlive their creation, CAKE also notices a pipe
+    rate changed on its own (`dnctl pipe N config bw`), which dummynet
+    does not report to the scheduler, and recomputes its tin rates and
+    COBALT parameters. Before, only a new instance or a scheduler
+    reconfiguration picked it up; OPNsense's Apply always does the
+    latter.
 - **Packet ownership.** All callbacks run under dummynet's lock
   (`DN_BH_WLOCK`, held by `dummynet_io`, `dummynet_task`, `config_sched` and
   the delete paths), so each packet is in exactly one place at a time. Every
@@ -501,7 +521,7 @@ queue 10001 config pipe 10001 weight 100
   | receiving interface gone | `cake_extract_head` | freed | drop (from 1.3; before, only dequeued) |
   | reconfiguration with new tables | `cake_free_tables` | every packet in the old tables freed | drops; queue and instance totals reduced |
   | instance destroyed (delete, type change, flush, unload) | `cake_free_sched` | every flow's packets freed | none (the instance goes) |
-  | idle instance expired | dummynet | dummynet only expires instances with nothing queued, which needs the instance length exact; the `CAKE_DEBUG` checker verifies it | |
+  | idle instance expired | dummynet, `cake_free_sched` | nothing is queued (dummynet only expires such instances, which needs the instance length exact; the `CAKE_DEBUG` checker verifies it); without a mask, the tables and state are kept with the scheduler, see *Instance expiry* | |
 
   The packet pointer never changes (no `m_pullup`). Wash and ECN marking
   change the IP header in place only if it lies in the first mbuf and that

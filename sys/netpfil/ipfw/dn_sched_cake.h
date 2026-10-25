@@ -222,11 +222,38 @@ struct cake_tin {
 	uint64_t	base_delay;
 };
 
+/*
+ * The CAKE state of an instance dummynet expired, kept with its scheduler
+ * for the next instance to adopt (only without a mask): dummynet destroys
+ * an instance as soon as nothing is queued, which would throw away and
+ * reallocate the tables, COBALT and host state and the statistics.
+ */
+struct cake_stash {
+	struct cake_flow *flows;	/* NULL: nothing kept */
+	struct cake_host *hosts;
+	struct cake_tin	tins[CAKE_MAX_TINS];
+	struct dn_sch_cake_parms cfg;
+	const uint8_t	*dscp_map;
+	uint64_t	buffer_limit;
+	uint32_t	tin_cnt;
+	uint32_t	flows_cnt;
+	uint32_t	cur_tin;
+	uint32_t	perturbation;
+	uint32_t	flow_mode;
+	uint32_t	dither;
+	uint32_t	gen;
+	uint32_t	bw;
+	uint8_t		shaped;
+	struct dn_schk	*sched;		/* its scheduler, for the statistics */
+	LIST_ENTRY(cake_stash) all;
+};
+
 /* extra cake scheduler configurations */
 struct cake_schk {
 	struct dn_sch_cake_parms cfg;
 	uint32_t	gen;		/* bumped by every reconfiguration */
 	uint8_t		held;		/* holds a module reference */
+	struct cake_stash stash;
 };
 
 /* cake scheduler instance */
@@ -245,6 +272,7 @@ struct cake_si {
 	uint32_t flow_mode;	/* mode the host counts were kept for */
 	uint32_t dither;	/* PRNG state for quantum dithering */
 	uint32_t gen;		/* cake_schk.gen the tables were built for */
+	uint32_t bw;		/* pipe rate the tin parameters are for */
 	struct dn_sch_cake_parms cfg; /* configuration of this instance */
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */

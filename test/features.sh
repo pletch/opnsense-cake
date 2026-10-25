@@ -11,6 +11,8 @@
 #   ingress     under a UDP flood, drops are charged to the rate, so less
 #               is delivered than in egress mode, and the pipe passes
 #               traffic again right after (the debt is capped)
+#   rate        a pipe rate changed on its own, without reconfiguring the
+#               scheduler, reaches CAKE's tin parameters
 #   diffserv8, precedence
 #               RRUL runs; fairness between tins is not checked, as these
 #               experimental modes can starve a tin (see README)
@@ -130,6 +132,17 @@ sleep 1
 rec=$(cli 'sudo ip netns exec cli ping -q -c 5 -i 0.2 10.10.2.2 | sed -n "s/.* \([0-9]*\)% packet loss.*/\1/p"')
 [ "${i:-0}" -lt "${e:-0}" ] && [ "${rec:-100}" = 0 ] && ok=1 || ok=0
 result ingress $ok "flood delivered $e pps in egress mode, $i pps in ingress mode; ping loss right after ${rec:-?}%"
+
+echo "== rate"
+# dummynet does not tell the scheduler about a new pipe rate; at 1 Mbit/s
+# the MTU time is 12.1 ms, so the target must rise to 1.5 times that
+sched besteffort
+opn 'ipfw -q pipe 1 config bw 1Mbit/s' 30 >/dev/null
+cli 'sudo ip netns exec cli ping -q -c 3 -i 0.2 10.10.2.2 >/dev/null'
+t=$(opn 'sysctl -n net.inet.ip.dummynet.cake.stats | grep "^sched 1 .* tin 0 " | cut -d" " -f12' 30)
+opn 'ipfw -q pipe 1 config bw 50Mbit/s' 30 >/dev/null
+[ "${t:-0}" -gt 15000 ] 2>/dev/null && ok=1 || ok=0
+result rate $ok "tin 0 target ${t:-?} us after the pipe alone went to 1 Mbit/s (18168 expected)"
 
 for mode in diffserv8 precedence; do
 	echo "== $mode"

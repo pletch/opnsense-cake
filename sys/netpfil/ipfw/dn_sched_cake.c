@@ -111,6 +111,13 @@
 
 static struct dn_alg cake_desc;
 static void cake_reconfig(struct cake_si *si, struct cake_schk *schk);
+
+/*
+ * The instance needs cake_reconfig(): the scheduler was reconfigured, or
+ * the pipe's rate changed, which dummynet does not tell the scheduler.
+ */
+#define	CAKE_STALE(si, schk)	((si)->gen != (schk)->gen ||		\
+	(si)->bw != (si)->_si.sched->link.bandwidth)
 static int cake_ecn_mark(struct mbuf *m);
 static __inline void cake_charge_tin(struct cake_tin *tin, int len,
     uint64_t now);
@@ -1573,7 +1580,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	schk = (struct cake_schk *)(si->_si.sched+1);
 	now_ns = cake_now_ns();
 
-	if (__predict_false(si->gen != schk->gen))
+	if (__predict_false(CAKE_STALE(si, schk)))
 		cake_reconfig(si, schk);
 
 	hash = cake_hash_flow(m, si->perturbation, si->flow_mode, &dscp,
@@ -1716,7 +1723,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 	now = now_ns / 1000;
 
 	/* a rate change reaches a backlog without waiting for new packets */
-	if (__predict_false(si->gen != schk->gen))
+	if (__predict_false(CAKE_STALE(si, schk)))
 		cake_reconfig(si, schk);
 
 	for (;;) {
@@ -1928,6 +1935,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 	si->gen = schk->gen;
 
 	bw = si->_si.sched->link.bandwidth;
+	si->bw = bw;
 	si->shaped = bw != 0;
 	cake_buffer_limit(si, cfg, bw);
 	for (i = 0; i < si->tin_cnt; i++) {
@@ -2002,6 +2010,7 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 	if (cake_tin_cnt[cfg->diffserv] == si->tin_cnt &&
 	    cfg->flows_cnt == si->flows_cnt && cfg->flow_mode == si->flow_mode) {
 		bw = si->_si.sched->link.bandwidth;
+		si->bw = bw;
 		si->shaped = bw != 0;
 		cake_buffer_limit(si, cfg, bw);
 		for (i = 0; i < si->tin_cnt; i++)
@@ -2027,9 +2036,94 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
  */
 static LIST_HEAD(, cake_si) cake_instances =
     LIST_HEAD_INITIALIZER(cake_instances);
+static LIST_HEAD(, cake_stash) cake_stashes =
+    LIST_HEAD_INITIALIZER(cake_stashes);
 static struct mtx cake_instances_mtx;
 MTX_SYSINIT(cake_instances, &cake_instances_mtx, "dn_cake instances",
     MTX_DEF);
+
+/*
+ * Move tins with their flow lists, fixing the lists' back links to the
+ * new heads.
+ */
+static void
+cake_move_tins(struct cake_tin *dst, struct cake_tin *src, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		dst[i] = src[i];
+		TAILQ_INIT(&dst[i].newflows);
+		TAILQ_INIT(&dst[i].oldflows);
+		TAILQ_INIT(&dst[i].decayingflows);
+		TAILQ_CONCAT(&dst[i].newflows, &src[i].newflows, flowchain);
+		TAILQ_CONCAT(&dst[i].oldflows, &src[i].oldflows, flowchain);
+		TAILQ_CONCAT(&dst[i].decayingflows, &src[i].decayingflows,
+		    flowchain);
+	}
+}
+
+/* keep an idle instance's state with its scheduler */
+static void
+cake_stash(struct cake_si *si, struct cake_schk *schk)
+{
+	struct cake_stash *s = &schk->stash;
+
+	s->flows = si->flows;
+	s->hosts = si->hosts;
+	cake_move_tins(s->tins, si->tins, si->tin_cnt);
+	s->cfg = si->cfg;
+	s->dscp_map = si->dscp_map;
+	s->buffer_limit = si->buffer_limit;
+	s->tin_cnt = si->tin_cnt;
+	s->flows_cnt = si->flows_cnt;
+	s->cur_tin = si->cur_tin;
+	s->perturbation = si->perturbation;
+	s->flow_mode = si->flow_mode;
+	s->dither = si->dither;
+	s->gen = si->gen;
+	s->bw = si->bw;
+	s->shaped = si->shaped;
+	s->sched = si->_si.sched;
+	si->flows = NULL;
+	si->hosts = NULL;
+
+	mtx_lock(&cake_instances_mtx);
+	LIST_INSERT_HEAD(&cake_stashes, s, all);
+	mtx_unlock(&cake_instances_mtx);
+}
+
+/*
+ * Adopt the state kept with the scheduler. With a configuration changed
+ * meanwhile, the generation differs and the next packet reconfigures it.
+ */
+static void
+cake_adopt(struct cake_si *si, struct cake_schk *schk)
+{
+	struct cake_stash *s = &schk->stash;
+
+	mtx_lock(&cake_instances_mtx);
+	LIST_REMOVE(s, all);
+	mtx_unlock(&cake_instances_mtx);
+
+	si->flows = s->flows;
+	si->hosts = s->hosts;
+	cake_move_tins(si->tins, s->tins, s->tin_cnt);
+	si->cfg = s->cfg;
+	si->dscp_map = s->dscp_map;
+	si->buffer_limit = s->buffer_limit;
+	si->tin_cnt = s->tin_cnt;
+	si->flows_cnt = s->flows_cnt;
+	si->cur_tin = s->cur_tin;
+	si->perturbation = s->perturbation;
+	si->flow_mode = s->flow_mode;
+	si->dither = s->dither;
+	si->gen = s->gen;
+	si->bw = s->bw;
+	si->shaped = s->shaped;
+	s->flows = NULL;
+	s->hosts = NULL;
+}
 
 /*
  * Initialize cake scheduler instance.
@@ -2057,13 +2151,17 @@ cake_new_sched(struct dn_sch_inst *_si)
 	q->_si = _si;
 	q->fs = _si->sched->fs;
 
-	/* init perturbation for this si */
-	si->perturbation = random();
-	si->dither = random();
+	if (schk->stash.flows != NULL)
+		cake_adopt(si, schk);
+	else {
+		/* init perturbation for this si */
+		si->perturbation = random();
+		si->dither = random();
 
-	error = cake_new_tables(si, schk);
-	if (error != 0)
-		return error;
+		error = cake_new_tables(si, schk);
+		if (error != 0)
+			return error;
+	}
 
 	mtx_lock(&cake_instances_mtx);
 	LIST_INSERT_HEAD(&cake_instances, si, all);
@@ -2081,6 +2179,7 @@ static int
 cake_free_sched(struct dn_sch_inst *_si)
 {
 	struct cake_si *si = (struct cake_si *)_si ;
+	struct cake_schk *schk = (struct cake_schk *)(_si->sched+1);
 	uint32_t i;
 
 	if (si->listed) {
@@ -2088,6 +2187,14 @@ cake_free_sched(struct dn_sch_inst *_si)
 		LIST_REMOVE(si, all);
 		si->listed = 0;
 		mtx_unlock(&cake_instances_mtx);
+	}
+	/* an idle instance of a scheduler without a mask, as dummynet
+	 * expires them: keep its state for the next instance */
+	if (si->flows != NULL && si->main_q.ni.length == 0 &&
+	    !(_si->sched->sch.flags & DN_HAVE_MASK) &&
+	    schk->stash.flows == NULL) {
+		cake_stash(si, schk);
+		cake_desc.ref_count--;
 	}
 	if (si->flows != NULL) {
 		for (i = 0; i < si->tin_cnt * si->flows_cnt; i++)
@@ -2203,6 +2310,16 @@ cake_destroy(struct dn_schk *_schk)
 {
 	struct cake_schk *schk = (struct cake_schk *)(_schk+1);
 
+	/* the instances are gone; free the state kept from the last one */
+	if (schk->stash.flows != NULL) {
+		mtx_lock(&cake_instances_mtx);
+		LIST_REMOVE(&schk->stash, all);
+		mtx_unlock(&cake_instances_mtx);
+		free(schk->stash.flows, M_DUMMYNET);
+		free(schk->stash.hosts, M_DUMMYNET);
+		schk->stash.flows = NULL;
+		schk->stash.hosts = NULL;
+	}
 	if (schk->held) {
 		schk->held = 0;
 		cake_desc.ref_count--;
@@ -2227,6 +2344,7 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 {
 	struct cake_tin_snap *snap;
 	struct cake_si *si;
+	struct cake_stash *s;
 	struct cake_tin *b;
 	struct sbuf sb;
 	u_int cap = 0, n = 0, inst = 0, i, t;
@@ -2235,6 +2353,8 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	mtx_lock(&cake_instances_mtx);
 	LIST_FOREACH(si, &cake_instances, all)
 		cap += si->tin_cnt;
+	LIST_FOREACH(s, &cake_stashes, all)
+		cap += s->tin_cnt;
 	mtx_unlock(&cake_instances_mtx);
 	/* room for instances created in between; any beyond are left out */
 	cap += 4 * CAKE_MAX_TINS;
@@ -2250,6 +2370,19 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 			snap[n].rate = ((uint64_t)si->_si.sched->link.bandwidth *
 			    cake_tin_share[si->cfg.diffserv][t]) >> 16;
 			snap[n].b = si->tins[t];
+		}
+		inst++;
+	}
+	/* kept from an expired instance: its counters, nothing queued */
+	LIST_FOREACH(s, &cake_stashes, all) {
+		for (t = 0; t < s->tin_cnt && n < cap; t++, n++) {
+			snap[n].sched = s->sched->sch.sched_nr;
+			snap[n].inst = inst;
+			snap[n].diffserv = s->cfg.diffserv;
+			snap[n].tin = t;
+			snap[n].rate = ((uint64_t)s->sched->link.bandwidth *
+			    cake_tin_share[s->cfg.diffserv][t]) >> 16;
+			snap[n].b = s->tins[t];
 		}
 		inst++;
 	}

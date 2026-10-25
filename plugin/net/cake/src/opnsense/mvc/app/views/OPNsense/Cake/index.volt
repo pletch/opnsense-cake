@@ -83,9 +83,16 @@
                 return;
             }
             data.schedulers.forEach(function(sched) {
+                let name = "{{ lang._('Pipe') }} " + sched.sched + (sched.description ? ": " + sched.description : "");
+                if (sched.instances.length == 0) {
+                    $stats.append($("<div/>").addClass("content-box").append(
+                        $("<div/>").addClass("alert alert-info").css("margin", "0").text(
+                            name + ": " + "{{ lang._('no traffic yet') }}"
+                        )
+                    ));
+                }
                 sched.instances.forEach(function(tins, inst) {
-                    let title = "{{ lang._('Pipe') }} " + sched.sched +
-                        (sched.description ? ": " + sched.description : "") +
+                    let title = name +
                         (sched.instances.length > 1 ? " ({{ lang._('instance') }} " + (inst + 1) + ")" : "");
                     let $head = $("<tr/>").append($("<th/>").text(title));
                     tins.forEach(t => $head.append($("<th/>").text(t.name)));
