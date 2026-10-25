@@ -76,7 +76,8 @@ Build and install: see [`plugin/README.md`](plugin/README.md). Then:
 1. On **Firewall → Shaper**, set up pipes and queues as for FQ-CoDel, and point
    the shaper rules at the **queues**. Rules that target a pipe itself go
    through its internal FIFO. FQ-CoDel's target, interval, quantum, limit and
-   flows on the pipe also apply to CAKE.
+   flows on the pipe also apply to CAKE; the quantum is the most a flow gets
+   per round, and tins with a low rate share get less, as in sch_cake.
 2. On **Firewall → Shaper → CAKE**, add an entry for each pipe that should use
    CAKE: diffserv mode, isolation, link type (overhead), ACK filter and so on.
    Then **Apply**. The status line at the top says whether the module is in
@@ -360,9 +361,16 @@ queue 10001 config pipe 10001 weight 100
   size as its flow table and 8-way set-associative, with separate source
   and destination tags and bulk-flow counts. A flow becomes bulk once it
   uses up its deficit while still backlogged, and stops being bulk when it
-  goes idle. Its refill is the quantum divided by the larger bulk count of
-  its source and destination hosts, as the dual and triple modes require,
-  dithered so that the average is exact, and never less than 1 byte.
+  goes idle. Its refill is its tin's quantum divided by the larger bulk
+  count of its source and destination hosts, as the dual and triple modes
+  require, as `cake_get_flow_quantum()` computes it: 65535 / load in 16
+  bits plus a random 16-bit dither, so that the average is exact. Under a
+  heavy host load that can round down to 0, and the flow waits for its
+  next turn. A tin's quantum is its rate in bytes per second over 4096,
+  between 300 and the configured quantum (sch_cake's is fixed at 1514), as
+  `cake_set_rate()` sets it. (From 1.4; before, every tin used the
+  configured quantum, dithered only with several bulk flows per host and
+  never below 1 byte.)
 - **Flow lifecycle** follows sch_cake, not fq_codel (from 1.3; before, an
   emptied new flow moved to the old list as in fq_codel):
   - A flow found empty, from either list, goes to the tin's *decaying* list
@@ -433,16 +441,20 @@ queue 10001 config pipe 10001 weight 100
   | scenario | | Linux sch_cake | this port |
   |---|---|---|---|
   | Voice flow + greedy Bulk | Voice flow / Bulk | 5.0 (0% loss) / 43.2 | 5.0 (0% loss) / 43.4 |
-  | Bulk flow + greedy Voice | Bulk flow / Voice | 4.2 (16% loss), 3 runs alike / 44.1 | 3.5, 4.6, 3.6 (7–29% loss) / 45.0 |
+  | Bulk flow + greedy Voice | Bulk flow / Voice | 4.2 (16% loss), 3 runs alike / 44.1 | 1.3.4: 3.5, 4.6, 3.6 (7–29% loss); 1.4: 3.6, 3.6, 3.5 (29% loss) / 45.0 |
   | Voice flow + greedy Video, Best Effort, Bulk | Voice / Video / BE / Bulk | 5.0 (0% loss) / 23.9 / 16.3 / 3.0 | 5.0 (0% loss) / 24.1 / 16.2 / 3.0 |
 
   A Voice flow within its threshold gets all it offers while the other
   tins share the rest, and the shares between Video, Best Effort and Bulk
   agree to a few percent. A Bulk flow over its 3.1 Mbit/s threshold, up
-  against greedy Voice, gets somewhat more than the threshold in both,
-  but varies from run to run on the bench where Linux is steady; whether
-  a small real difference lies under that noise is for a deterministic
-  comparison of the schedulers to settle.
+  against greedy Voice, gets somewhat more than the threshold in both;
+  with 1.4, whose scheduling decisions match sch_cake's packet for packet
+  (`test/sched-diff.sh`), it is as steady as on Linux but gets 3.6 rather
+  than 4.2 Mbit/s. As the schedulers decide alike given the same release
+  times, the gap is in how packets are released, most likely dummynet's
+  batches: it sends a tick's worth (1 ms) at once, so every packet of a
+  batch sees the same time, and the Bulk tin's clock comes due less often
+  than with sch_cake's per-packet shaper. (Not yet measured.)
 - **The 8-tin modes can starve a tin.** Each tin may use its share of the
   rate at priority, and in `diffserv8` and `precedence` each share is 7/8 of
   the one below (87.5%, 77%, 67%, ...), so together they claim far more
@@ -521,7 +533,9 @@ queue 10001 config pipe 10001 weight 100
   The one late tick in 1.2 s also shows that the VM's timer is steady.
 - **COBALT is sch_cake's, bit for bit** (from 1.3): the same Q0.32
   1/√count with its cache table, control law, BLUE and signalling
-  decisions, in microseconds instead of nanoseconds. `test/cobalt-diff.sh`
+  decisions, in nanoseconds as in sch_cake (microseconds before 1.4), and
+  the tin clocks and MTU time use sch_cake's `rate_ns`/`rate_shft`
+  representation of the tin rate. `test/cobalt-diff.sh`
   builds both in userland and compares them; see *Verification status*.
   One deliberate difference: a fresh flow starts at 1/√1, so the first
   signal comes one interval after it first exceeds the target, as
@@ -680,6 +694,34 @@ queue 10001 config pipe 10001 weight 100
   ping's fragments loses the whole ping. The mbuf count steps up once
   after the floods, because NIC rings and UMA caches settle higher, and
   then stays flat. So the leak check compares against a warm count.
+- The whole scheduler against sch_cake (`test/sched-diff.sh`, from 1.4):
+  both scheduling cores are extracted from their sources (sch_cake's
+  enqueue and dequeue with its hashing, host isolation, DRR, tin
+  selection, shaper and COBALT; dn_sched_cake's the same) and built in
+  userland, each against a small shim. They get the same trace of
+  already-classified packets: flows from several hosts in mixed DSCP
+  classes, bulk and sparse, ECN and not. Both get the same flow and host
+  hashes; ours rotated so that its multiply-shift slot is sch_cake's
+  modulo slot. The clock advances in 10 µs steps, and each time sch_cake's
+  link shaper releases a packet dn_sched_cake is asked for one. Every
+  sent packet, its tin and every drop must match. Stage 1 leaves out
+  overhead compensation, the ACK filter, ingress mode and overflow (the
+  load stays under the buffer limits), and sets dummynet's tick to 1 µs
+  and sch_cake's fresh flows to 1/√1, the two deliberate differences.
+  Result: 300 random scenarios (besteffort, diffserv3, diffserv4; flows,
+  dual-srchost, dual-dsthost, triple-isolate; 50–200 Mbit/s; 1–48 flows),
+  8.23 million packets and 12,771 drops, all identical, and 0 consistency
+  errors. Getting there found four differences, all fixed in 1.4:
+  - a tin's flow quantum came from the configuration instead of from the
+    tin's rate;
+  - the quantum dithering used a different formula and only with several
+    bulk flows per host;
+  - a tin only counted for tin selection while it had packets, not while
+    it had flows, so flows that emptied in a quiet tin stayed bulk and
+    inflated their hosts' load; and between equally early tins the first
+    won instead of the last;
+  - COBALT and the tin clocks ran in microseconds, and the tin clocks used
+    a different fixed-point rate, so rounding drifted after many drops.
 - COBALT against sch_cake (`test/cobalt-diff.sh`, sch_cake at
   `torvalds/linux` 700b4c6c70d6): both implementations are extracted from
   their sources, built side by side and driven with the same random
