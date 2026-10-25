@@ -1,6 +1,11 @@
 CAKE dummynet scheduler built into dummynet.ko, plus ipfw(8)/dnctl(8)
 parameters, display and manual.
 
+Made against opnsense/src stable/26.7 (01510f09); apply with "git apply"
+or "patch -p1" in /usr/src. Same scheduler source as
+sys/netpfil/ipfw/dn_sched_cake.[ch] and the same userland change as
+ipfw-cake.patch in this repository.
+
 diff --git a/sbin/ipfw/dummynet.c b/sbin/ipfw/dummynet.c
 index 3cf9a18..9c598f6 100644
 --- a/sbin/ipfw/dummynet.c
@@ -399,7 +404,7 @@ index 3cf9a18..9c598f6 100644
  				    sizeof(sch_extra->name));
  				sch_extra->oid.subtype = DN_SCH_PARAMS;
 diff --git a/sbin/ipfw/ipfw.8 b/sbin/ipfw/ipfw.8
-index e295f8a..b5212f8 100644
+index e295f8a..7b9f44d 100644
 --- a/sbin/ipfw/ipfw.8
 +++ b/sbin/ipfw/ipfw.8
 @@ -3000,7 +3000,7 @@ The following case-insensitive parameters can be configured for a
@@ -433,7 +438,7 @@ index e295f8a..b5212f8 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3089,6 +3104,136 @@ So, ensure all scheduler
+@@ -3089,6 +3104,142 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -477,6 +482,12 @@ index e295f8a..b5212f8 100644
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.
 +.El
++.Pp
++.Cm diffserv8
++and
++.Cm precedence
++are experimental: each tin may use 7/8 of the share of the one below it at
++priority, so busy higher tins can starve a lower one, Best Effort included.
 +.Pp
 +and one flow isolation mode:
 +.Bl -tag -width indent
@@ -570,7 +581,7 @@ index e295f8a..b5212f8 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -5009,6 +5154,16 @@ to 10ms, we do:
+@@ -5009,6 +5160,16 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp
@@ -696,10 +707,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..7a71ac4
+index 0000000..f11efce
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,2032 @@
+@@ -0,0 +1,2048 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -1338,6 +1349,13 @@ index 0000000..7a71ac4
 +#define	CAKE_TH_CWR	0x080
 +#define	CAKE_TH_ECN	(CAKE_TH_ECE | CAKE_TH_CWR)
 +
++/*
++ * Packets of a flow the ACK filter looks at, from the head. sch_cake scans
++ * the whole flow; a cap keeps the cost of one ACK bounded when an
++ * unresponsive flow has thousands queued.
++ */
++#define	CAKE_ACK_SCAN	128
++
 +/* the TCP header of a packet, copied out of the mbuf chain if needed */
 +struct cake_tcp {
 +	const uint8_t	*th;		/* header with options */
@@ -1586,7 +1604,7 @@ index 0000000..7a71ac4
 +	struct cake_tcp t, c;
 +	struct mbuf *m, *chk, *prev = NULL, *elig = NULL, *elig_prev = NULL;
 +	uint32_t tsval = 0, tsecr = 0;
-+	int found = 0, elig_flags = 0, cmp;
++	int found = 0, elig_flags = 0, cmp, scan = CAKE_ACK_SCAN;
 +
 +	m = f->mq.tail;
 +	if (f->mq.head == m || !cake_get_tcp(m, &t))
@@ -1595,7 +1613,7 @@ index 0000000..7a71ac4
 +	if ((cake_th_flags(&t) & (CAKE_TH_ACK | CAKE_TH_SYN)) != CAKE_TH_ACK)
 +		return (NULL);
 +
-+	for (chk = f->mq.head; chk != NULL && chk != m;
++	for (chk = f->mq.head; chk != NULL && chk != m && scan-- > 0;
 +	    prev = chk, chk = chk->m_nextpkt) {
 +		/* same connection only: the flow may hold colliding ones */
 +		if (!cake_get_tcp(chk, &c) || c.alen != t.alen ||
@@ -1753,8 +1771,17 @@ index 0000000..7a71ac4
 +	memset(tuple, 0, sizeof(tuple));
 +	memcpy(&tuple[1], &perturbation, sizeof(perturbation));
 +
++	/* the IP stack makes the header contiguous, but dummynet on layer 2
++	 * can pass anything: short or non-IP packets go to one fixed flow */
 +	off = dn_tag_get(m)->iphdr_off;
++	*dscp = 0;
++	*srch = *dsth = 0;
++	if (m->m_len < off + (int)sizeof(struct ip))
++		return (0);
 +	ip = (struct ip *)mtodo(m, off);
++	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 6 &&
++	    m->m_len < off + (int)sizeof(struct ip6_hdr)))
++		return (0);
 +
 +	if (ip->ip_v == 6) {
 +		ip6 = (struct ip6_hdr *)ip;
@@ -2734,7 +2761,7 @@ index 0000000..7a71ac4
 +DECLARE_DNSCHED_MODULE(dn_cake, &cake_desc);
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.h b/sys/netpfil/ipfw/dn_sched_cake.h
 new file mode 100644
-index 0000000..64fdbff
+index 0000000..6559bcf
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.h
 @@ -0,0 +1,238 @@

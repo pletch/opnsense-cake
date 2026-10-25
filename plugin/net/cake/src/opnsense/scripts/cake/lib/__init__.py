@@ -36,37 +36,94 @@ KMOD_KERNEL = '/usr/local/libexec/cake/kernel'
 DNCTL = '/usr/local/libexec/cake/dnctl'
 
 
-def cake_pipes():
+# the values the model allows, checked again as config.xml may be edited or
+# restored outside the GUI and the wrapper writes them into dnctl commands
+DIFFSERV = ['besteffort', 'diffserv3', 'diffserv4', 'diffserv8', 'precedence']
+ISOLATION = [
+    'triple-isolate', 'dual-srchost', 'dual-dsthost', 'flows', 'hosts', 'srchost', 'dsthost',
+    'flowblind'
+]
+ACK_FILTER = ['', 'ack-filter', 'ack-filter-aggressive']
+LINK = [
+    '', 'ethernet', 'docsis', 'pppoe-ptm', 'bridged-ptm', 'pppoe-vcmux', 'pppoe-llcsnap',
+    'pppoa-vcmux', 'pppoa-llc', 'bridged-vcmux', 'bridged-llcsnap', 'ipoa-vcmux',
+    'ipoa-llcsnap', 'conservative'
+]
+FRAMING = ['', 'noatm', 'atm', 'ptm']
+
+
+def int_value(value, low, high):
+    """ value as an integer within [low, high]
+    :return: int or None
+    """
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if low <= value <= high else None
+
+
+def cake_args(item):
+    """ CAKE scheduler arguments of one CAKE pipe entry
+    :param item: config.xml element of the entry
+    :return: list, or None when a value is not one the model allows
+    """
+    diffserv = item.findtext('diffserv') or 'diffserv3'
+    isolation = item.findtext('isolation') or 'triple-isolate'
+    ack_filter = item.findtext('ack_filter') or ''
+    link = item.findtext('link') or ''
+    framing = item.findtext('framing') or ''
+    if diffserv not in DIFFSERV or isolation not in ISOLATION or ack_filter not in ACK_FILTER \
+            or link not in LINK or framing not in FRAMING:
+        return None
+
+    args = [
+        diffserv,
+        isolation,
+        'ecn' if item.findtext('ecn') == '1' else 'noecn',
+        'wash' if item.findtext('wash') == '1' else 'nowash',
+        'ingress' if item.findtext('ingress') == '1' else 'egress',
+        ack_filter or 'no-ack-filter'
+    ]
+    # a link type preset first, so the explicit values override it
+    if link:
+        args.append(link)
+    for field, low, high in [('overhead', -64, 256), ('mpu', 0, 256)]:
+        if item.findtext(field):
+            value = int_value(item.findtext(field), low, high)
+            if value is None:
+                return None
+            args += [field, str(value)]
+    if framing:
+        args.append(framing)
+    if item.findtext('memlimit'):
+        value = int_value(item.findtext('memlimit'), 1, 4096)
+        if value is None:
+            return None
+        args += ['memlimit', '%dm' % value]
+    return args
+
+
+def cake_pipes(errors=None):
     """ CAKE scheduler arguments of the enabled CAKE pipes, by traffic shaper pipe number
+    :param errors: list to add a message to for each entry that is skipped
     :return: dict
     """
     result = dict()
     root = ET.parse(CONFIG).getroot()
     numbers = dict()
     for pipe in root.findall('./OPNsense/TrafficShaper/pipes/pipe'):
-        numbers[pipe.get('uuid')] = pipe.findtext('number')
+        if int_value(pipe.findtext('number'), 1, 65535) is not None:
+            numbers[pipe.get('uuid')] = str(int(pipe.findtext('number')))
 
     for item in root.findall('./OPNsense/Cake/pipes/pipe'):
         if item.findtext('enabled') != '1' or item.findtext('pipe') not in numbers:
             continue
-        args = [
-            item.findtext('diffserv') or 'diffserv3',
-            item.findtext('isolation') or 'triple-isolate',
-            'ecn' if item.findtext('ecn') == '1' else 'noecn',
-            'wash' if item.findtext('wash') == '1' else 'nowash',
-            'ingress' if item.findtext('ingress') == '1' else 'egress',
-            item.findtext('ack_filter') or 'no-ack-filter'
-        ]
-        # a link type preset first, so the explicit values override it
-        if item.findtext('link'):
-            args.append(item.findtext('link'))
-        for field in ['overhead', 'mpu']:
-            if item.findtext(field):
-                args += [field, item.findtext(field)]
-        if item.findtext('framing'):
-            args.append(item.findtext('framing'))
-        if item.findtext('memlimit'):
-            args += ['memlimit', '%sm' % item.findtext('memlimit')]
+        args = cake_args(item)
+        if args is None:
+            if errors is not None:
+                errors.append('invalid CAKE settings for pipe %s, skipped' % numbers[item.findtext('pipe')])
+            continue
         result[numbers[item.findtext('pipe')]] = args
 
     return result

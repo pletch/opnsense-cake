@@ -636,6 +636,13 @@ cake_wash(struct mbuf *m)
 #define	CAKE_TH_CWR	0x080
 #define	CAKE_TH_ECN	(CAKE_TH_ECE | CAKE_TH_CWR)
 
+/*
+ * Packets of a flow the ACK filter looks at, from the head. sch_cake scans
+ * the whole flow; a cap keeps the cost of one ACK bounded when an
+ * unresponsive flow has thousands queued.
+ */
+#define	CAKE_ACK_SCAN	128
+
 /* the TCP header of a packet, copied out of the mbuf chain if needed */
 struct cake_tcp {
 	const uint8_t	*th;		/* header with options */
@@ -884,7 +891,7 @@ cake_ack_filter(struct cake_flow *f, int aggressive)
 	struct cake_tcp t, c;
 	struct mbuf *m, *chk, *prev = NULL, *elig = NULL, *elig_prev = NULL;
 	uint32_t tsval = 0, tsecr = 0;
-	int found = 0, elig_flags = 0, cmp;
+	int found = 0, elig_flags = 0, cmp, scan = CAKE_ACK_SCAN;
 
 	m = f->mq.tail;
 	if (f->mq.head == m || !cake_get_tcp(m, &t))
@@ -893,7 +900,7 @@ cake_ack_filter(struct cake_flow *f, int aggressive)
 	if ((cake_th_flags(&t) & (CAKE_TH_ACK | CAKE_TH_SYN)) != CAKE_TH_ACK)
 		return (NULL);
 
-	for (chk = f->mq.head; chk != NULL && chk != m;
+	for (chk = f->mq.head; chk != NULL && chk != m && scan-- > 0;
 	    prev = chk, chk = chk->m_nextpkt) {
 		/* same connection only: the flow may hold colliding ones */
 		if (!cake_get_tcp(chk, &c) || c.alen != t.alen ||
@@ -1051,8 +1058,17 @@ cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 	memset(tuple, 0, sizeof(tuple));
 	memcpy(&tuple[1], &perturbation, sizeof(perturbation));
 
+	/* the IP stack makes the header contiguous, but dummynet on layer 2
+	 * can pass anything: short or non-IP packets go to one fixed flow */
 	off = dn_tag_get(m)->iphdr_off;
+	*dscp = 0;
+	*srch = *dsth = 0;
+	if (m->m_len < off + (int)sizeof(struct ip))
+		return (0);
 	ip = (struct ip *)mtodo(m, off);
+	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 6 &&
+	    m->m_len < off + (int)sizeof(struct ip6_hdr)))
+		return (0);
 
 	if (ip->ip_v == 6) {
 		ip6 = (struct ip6_hdr *)ip;

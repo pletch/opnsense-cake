@@ -29,7 +29,9 @@ it can't be used, the plugin leaves the shaper on each pipe's own
 scheduler.
 
 To install on OPNsense, see [Install on OPNsense](#install-on-opnsense) and
-[`plugin/README.md`](plugin/README.md). The rest of this file describes the
+[`plugin/README.md`](plugin/README.md). Read [Security notes](#security-notes)
+first; vulnerabilities can be reported as described in
+[`SECURITY.md`](SECURITY.md). The rest of this file describes the
 implementation, its design and how it was verified.
 
 ## Layout
@@ -45,6 +47,7 @@ patches/opnsense-src-cake.patch       opnsense/src: scheduler in dummynet.ko, wi
 patches/opnsense-core-cake.patch      opnsense/core: Traffic Shaper support (older option set)
 test/                                 latency, robustness, isolation, overhead, feature and perf tests
 LICENSE                               BSD-3-Clause (scheduler) and BSD-2-Clause (everything else)
+SECURITY.md                           how to report vulnerabilities, verifying packages
 ```
 
 ## Install on OPNsense
@@ -82,11 +85,43 @@ Build and install: see [`plugin/README.md`](plugin/README.md). Then:
 `dn_cake.ko` is an unofficial kernel module running in your firewall's
 kernel. See *Status* at the top for where it has been tested.
 
+## Security notes
+
+- **It runs in the kernel.** A bug in `dn_cake.ko` can crash the firewall.
+  Keep a way back: a VM snapshot, or console access to run
+  `pkg delete -y os-cake cake-kmod`.
+- **Release compatibility is checked by FreeBSD release only** (e.g. 15.1).
+  A patch-level update that changed dummynet's internal structures would
+  not be detected. dummynet rarely changes, but after an OPNsense update,
+  check the status line on the CAKE page and `dmesg` for errors.
+- **Don't combine CAKE with pipe masks.** A mask creates a scheduler
+  instance per host, and each CAKE instance allocates its flow tables (up to
+  about 60 MB with 8 tins and 65536 flows). Allocation fails cleanly, but a
+  mask on traffic from the Internet lets outsiders create instances. CAKE's
+  host isolation does what masks were used for.
+- **Floods past the packet or byte limit** make every arriving packet search
+  the active flows for the fattest one. fq_codel scans all of its queues in
+  the same case, so this is no worse than today, but a heap would make it
+  cheaper.
+- **The ACK filter** looks at no more than 128 queued packets of a flow per
+  new ACK, so its cost per packet is bounded.
+- **Packets are parsed defensively:** headers outside the first mbuf are
+  copied out with bounds checks, and short or non-IP packets go to a fixed
+  flow. The parsers were fuzzed with over 100,000 malformed packets
+  (TCP options, data offsets, truncated headers, IPv6, 6in4, fragments)
+  without a fault or leak.
+- **The plugin's dnctl wrapper** runs as root at every shaper start. It
+  checks every value it takes from `config.xml` against what the GUI allows,
+  so a hand-edited or restored configuration can't inject dnctl commands, and
+  on any error it loads the shaper rules unchanged.
+- **Packages are not signed.** Check their SHA256 sums against the release
+  notes, or build them yourself from the tagged sources.
+
 ## What is implemented
 
 | Feature | Status |
 |---|---|
-| Tins: `besteffort`, `diffserv3` (default), `diffserv4`, `diffserv8`, `precedence` | yes, DSCP maps and shares match `sch_cake.c` |
+| Tins: `besteffort`, `diffserv3` (default), `diffserv4`, `diffserv8`, `precedence` | yes, DSCP maps and shares match `sch_cake.c`; `diffserv8` and `precedence` are experimental (see design notes) |
 | Tin rate thresholds: priority within share (Bulk 1/16, Video 1/2, Voice 1/4), rate-proportional above | yes, as sch_cake shaped mode; needs pipe `bw` |
 | WDRR between tins when the pipe has no `bw` (sch_cake unlimited mode) | yes |
 | 8-way set-associative flow hash per tin (5-tuple, perturbed Jenkins) | yes |
@@ -317,6 +352,17 @@ queue 10001 config pipe 10001 weight 100
   capped at one interval of link time: traffic that has crossed the
   bottleneck can't arrive faster than it, but a flood into a misused pipe
   owed ~6 minutes of link time at 10 Mbit/s and stalled the pipe.
+- **The 8-tin modes can starve a tin.** Each tin may use its share of the
+  rate at priority, and in `diffserv8` and `precedence` each share is 7/8 of
+  the one below (87.5%, 77%, 67%, ...), so together they claim far more
+  than the link. Under RRUL, greedy flows in two higher tins kept the tin
+  below them from ever being due: `precedence` starved Best Effort (0.01
+  Mbit/s, pings taking seconds), `diffserv8` starved Bulk. The pipe rate
+  itself held (the router counted exactly 50 Mbit/s). This follows
+  `sch_cake.c`'s shares, and tc-cake(8) calls `diffserv8` experimental and
+  discourages `precedence`, so they are kept as they are but marked
+  experimental. In `diffserv3` and `diffserv4` the priority shares add up to
+  31% and 81%, so Best Effort always gets the rest.
 - **Flags** share `par[2]`: the flags given in the low 16 bits and which ones
   they are in the next 16, so `wash` alone leaves ECN at its default. A mask
   of 0 is the older ECN-only form. `memlimit` (KB) is in the upper 32 bits of
@@ -551,7 +597,7 @@ queue 10001 config pipe 10001 weight 100
   | `ack-filter` | TCP download, 50 Mbit/s down, 0.2 Mbit/s up | 17.95 → 47.65 Mbit/s, aggressive 48.20 |
   | `memlimit 32k` | UDP flood | largest backlog 31500 bytes |
   | `ingress` | UDP flood, then ping | flood is charged its drops (0 delivered), ping right after: 0% loss |
-  | `diffserv8`, `precedence` | RRUL | 48.0 / 50.2 Mbit/s down, ICMP median 2.7 / 4.3 ms |
+  | `diffserv8`, `precedence` | RRUL | runs, but a later rerun showed tin starvation (see the 8-tin note under design notes); both are now marked experimental |
 
   The ingress run found the uncapped debt: before the cap, the flood left
   the pipe owing minutes of link time and the next tests got nothing

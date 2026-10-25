@@ -53,27 +53,20 @@ def cake_rule(line, args):
     return ' '.join(parts[:idx] + ['type', 'cake'] + params + args) + '\n'
 
 
-if __name__ == '__main__':
-    rules_file = sys.argv[1] if len(sys.argv) > 1 else '/usr/local/etc/dnctl.conf'
-    syslog.openlog('cake', facility=syslog.LOG_LOCAL4)
-    try:
-        pipes = cake_pipes()
-    except Exception as e:
-        syslog.syslog(syslog.LOG_ERR, 'unable to read the CAKE settings (%s)' % e)
-        pipes = dict()
+def load_stock(rules_file):
+    """ load the rules unchanged with /sbin/dnctl and unload dn_cake.ko if unused
+    :return: dnctl exit status
+    """
+    result = subprocess.run(['/sbin/dnctl', rules_file]).returncode
+    # no CAKE scheduler is left, dummynet refuses the unload otherwise
+    subprocess.run(['/sbin/kldunload', '-n', 'dn_cake.ko'], capture_output=True)
+    return result
 
-    if pipes:
-        status = kmod_status(load=True)
-        if not status['usable']:
-            syslog.syslog(syslog.LOG_WARNING, '%s, pipes keep their own scheduler' % status['reason'])
-            pipes = dict()
 
-    if not pipes:
-        result = subprocess.run(['/sbin/dnctl', rules_file]).returncode
-        # no CAKE scheduler is left, dummynet refuses the unload otherwise
-        subprocess.run(['/sbin/kldunload', '-n', 'dn_cake.ko'], capture_output=True)
-        sys.exit(result)
-
+def load_cake(rules_file, pipes):
+    """ load the rules with the pipes in pipes switched to CAKE
+    :return: dnctl exit status
+    """
     rules = []
     with open(rules_file) as f_in:
         for line in f_in:
@@ -86,6 +79,34 @@ if __name__ == '__main__':
     with tempfile.NamedTemporaryFile('w', prefix='dnctl-cake.', suffix='.conf', delete=False) as f_out:
         f_out.write(''.join(rules))
     try:
-        sys.exit(os.spawnv(os.P_WAIT, DNCTL, ['dnctl', f_out.name]))
+        return os.spawnv(os.P_WAIT, DNCTL, ['dnctl', f_out.name])
     finally:
         os.unlink(f_out.name)
+
+
+if __name__ == '__main__':
+    rules_file = sys.argv[1] if len(sys.argv) > 1 else '/usr/local/etc/dnctl.conf'
+    syslog.openlog('cake', facility=syslog.LOG_LOCAL4)
+    # any failure on the CAKE path falls back to the rules as they are, so the
+    # shaper always comes up
+    try:
+        errors = []
+        pipes = cake_pipes(errors)
+        for error in errors:
+            syslog.syslog(syslog.LOG_WARNING, error)
+        if pipes:
+            status = kmod_status(load=True)
+            if not status['usable']:
+                syslog.syslog(syslog.LOG_WARNING, '%s, pipes keep their own scheduler' % status['reason'])
+                pipes = dict()
+        if pipes:
+            result = load_cake(rules_file, pipes)
+            if result == 0:
+                sys.exit(0)
+            syslog.syslog(syslog.LOG_ERR, 'dnctl failed on the CAKE rules (%d), pipes keep their own scheduler' % result)
+    except SystemExit:
+        raise
+    except Exception as e:
+        syslog.syslog(syslog.LOG_ERR, 'CAKE setup failed (%s), pipes keep their own scheduler' % e)
+
+    sys.exit(load_stock(rules_file))

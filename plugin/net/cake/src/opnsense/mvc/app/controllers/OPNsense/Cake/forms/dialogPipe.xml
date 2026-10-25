@@ -23,7 +23,7 @@
         <help><![CDATA[How packets are sorted by DSCP into priority tins. Each tin may use its share of the pipe bandwidth at priority.
         <li>diffserv3: Bulk (CS1, LE; 1/16), Best Effort and Voice (EF, VA, CS6, CS7; 1/4).</li>
         <li>diffserv4: Bulk, Best Effort, Video (AF2x-AF4x, CS2, CS3; 1/2) and Voice (EF, VA, CS4-CS7; 1/4).</li>
-        <li>diffserv8 and IP precedence: eight tins, each with 7/8 of the share of the one below it.</li>
+        <li>diffserv8 and IP precedence (experimental): eight tins, each with 7/8 of the share of the one below it. These shares add up to far more than the bandwidth, so busy higher tins can starve a lower one completely, Best Effort included. Prefer diffserv3 or diffserv4.</li>
         ]]></help>
         <grid_view>
             <formatter>default</formatter>

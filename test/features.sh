@@ -11,7 +11,8 @@
 #               is delivered than in egress mode, and the pipe passes
 #               traffic again right after (the debt is capped)
 #   diffserv8, precedence
-#               RRUL runs and every tin gets traffic
+#               RRUL runs; fairness between tins is not checked, as these
+#               experimental modes can starve a tin (see README)
 #
 #   test/features.sh
 set -u

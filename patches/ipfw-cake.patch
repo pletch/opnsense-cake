@@ -401,7 +401,7 @@ index 3cf9a18..9c598f6 100644
  				    sizeof(sch_extra->name));
  				sch_extra->oid.subtype = DN_SCH_PARAMS;
 diff --git a/sbin/ipfw/ipfw.8 b/sbin/ipfw/ipfw.8
-index e295f8a..b5212f8 100644
+index e295f8a..7b9f44d 100644
 --- a/sbin/ipfw/ipfw.8
 +++ b/sbin/ipfw/ipfw.8
 @@ -3000,7 +3000,7 @@ The following case-insensitive parameters can be configured for a
@@ -435,7 +435,7 @@ index e295f8a..b5212f8 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3089,6 +3104,136 @@ So, ensure all scheduler
+@@ -3089,6 +3104,142 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -479,6 +479,12 @@ index e295f8a..b5212f8 100644
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.
 +.El
++.Pp
++.Cm diffserv8
++and
++.Cm precedence
++are experimental: each tin may use 7/8 of the share of the one below it at
++priority, so busy higher tins can starve a lower one, Best Effort included.
 +.Pp
 +and one flow isolation mode:
 +.Bl -tag -width indent
@@ -572,7 +578,7 @@ index e295f8a..b5212f8 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -5009,6 +5154,16 @@ to 10ms, we do:
+@@ -5009,6 +5160,16 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp

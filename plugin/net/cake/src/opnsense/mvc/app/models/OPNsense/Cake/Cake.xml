@@ -33,8 +33,8 @@
                         <besteffort>Best effort (1 tin)</besteffort>
                         <diffserv3>diffserv3 (3 tins)</diffserv3>
                         <diffserv4>diffserv4 (4 tins)</diffserv4>
-                        <diffserv8>diffserv8 (8 tins)</diffserv8>
-                        <precedence>IP precedence (8 tins)</precedence>
+                        <diffserv8>diffserv8 (8 tins, experimental)</diffserv8>
+                        <precedence>IP precedence (8 tins, experimental)</precedence>
                     </OptionValues>
                 </diffserv>
                 <isolation type="OptionField">

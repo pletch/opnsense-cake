@@ -36,15 +36,21 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=$(mkdir -p "${1:-.}" && cd "${1:-.}" && pwd)
 # not PLUGINS: pkg(8) reads that from the environment as its own setting
 PLUGINS_TREE=${PLUGINS_TREE:-$(mktemp -d -t cake-plugins)/plugins}
+# a commit of opnsense/plugins to build with, for a reproducible build
+PLUGINS_COMMIT=${PLUGINS_COMMIT:-}
 
 sh "${HERE}/kmod/build.sh" "${OUT}"
 pkg add -f "${OUT}"/cake-kmod-*.pkg
 
 # the stable branch of the series, the main branch builds -devel packages
 if [ ! -d "${PLUGINS_TREE}/Mk" ]; then
-	git clone -q --depth 1 -b "stable/$(opnsense-version -a)" \
+	git clone -q -b "stable/$(opnsense-version -a)" \
 	    https://github.com/opnsense/plugins.git "${PLUGINS_TREE}"
 fi
+if [ -n "${PLUGINS_COMMIT}" ]; then
+	git -C "${PLUGINS_TREE}" checkout -q "${PLUGINS_COMMIT}"
+fi
+echo ">>> Building os-cake with opnsense/plugins $(git -C "${PLUGINS_TREE}" rev-parse HEAD)"
 rm -rf "${PLUGINS_TREE}/net/cake"
 cp -R "${HERE}/net/cake" "${PLUGINS_TREE}/net/cake"
 make -C "${PLUGINS_TREE}/net/cake" package

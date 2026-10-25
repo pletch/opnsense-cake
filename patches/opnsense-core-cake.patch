@@ -1,5 +1,9 @@
 Traffic Shaper: CAKE scheduler type, diffserv mode, quantum check.
 
+Made against opnsense/core 26.7; apply with "git apply" or "patch -p1" in
+a core checkout. Needs a dnctl and dummynet.ko with CAKE
+(opnsense-src-cake.patch).
+
 diff --git a/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml b/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml
 index 6c1fd9d..6fffa8c 100644
 --- a/src/opnsense/mvc/app/controllers/OPNsense/TrafficShaper/forms/dialogPipe.xml
