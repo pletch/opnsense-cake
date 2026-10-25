@@ -390,6 +390,30 @@ queue 10001 config pipe 10001 weight 100
   least 1.5 × max(MTU time, tick), and the interval is raised to match. With
   `kern.hz=100` that gives a 15 ms target. For tighter control, set
   `kern.hz=1000`.
+- **Release bursts on real hardware.** The pipe sends a tick's worth of
+  packets at once, so a saturated pipe releases in bursts. Measured
+  2026-10-25 on an OPNsense 26.7 VM on Proxmox: Intel `igc` 2.5 Gbit/s NICs
+  in PCIe passthrough, `kern.hz=1000`, and the download pipe at 1950 Mbit/s
+  saturated by a wired client. Outgoing full-size packets on the LAN VLAN
+  were captured with `tcpdump -Q out` for 1.2 s (200,000 packets):
+
+  | measure | result |
+  |---|---|
+  | bursts | 1164/s; the tick is 1000/s |
+  | mean burst | 142 packets, about 210 KB (one tick at 1950 Mbit/s is about 160) |
+  | largest burst | 331 packets, after the single late tick |
+  | gaps of 500–1000 µs | 1128 |
+  | gaps of 200–500 µs | 34 |
+  | gaps of 50–200 µs | 240 (bursts split, likely by NIC interrupt moderation) |
+  | gaps over 1 ms | 1 |
+
+  The capture timestamps packets as they are handed to the transmit ring.
+  The 2.5 Gbit/s NIC takes about 0.7 ms to send each burst, so on the wire
+  a tick's burst fills most of the millisecond. Sub-tick release, or a
+  higher `kern.hz`, would save a fraction of a millisecond of upstream
+  queueing at this ratio of NIC speed to shaped rate. It matters when a
+  much faster NIC feeds a slower link, e.g. 10 Gbit/s shaping 1–2 Gbit/s.
+  The one late tick in 1.2 s also shows that the VM's timer is steady.
 - **Initial `rec_inv_sqrt` is 1.0**, so the first CoDel drop comes one
   interval after a flow enters the dropping state, as in classic CoDel.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
@@ -670,6 +694,9 @@ queue 10001 config pipe 10001 weight 100
 10. Run `make style` (phpcs) on a machine with current packages.
 11. Sub-tick release timing, i.e. an integrated shaper. dummynet sends a
     tick's worth of packets at once (1 ms at `kern.hz=1000`). It needs
-    dummynet's timer reworked, so it can't be part of the plugin.
+    dummynet's timer reworked, so it can't be part of the plugin. Measured
+    on 2.5 Gbit/s NICs shaping 1950 Mbit/s, it would gain little (see
+    *Release bursts on real hardware*); it matters for 10 Gbit/s NICs
+    feeding much slower links.
 12. A heap for fattest-flow selection, only if much larger flow counts show
     up in profiles; at 256 flows the linear scan is cheaper than fq_codel's.
