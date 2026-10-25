@@ -31,10 +31,25 @@ import json
 import subprocess
 from lib import kmod_status, DNCTL
 
+
+def sysctl(name):
+    """ read one sysctl, None if it can't be read
+    :param name: sysctl name
+    :return: str or None
+    """
+    out = subprocess.run(['/sbin/sysctl', '-n', name], capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
 if __name__ == '__main__':
     result = kmod_status()
     result['status'] = 'ok'
     result['schedulers'] = []
+    # dummynet times everything in clock ticks, and FreeBSD drops to 100 Hz
+    # in a virtual machine
+    hz = sysctl('kern.hz')
+    result['hz'] = int(hz) if hz is not None and hz.isdigit() else None
+    result['vm_guest'] = sysctl('kern.vm_guest')
     if result['loaded']:
         sched = None
         for line in subprocess.run([DNCTL, 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):

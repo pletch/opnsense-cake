@@ -46,6 +46,21 @@
                         .replace("%s", data.reason)
                     );
                 }
+
+                let $hz = $("#cake_hz");
+                if (data.hz && data.hz < 1000) {
+                    let vm = data.vm_guest && data.vm_guest != "none";
+                    $hz.text(
+                        (vm ? "{{ lang._('kern.hz is %s, the FreeBSD default in a virtual machine.') }}"
+                            : "{{ lang._('kern.hz is %s.') }}").replace("%s", data.hz) + " " +
+                        "{{ lang._('The shaper releases traffic and measures delay in clock ticks, so CAKE and FQ-CoDel control latency more coarsely. Add the tunable kern.hz with value 1000 under System: Settings: Tunables and reboot, a second time if it still shows %s.') }}"
+                        .replace("%s", data.hz)
+                    ).append(
+                        " ", $("<a/>").attr("href", "/ui/core/tunables").text("{{ lang._('Open Tunables') }}")
+                    ).show();
+                } else {
+                    $hz.hide();
+                }
             });
         }
 
@@ -72,6 +87,8 @@
 <div class="alert alert-info" role="alert" id="cake_status">
     {{ lang._('Fetching the CAKE status...') }}
 </div>
+
+<div class="alert alert-warning" role="alert" id="cake_hz" style="display: none;"></div>
 
 <div class="content-box">
     {{ partial('layout_partials/base_bootgrid_table', formGridPipe) }}

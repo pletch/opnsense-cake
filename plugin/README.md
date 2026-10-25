@@ -61,7 +61,8 @@ in a VM*.
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used.
 - `sysctl kern.hz` should say 1000; in a VM it defaults to 100 (see
-  *Install*).
+  *Install*). From 1.2 the CAKE page shows a warning below the status line
+  when it is lower.
 - `/usr/local/libexec/cake/dnctl sched show` lists the CAKE schedulers with
   their options; the stock `dnctl` lists them as `type CAKE` without options.
 - If the module can't be used, the reason is logged in the system log with

@@ -10,6 +10,11 @@ the shaper keeps running with the pipes' own scheduler.
 Plugin Changelog
 ================
 
+1.2
+
+* The CAKE page warns when kern.hz is below 1000, as it is by default
+  in a virtual machine, and says how to raise it
+
 1.1
 
 * Each scheduler instance runs on its own copy of the configuration,
