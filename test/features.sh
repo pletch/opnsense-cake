@@ -7,6 +7,11 @@
 #   ack-filter  TCP download over a 0.2 Mbit/s upload, narrower than the
 #               ~0.43 Mbit/s of ACKs a 50 Mbit/s download sends: goodput without
 #               the filter, with it, and aggressive
+#   ack-collision
+#               the same with two downloads in one queue (flowblind, so
+#               every flow collides): the filter must only replace an ACK
+#               with a later one of the same connection, so both downloads
+#               gain and neither stalls
 #   memlimit    bytes queued under a UDP flood stay below a 32 KB limit
 #   ingress     under a UDP flood, drops are charged to the rate, so less
 #               is delivered than in egress mode, and the pipe passes
@@ -111,6 +116,29 @@ done
 [ "${down_ack_filter:-0}" -gt "${down_no_ack_filter:-0}" ] &&
     [ "${down_ack_filter_aggressive:-0}" -ge "${down_ack_filter:-0}" ] && ok=1 || ok=0
 result ack-filter $ok "download ${down_no_ack_filter:-?} -> ${down_ack_filter:-?} -> ${down_ack_filter_aggressive:-?} Mbit/s"
+
+echo "== ack-collision"
+cli 'N="sudo ip netns exec"; $N srv ss -ltn | grep -q "0.0.0.0:12869 " ||
+    $N srv netserver -L 0.0.0.0 -p 12869 >/dev/null'
+for mode in no-ack-filter ack-filter; do
+	sched besteffort flowblind $mode
+	k0=$(opn 'sysctl -n net.inet.ip.dummynet.cake.stats | grep "^sched 2 .* tin 0 " | cut -d" " -f24' 30)
+	r=$(cli 'N="sudo ip netns exec"
+	$N cli netperf -H 10.10.2.11 -p 12869 -t TCP_MAERTS -l 15 -P 0 -- -o THROUGHPUT >/tmp/a.txt &
+	$N cli netperf -H 10.10.2.12 -p 12869 -t TCP_MAERTS -l 15 -P 0 -- -o THROUGHPUT >/tmp/b.txt &
+	wait; echo $(cat /tmp/a.txt) $(cat /tmp/b.txt)')
+	k1=$(opn 'sysctl -n net.inet.ip.dummynet.cake.stats | grep "^sched 2 .* tin 0 " | cut -d" " -f24' 30)
+	set -- $r 0 0
+	eval "a_$(echo $mode | tr - _)=\${1%%.*} b_$(echo $mode | tr - _)=\${2%%.*}"
+	eval "k_$(echo $mode | tr - _)=$(( ${k1:-0} - ${k0:-0} ))"
+	echo "   $mode: downloads $1 and $2 Mbit/s, $(( ${k1:-0} - ${k0:-0} )) ACKs filtered"
+done
+# with the filter each download must beat the unfiltered pair's better one
+[ "${k_ack_filter:-0}" -gt 0 ] &&
+    [ "${a_ack_filter:-0}" -gt "${a_no_ack_filter:-0}" ] && [ "${a_ack_filter:-0}" -gt "${b_no_ack_filter:-0}" ] &&
+    [ "${b_ack_filter:-0}" -gt "${a_no_ack_filter:-0}" ] && [ "${b_ack_filter:-0}" -gt "${b_no_ack_filter:-0}" ] &&
+    ok=1 || ok=0
+result ack-collision $ok "two downloads in one queue: ${a_no_ack_filter:-?} + ${b_no_ack_filter:-?} -> ${a_ack_filter:-?} + ${b_ack_filter:-?} Mbit/s, ${k_ack_filter:-?} ACKs filtered"
 
 echo "== memlimit"
 opn "cd /root/work && DOWN=50Mbit/s UP=10Mbit/s ./lul-setup.sh" 60 >/dev/null

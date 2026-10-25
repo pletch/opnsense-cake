@@ -807,6 +807,7 @@ queue 10001 config pipe 10001 weight 100
   |---|---|---|
   | `wash` | EF + ECT(1) pings, IPv4 and IPv6 | DSCP cleared, ECN kept, no bad checksums |
   | ECN (1.3) | TCP download with ECN negotiated at both ends | 67 packets marked CE at the client, 48 Mbit/s |
+  | ACK filter with collisions (1.3.4) | two TCP downloads over a 0.2 Mbit/s upload in `flowblind` mode, so both connections' ACKs share one queue | 8.5 + 8.4 → 23.1 + 22.2 Mbit/s with 9576 ACKs filtered: each connection's ACKs are only replaced by its own, so neither stalls |
   | `ack-filter` | TCP download, 50 Mbit/s down, 0.2 Mbit/s up | 17.95 → 47.65 Mbit/s, aggressive 48.20 |
   | `memlimit 32k` | UDP flood | largest backlog 31500 bytes |
   | `ingress` | UDP flood, then ping | flood is charged its drops (0 delivered), ping right after: 0% loss |
