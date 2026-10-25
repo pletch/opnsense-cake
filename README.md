@@ -597,7 +597,12 @@ queue 10001 config pipe 10001 weight 100
   leave a link paced at the pipe's rate (the previous packet's plus its
   own duration, at most a tick behind the real time and never ahead);
   COBALT keeps the real time. `net.inet.ip.dummynet.cake.link_clock=0`
-  turns it off, for comparison.
+  turns it off, for comparison. The window is one tick: when a batch
+  carries more than a tick's credit (a late tick), the clock is pulled
+  forward to a tick back and then held at the real time for the rest of
+  the batch, i.e. falls back to dummynet's time; CAKE_DEBUG builds count
+  this (`link_reads`, `link_behind`, `link_ahead` and their largest
+  corrections, see *The link clock's clamp* under testing).
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
 - **Instance expiry.** dummynet destroys a scheduler instance as soon as
@@ -815,6 +820,35 @@ queue 10001 config pipe 10001 weight 100
   renamed hash function's signature). The rest of the shims sit outside
   the extracted code: kernel and dummynet types, the clock, the flow
   dissector's hashes, and drop logging.
+- The link clock's clamp (after 1.4.2): how often the window bounds it,
+  from `CAKE_DEBUG` counters of the reads that choose a tin, in
+  `sched-diff.sh pace-random` (300 scenarios each; `SD_LATE=n` makes n%
+  of ticks late, as dummynet's are under load, the next one catching up
+  their credit). Pulled forward means the clock was over a tick behind,
+  pulled back that it was ahead of the real time:
+
+  | ticks | mode | pulled forward (largest) | pulled back (largest) | tin deviation from sch_cake, mean / worst |
+  |---|---|---|---|---|
+  | 1000 Hz | egress | 0.02% (3 µs) | 0.56% (236 µs) | 0.26% / 6.8% |
+  | 1000 Hz | ingress | 0.12% (0.8 ms) | 3.1% (1.6 ms) | 0.24% / 5.8% |
+  | 1000 Hz, 10% late | both | 0.26–0.31% (5 ms) | 10.5–11.6% (1.4 ms) | 0.28–0.52% / 6.9% |
+  | 1000 Hz, 50% late | both | 0.67–0.71% (20 ms) | 48% (1.8 ms) | 0.73–1.42% / 28% |
+  | 4000 Hz | both | 0.06–0.59% (0.7 ms) | 2.5–5.2% (1.6 ms) | 0.00–0.08% / 4.2% |
+  | 100 Hz | both | 0.00–0.02% (0.6 ms) | 0.05–1.6% (2.8 ms) | 3.9% / 74% |
+
+  In egress mode a pull back is at most a packet's time, the pipe letting
+  one out past zero credit; in ingress mode drops and the failsafe add up
+  to 1.5 of them. With late ticks, the clock falls back to dummynet's
+  time for the part of a batch beyond a tick, and the shares drift as
+  they did without it: with the link clock off, 50% late gives 0.73% and
+  1.73%, 100 Hz 3.85% and 4.36% (egress, ingress), the same or worse. The
+  large worst cases at 100 Hz and with late ticks are the batches'
+  own: the random scenarios' small memory limits overflow under 10 ms of
+  held-back arrivals.
+  On the bench (`kern.hz=1000`, CAKE_DEBUG module, three rounds of
+  `test/contention.sh`): of 3.3 million reads, 0.62% pulled forward (at
+  most 6.4 ms, the VM's late ticks), 2.2% pulled back (at most 239 µs,
+  a 1514-byte packet's time at 50 Mbit/s being 242 µs).
 - The link clock (1.4.2) against sch_cake: the lockstep comparison above
   asks dn_sched_cake for a packet whenever sch_cake's shaper sends one,
   so the real time is already the link's and runs with the link clock
@@ -977,6 +1011,7 @@ queue 10001 config pipe 10001 weight 100
   | `ack-filter` | TCP download, 50 Mbit/s down, 0.2 Mbit/s up | 17.95 → 47.65 Mbit/s, aggressive 48.20 |
   | `memlimit 32k` | UDP flood | largest backlog 31500 bytes |
   | `ingress` | UDP flood, then ping | flood is charged its drops (up to 1.4.1 0 delivered; 1.4.2, with sch_cake's failsafe, 548 of egress mode's 829 pps, i.e. 2/3), ping right after: 0% loss |
+  | `ingress-recovery` (after 1.4.2) | three rounds of a 10 s UDP flood and 5 s without, under a 10 Hz ping | flood delivered 556, 546, 549 pps (egress mode 826): steady at 2/3; ping during the floods 0% loss, median 6.1 ms; right after each 0% loss, median 3.0 ms |
   | `diffserv8`, `precedence` | RRUL | runs, but a later rerun showed tin starvation (see the 8-tin note under design notes); both are now marked experimental |
 
   The ingress run found the uncapped debt: before the cap, the flood left

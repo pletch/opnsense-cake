@@ -125,7 +125,8 @@ static int cake_ecn_mark(struct mbuf *m);
 static void cake_heapify(struct cake_si *si, uint32_t i);
 static __inline void cake_charge_tin(struct cake_tin *tin, int len,
     uint64_t now);
-static __inline uint64_t cake_link_now(struct cake_si *si, uint64_t now);
+static __inline uint64_t cake_link_now(struct cake_si *si, uint64_t now,
+    int decide);
 static __inline uint64_t cake_link_dur(struct cake_si *si, uint32_t len);
 
 /* cake default parameters */
@@ -608,7 +609,7 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 		return;
 
 	/* drops only add debt up to the cap, never take any away */
-	link_ns = cake_link_now(si, now_ns);
+	link_ns = cake_link_now(si, now_ns, 0);
 	cake_charge_tin(tin, len, link_ns);
 	if (tin->time_next > link_ns + interval)
 		tin->time_next = MAX(last, link_ns + interval);
@@ -620,8 +621,11 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 	 * way counts, which keeps the product in range. */
 	debt = (int64_t)hz * si->_si.sched->link.bandwidth / 1000000 *
 	    (interval / 1000);
-	ahead = (int64_t)(si->failsafe_time - now_ns);
-	ahead = MAX(MIN(ahead, 1000000000LL), -1000000000LL);
+	ahead = si->failsafe_time >= now_ns ?
+	    (int64_t)MIN(si->failsafe_time - now_ns, 1000000000ULL) :
+	    -(int64_t)MIN(now_ns - si->failsafe_time, 1000000000ULL);
+	/* |ahead| / 1000 <= 10^6 us, bw / 1000 < 2^32 / 1000, hz <= 10^5:
+	 * at most 4.3 * 10^17, within int64_t */
 	failsafe = -(ahead / 1000) * (int64_t)(si->bw / 1000) * hz / 1000;
 	si->_si.credit = MAX(credit - (int64_t)hz * 8 * len,
 	    MIN(credit, MAX(-debt, failsafe)));
@@ -1666,6 +1670,43 @@ SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, rebuild_failures,
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, adoptions,
 	CTLFLAG_RD, &cake_adoptions, 0, "CAKE_DEBUG kept states adopted");
 
+/*
+ * The link clock's clamp (cake_link_now()): of its reads for a choice of
+ * tin (enqueue and drops read it too, when it may run ahead), how many found
+ * it more than a tick behind the real time (pulled forward) or ahead of
+ * it (pulled back), and the largest correction each way, in us.
+ */
+static u_int cake_link_reads, cake_link_behind, cake_link_ahead;
+static u_int cake_link_behind_max, cake_link_ahead_max;
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_reads,
+	CTLFLAG_RW, &cake_link_reads, 0, "CAKE_DEBUG link clock reads");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_behind,
+	CTLFLAG_RW, &cake_link_behind, 0, "CAKE_DEBUG link clock pulled forward");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_behind_max,
+	CTLFLAG_RW, &cake_link_behind_max, 0, "CAKE_DEBUG largest pull forward, us");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_ahead,
+	CTLFLAG_RW, &cake_link_ahead, 0, "CAKE_DEBUG link clock pulled back");
+SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_ahead_max,
+	CTLFLAG_RW, &cake_link_ahead_max, 0, "CAKE_DEBUG largest pull back, us");
+
+static void
+cake_link_stat(uint64_t t, uint64_t lo, uint64_t now)
+{
+	u_int us;
+
+	cake_link_reads++;
+	if (t < lo) {
+		cake_link_behind++;
+		us = (u_int)MIN((lo - t) / 1000, UINT_MAX);
+		cake_link_behind_max = MAX(cake_link_behind_max, us);
+	} else if (t > now) {
+		cake_link_ahead++;
+		us = (u_int)MIN((t - now) / 1000, UINT_MAX);
+		cake_link_ahead_max = MAX(cake_link_ahead_max, us);
+	}
+}
+#define	CAKE_LINK_STAT(t, lo, now)	cake_link_stat(t, lo, now)
+
 static void *
 cake_alloc(size_t n, size_t size)
 {
@@ -1683,6 +1724,7 @@ cake_alloc(size_t n, size_t size)
 #define	CAKE_CHECK(si, where)	do { } while (0)
 #define	cake_alloc(n, size)	mallocarray(n, size, M_DUMMYNET, M_NOWAIT | M_ZERO)
 #define	CAKE_COUNT(c)		do { } while (0)
+#define	CAKE_LINK_STAT(t, lo, now)	do { } while (0)
 #endif
 
 /*
@@ -1727,7 +1769,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	/* an idle tin's clock is stale: do not let it claim old credit, but
 	 * let it be due on the link clock that cake_dequeue() goes by */
 	if (si->shaped && tin->backlog == 0) {
-		uint64_t link_ns = cake_link_now(si, now_ns);
+		uint64_t link_ns = cake_link_now(si, now_ns, 0);
 
 		if (tin->time_next < link_ns)
 			tin->time_next = link_ns;
@@ -1818,16 +1860,20 @@ cake_link_dur(struct cake_si *si, uint32_t len)
 	return (((uint64_t)len * si->link_rate_ns) >> si->link_rate_shft);
 }
 
+/* decide: a read for cake_dequeue()'s choice of tin, for CAKE_LINK_STAT */
 static __inline uint64_t
-cake_link_now(struct cake_si *si, uint64_t now)
+cake_link_now(struct cake_si *si, uint64_t now, int decide)
 {
-	uint64_t tick_ns = 1000000000ULL / hz, t = si->link_time;
+	uint64_t tick_ns = 1000000000ULL / hz, t = si->link_time, lo;
 
 	if (!cake_link_clock)
 		return (now);
 	if (si->cfg.flags & CAKE_INGRESS)
 		t = MIN(t, si->failsafe_time);
-	return (MIN(MAX(t, now - MIN(now, tick_ns)), now));
+	lo = now - MIN(now, tick_ns);
+	if (decide)
+		CAKE_LINK_STAT(t, lo, now);
+	return (MIN(MAX(t, lo), now));
 }
 
 /*
@@ -1930,7 +1976,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 		}
 
 		if (si->shaped) {
-			link_ns = cake_link_now(si, now_ns);
+			link_ns = cake_link_now(si, now_ns, 1);
 			si->cur_tin = cake_select_tin(si, link_ns);
 			tin = &si->tins[si->cur_tin];
 		} else {
