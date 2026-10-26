@@ -121,7 +121,7 @@
         <label>Memory limit</label>
         <type>text</type>
         <advanced>true</advanced>
-        <help>Limit of the bytes queued, in MB. Leave empty for four times what the pipe sends in an interval, and at least 4 MB.</help>
+        <help>Limit of the bytes queued, in MB, at most 256. Leave empty for four times what the pipe sends in an interval, and at least 4 MB.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>

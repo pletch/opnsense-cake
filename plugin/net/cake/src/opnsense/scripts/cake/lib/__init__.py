@@ -53,6 +53,8 @@ LINK = [
     'ipoa-llcsnap', 'conservative'
 ]
 FRAMING = ['', 'noatm', 'atm', 'ptm']
+# MB; the model allowed 4096 before os-cake 1.3.3, larger values are lowered to this
+MEMLIMIT_MAX = 256
 
 
 def int_value(value, low, high):
@@ -66,9 +68,10 @@ def int_value(value, low, high):
     return value if low <= value <= high else None
 
 
-def cake_args(item):
+def cake_args(item, warnings=None):
     """ CAKE scheduler arguments of one CAKE pipe entry
     :param item: config.xml element of the entry
+    :param warnings: list to add a message to for a value that is lowered
     :return: list, or None when a value is not one the model allows
     """
     diffserv = item.findtext('diffserv') or 'diffserv3'
@@ -103,6 +106,10 @@ def cake_args(item):
         value = int_value(item.findtext('memlimit'), 1, 4096)
         if value is None:
             return None
+        if value > MEMLIMIT_MAX:
+            if warnings is not None:
+                warnings.append('memory limit %d MB lowered to %d MB' % (value, MEMLIMIT_MAX))
+            value = MEMLIMIT_MAX
         args += ['memlimit', '%dm' % value]
     return args
 
@@ -115,19 +122,32 @@ def cake_pipes(errors=None):
     result = dict()
     root = ET.parse(CONFIG).getroot()
     numbers = dict()
+    masks = dict()
     for pipe in root.findall('./OPNsense/TrafficShaper/pipes/pipe'):
         if int_value(pipe.findtext('number'), 1, 65535) is not None:
             numbers[pipe.get('uuid')] = str(int(pipe.findtext('number')))
+            masks[pipe.get('uuid')] = pipe.findtext('mask') or 'none'
 
     for item in root.findall('./OPNsense/Cake/pipes/pipe'):
         if item.findtext('enabled') != '1' or item.findtext('pipe') not in numbers:
             continue
-        args = cake_args(item)
+        number = numbers[item.findtext('pipe')]
+        # a mask makes a scheduler instance, with its own flow tables, per
+        # host, and on traffic from the Internet lets outsiders create them
+        if masks[item.findtext('pipe')] != 'none':
+            if errors is not None:
+                errors.append('pipe %s has a mask (%s), CAKE is not used on it: remove the mask, '
+                              'CAKE isolates hosts by itself' % (number, masks[item.findtext('pipe')]))
+            continue
+        warnings = []
+        args = cake_args(item, warnings)
         if args is None:
             if errors is not None:
-                errors.append('invalid CAKE settings for pipe %s, skipped' % numbers[item.findtext('pipe')])
+                errors.append('invalid CAKE settings for pipe %s, skipped' % number)
             continue
-        result[numbers[item.findtext('pipe')]] = args
+        if errors is not None:
+            errors += ['pipe %s: %s' % (number, x) for x in warnings]
+        result[number] = args
 
     return result
 

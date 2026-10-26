@@ -47,7 +47,7 @@ plugin/build.sh                       builds both packages on an OPNsense machin
 patches/ipfw-cake.patch               ipfw(8)/dnctl(8): "type cake" parameters, display, manual
 patches/opnsense-src-cake.patch       opnsense/src: scheduler in dummynet.ko, wire_len hook, ipfw patch
 patches/opnsense-core-cake.patch      opnsense/core: Traffic Shaper support (older option set)
-test/                                 latency, robustness, isolation, overhead, feature and perf tests
+test/                                 latency, robustness, isolation, overhead, feature, perf and fuzz tests
 LICENSE                               BSD-3-Clause (scheduler) and BSD-2-Clause (everything else)
 SECURITY.md                           how to report vulnerabilities, verifying packages
 ```
@@ -160,11 +160,18 @@ kernel. See *Status* at the top for where it has been tested.
   the pipes back to their own scheduler, with the reason on the CAKE page,
   until `cake-kmod` is rebuilt. With `cake-kmod` 1.0 or 1.1 only the
   release is checked.
-- **Don't combine CAKE with pipe masks.** A mask creates a scheduler
+- **CAKE is not used on pipes with a mask.** A mask creates a scheduler
   instance per host, and each CAKE instance allocates its flow tables (up to
   about 60 MB with 8 tins and 65536 flows). Allocation fails cleanly, but a
   mask on traffic from the Internet lets outsiders create instances. CAKE's
-  host isolation does what masks were used for.
+  host isolation does what masks were used for. From `os-cake` 1.3.3 the
+  wrapper leaves a pipe with a mask on its own scheduler, logs why and
+  shows it on the CAKE page; with `dnctl` directly, it is still up to you.
+- **The plugin's memory limit is at most 256 MB** per pipe (`os-cake`
+  1.3.3; 4096 MB before, and a larger configured value is lowered to 256
+  with a warning on the CAKE page). Without one, the byte limit is four
+  times what the pipe sends in an interval, at least 4 MB, and at most the
+  packet limit (10240 by default) in full-size packets, about 15 MB.
 - **Floods past the packet or byte limit** pick the fattest flow from a
   max-heap, as sch_cake does (from 1.4; before, a scan of the active
   flows): each drop costs O(log n), and the heap is rebuilt, O(n), only on
@@ -172,10 +179,12 @@ kernel. See *Status* at the top for where it has been tested.
 - **The ACK filter** looks at no more than 128 queued packets of a flow per
   new ACK, so its cost per packet is bounded.
 - **Packets are parsed defensively:** headers outside the first mbuf are
-  copied out with bounds checks, and short or non-IP packets go to a fixed
-  flow. The parsers were fuzzed with over 100,000 malformed packets
-  (TCP options, data offsets, truncated headers, IPv6, 6in4, fragments)
-  without a fault or leak.
+  copied out with bounds checks, and short or non-IP packets, and IPv4
+  headers shorter than 20 bytes, go to a fixed flow. The ACK filter only
+  takes a packet for TCP if its IP length covers the TCP header and fits
+  in the packet. `test/fuzz.sh` runs the parsers and the scheduling core in
+  userland under AddressSanitizer and UndefinedBehaviorSanitizer with
+  millions of malformed packets (see *Verification status*).
 - **The plugin's dnctl wrapper** runs as root at every shaper start. It
   checks every value it takes from `config.xml` against what the GUI allows,
   so a hand-edited or restored configuration can't inject dnctl commands, and
@@ -259,7 +268,8 @@ The scheduler parameters are:
 - `quantum`: 300–9000 bytes
 - `limit`: packets, up to 65535
 - `memlimit size`: byte limit of all queues, with a k/m/g suffix. The default
-  is four times what the pipe sends in an interval, at least 4 MB.
+  is four times what the pipe sends in an interval, at least 4 MB, and at
+  most `limit` full-size packets.
 - `ack-filter` / `ack-filter-aggressive` / `no-ack-filter`
 - `wash` / `nowash`
 - `ingress` / `egress`
@@ -899,6 +909,35 @@ queue 10001 config pipe 10001 weight 100
   the drop and mark decisions differed in 135 of the 2000 runs. With
   sch_cake's zeroed start, it signals a fresh flow earlier in 71% of runs,
   by 66 events on average (the deliberate difference above).
+- Fuzzing (`test/fuzz.sh [packets [seed]]`, from 1.4.4): the scheduling
+  core is extracted from the source as for `sched-diff.sh`, with its own
+  flow hashing, and built in userland with AddressSanitizer,
+  UndefinedBehaviorSanitizer and the CAKE_DEBUG consistency checker. Each
+  round configures an instance at random (every diffserv and isolation
+  mode, ACK filter, wash, ingress, overhead and ATM/PTM, rates, packet and
+  byte limits, small flow tables) and sends it TCP over IPv4, IPv6 and
+  6in4 with valid and invalid options, SACKs and timestamps, UDP, ICMP,
+  fragments and random bytes; a third of them are corrupted (header
+  lengths, data offsets, IP lengths and versions, next headers,
+  truncation, random bytes). The first mbuf ends at a random point in an
+  exactly sized buffer, the IP header is at layer 3, layer 2 or a random
+  offset, and some headers are not writable. Dequeues follow dummynet's
+  tick, and some rounds are reconfigured with failed allocations while
+  packets are queued. It fails on a sanitizer finding, a range outside
+  the packet passed to `m_copydata()`, a packet not freed at the end of a
+  round, or a consistency error. Results:
+  - 10 million packets over seeds 1–10 (about 3 s per million): no
+    finding. Every line of the parsers runs (overhead, ECN marking,
+    wash, TCP header and option parsing, SACK comparison, ACK filter,
+    flow hashing).
+  - It found that a packet of length 0 was queued but not counted, as
+    the counters go by the length's sign; dummynet never passes one, but
+    from 1.4.4 CAKE drops it.
+  - It catches each of these when introduced: `cake_hdr()` without its
+    packet bound (`m_copydata` outside the packet), the port read in
+    flow hashing without its `m_len` check, the TCP option walk without
+    its size bound (both AddressSanitizer), and the zero-length packet
+    (consistency errors).
 - ipfw patch: builds with `-Werror` and FreeBSD's full userland warning
   set against `stable/26.7`. Tested on the VM:
   - every parameter is set and shown back

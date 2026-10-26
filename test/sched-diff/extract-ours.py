@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # dn_sched_cake.c -> ours-cake.inc: the scheduling core, without the
 # sysctls, instance list, statistics and module glue; cake_hash_flow() is
-# replaced by ours_shim.h's.
+# replaced by ours_shim.h's, unless --hash (test/fuzz.sh) keeps it.
 import re
 import sys
 
-lines = open(sys.argv[1]).read().split('\n')
+keep_hash = sys.argv[1] == '--hash'
+lines = open(sys.argv[-1]).read().split('\n')
 
 
 def find(pat, start=0):
@@ -24,8 +25,9 @@ out += lines[a:b]
 a = find(r'^ \* COBALT: CoDel and BLUE') - 1
 b = find(r'^#ifdef CAKE_DEBUG')
 part = '\n'.join(lines[a:b])
-part = part.replace('\ncake_hash_flow(struct mbuf *m',
-                    '\n__attribute__((unused)) cake_hash_flow_kernel(struct mbuf *m')
+if not keep_hash:
+    part = part.replace('\ncake_hash_flow(struct mbuf *m',
+                        '\n__attribute__((unused)) cake_hash_flow_kernel(struct mbuf *m')
 out += part.split('\n')
 # the checker (or its no-op macros), enqueue, dequeue, tables, reconfig
 a = b

@@ -769,7 +769,8 @@ cake_get_tcp(struct mbuf *m, struct cake_tcp *t)
 	if (ip == NULL)
 		return (0);
 	if (ip->ip_v == 4) {
-		if (ip->ip_off & htons(IP_MF | IP_OFFMASK))
+		if (ip->ip_hl < sizeof(struct ip) >> 2 ||
+		    (ip->ip_off & htons(IP_MF | IP_OFFMASK)))
 			return (0);
 		off += ip->ip_hl << 2;
 		if (ip->ip_p == IPPROTO_TCP) {
@@ -798,7 +799,10 @@ tcp:
 		return (0);
 	t->hlen = (t->th[12] >> 4) << 2;
 	t->th = cake_hdr(m, off, t->hlen, t->buf);
-	return (t->th != NULL && t->seglen >= t->hlen);
+	/* the IP length must cover the TCP header and fit in the packet
+	 * (link layer padding may follow it) */
+	return (t->th != NULL && t->seglen >= t->hlen &&
+	    t->seglen <= m->m_pkthdr.len - off);
 }
 
 static __inline int
@@ -1161,7 +1165,8 @@ cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 	if (m->m_len < off + (int)sizeof(struct ip))
 		return (0);
 	ip = (struct ip *)mtodo(m, off);
-	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 6 &&
+	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 4 &&
+	    ip->ip_hl < sizeof(struct ip) >> 2) || (ip->ip_v == 6 &&
 	    m->m_len < off + (int)sizeof(struct ip6_hdr)))
 		return (0);
 
@@ -1749,6 +1754,16 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 
 	if (__predict_false(CAKE_STALE(si, schk)))
 		cake_reconfig(si, schk);
+
+	/* an empty packet would be queued but not counted, as the counters
+	 * go by the length's sign (dummynet never passes one) */
+	if (__predict_false(m->m_pkthdr.len <= 0)) {
+		si->main_q.ni.drops++;
+		si->_si.ni.drops++;
+		V_dn_cfg.io_pkt_drop++;
+		FREE_PKT(m);
+		return 1;
+	}
 
 	hash = cake_hash_flow(m, si->perturbation, si->flow_mode, &dscp,
 	    &srch, &dsth);

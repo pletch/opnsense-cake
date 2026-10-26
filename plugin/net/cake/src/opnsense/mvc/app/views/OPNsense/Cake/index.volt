@@ -161,6 +161,17 @@
                     $hz.hide();
                 }
 
+                let $warnings = $("#cake_warnings");
+                if (data.warnings && data.warnings.length) {
+                    $warnings.empty().append(
+                        $("<ul/>").css("margin-bottom", "0").append(
+                            data.warnings.map(function(w) { return $("<li/>").text(w); })
+                        )
+                    ).show();
+                } else {
+                    $warnings.hide();
+                }
+
                 showStats(data);
             });
         }
@@ -196,6 +207,8 @@
 </div>
 
 <div class="alert alert-warning" role="alert" id="cake_hz" style="display: none;"></div>
+
+<div class="alert alert-warning" role="alert" id="cake_warnings" style="display: none;"></div>
 
 <div class="content-box">
     {{ partial('layout_partials/base_bootgrid_table', formGridPipe) }}

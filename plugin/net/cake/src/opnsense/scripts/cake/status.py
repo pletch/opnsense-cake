@@ -31,7 +31,7 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import kmod_status, CONFIG, DNCTL
+from lib import cake_pipes, kmod_status, CONFIG, DNCTL
 
 # tin names by diffserv mode, in the kernel's tin order, and the order
 # tc(8) shows them in (by priority)
@@ -104,6 +104,12 @@ if __name__ == '__main__':
     hz = sysctl('kern.hz')
     result['hz'] = int(hz) if hz is not None and hz.isdigit() else None
     result['vm_guest'] = sysctl('kern.vm_guest')
+    # CAKE entries the wrapper skips or changes, as it logs them
+    result['warnings'] = []
+    try:
+        cake_pipes(result['warnings'])
+    except (OSError, ET.ParseError):
+        pass
     if result['loaded']:
         sched = None
         for line in subprocess.run([DNCTL, 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):

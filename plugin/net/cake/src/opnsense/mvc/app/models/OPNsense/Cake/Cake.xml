@@ -107,8 +107,8 @@
                 </framing>
                 <memlimit type="IntegerField">
                     <MinimumValue>1</MinimumValue>
-                    <MaximumValue>4096</MaximumValue>
-                    <ValidationMessage>Memory limit must be between 1 and 4096 MB.</ValidationMessage>
+                    <MaximumValue>256</MaximumValue>
+                    <ValidationMessage>Memory limit must be between 1 and 256 MB.</ValidationMessage>
                 </memlimit>
                 <description type="DescriptionField"/>
             </pipe>
