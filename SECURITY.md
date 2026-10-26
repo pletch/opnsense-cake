@@ -38,4 +38,15 @@ The builds are reproducible: `plugin/ci-build.sh` rebuilds a release's
 packages from its tag on OPNsense or FreeBSD and compares them with the
 published ones, file by file (see `plugin/README.md`). A signed package
 repository is prepared (`plugin/repo.sh`, see `RELEASING.md`), with the
-signing key kept offline rather than in GitHub.
+signing key kept offline rather than in GitHub. Its public key is
+`plugin/keys/cake-repo.pub` (RSA 4096), with the fingerprint
+
+```
+160571d7cf1eb36cbb421f031395ec68630ddc3d7de4f42e827b9bc30dc61d92
+```
+
+which you can check with:
+
+```sh
+openssl rsa -pubin -in cake-repo.pub -outform DER | sha256
+```

@@ -255,7 +255,11 @@ privately, as described in [`SECURITY.md`](SECURITY.md).
 - **Packages are not signed yet.** Check their SHA256 sums against the
   release notes. Releases after 1.4.4 are built by CI with provenance
   attestations, and the builds are reproducible; see
-  [`SECURITY.md`](SECURITY.md#verifying-packages).
+  [`SECURITY.md`](SECURITY.md#verifying-packages). They will also be
+  published in a package repository signed with the key in
+  [`plugin/keys/cake-repo.pub`](plugin/keys/cake-repo.pub), whose
+  fingerprint (SHA256 of the DER key) is
+  `160571d7cf1eb36cbb421f031395ec68630ddc3d7de4f42e827b9bc30dc61d92`.
 
 ## Layout
 
