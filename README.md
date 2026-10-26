@@ -68,10 +68,45 @@ scheduler.
 
 ### Install the packages
 
-The [releases](https://github.com/pletch/opnsense-cake/releases) have both
-packages ready built for **OPNsense 26.7 (amd64)**, so there is nothing to
-build. As root on the firewall (console or ssh, shell option 8), with the
-versions of the latest release:
+Both packages are ready built for **OPNsense 26.7 (amd64)**, so there is
+nothing to build. They are in a signed package repository, and attached to
+the [releases](https://github.com/pletch/opnsense-cake/releases).
+
+**From the repository** (recommended): as root on the firewall (console or
+ssh, shell option 8), trust the repository's key by its fingerprint, add the
+repository, and install:
+
+```sh
+mkdir -p /usr/local/etc/pkg/fingerprints/cake/trusted /usr/local/etc/pkg/fingerprints/cake/revoked
+cat > /usr/local/etc/pkg/fingerprints/cake/trusted/cake-repo <<'EOF'
+function: "sha256"
+fingerprint: "5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502"
+EOF
+cat > /usr/local/etc/pkg/repos/cake.conf <<'EOF'
+cake: {
+  url: "https://pletch.github.io/opnsense-cake/26.7",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/local/etc/pkg/fingerprints/cake",
+  enabled: yes
+}
+EOF
+pkg update -r cake
+pkg install -r cake os-cake
+/usr/local/opnsense/scripts/firmware/register.php install os-cake
+```
+
+`pkg update -r cake` must say `2 packages processed`. If it prints `No
+trusted public keys found` or `No trusted certificate`, the catalogue does
+not match the fingerprint, and pkg installs nothing from the repository
+(check the fingerprint against [Security notes](#security-notes) and the
+release notes). pkg checks every package it installs against the signed
+catalogue; `os-cake` brings `cake-kmod` along. The last command registers
+the plugin, as the Plugins page does when it installs one; from the shell,
+`pkg` skips that, and System → Firmware → Plugins would list `os-cake` as
+*misconfigured*. A firewall that installed the packages from files moves
+over to the repository with `pkg install -fy -r cake cake-kmod os-cake`.
+
+**From the files:** with the versions of the latest release,
 
 ```sh
 cd /tmp
@@ -83,14 +118,12 @@ pkg add os-cake-1.3.3.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
-`sha256sum -c` must say `OK` for both packages; they are not signed (see
-[Security notes](#security-notes)). Install `cake-kmod` first: `os-cake`
-depends on it. The last command registers the plugin, as the Plugins page
-does after installing from a repository; without it, System → Firmware →
-Plugins lists `os-cake` as *misconfigured*. Registered, it is listed as
-*orphaned*, as any plugin installed from a file. That is expected. Upgrading,
-removing, and building the packages yourself (for another series, or from
-source) are in [`plugin/README.md`](plugin/README.md).
+`sha256sum -c` must say `OK` for both packages; `SHA256SUMS.sig` on the
+release signs `SHA256SUMS` (see [`SECURITY.md`](SECURITY.md#verifying-packages)).
+Install `cake-kmod` first: `os-cake` depends on it. Registered, the plugin
+is listed as *orphaned*, as any plugin installed from a file. That is
+expected. Building the packages yourself (for another series, or from
+source) is in [`plugin/README.md`](plugin/README.md).
 
 ### Set up the shaper
 
@@ -154,18 +187,20 @@ with their results (`test/ticks.sh`).
 
 ## Upgrade, roll back and remove
 
-- **Upgrade:** `pkg add` the new packages over the old ones (the plugin
-  registration is kept). The module already loaded stays in use until
-  the pipes let go of it: disable the CAKE entries and Apply, then enable
-  them and Apply again, or reboot.
-- **Roll back** to an earlier release the same way, with `pkg add -f` and
-  that release's packages.
+- **Upgrade:** from the repository, `pkg upgrade -r cake`; from files,
+  `pkg add` the new packages over the old ones. The plugin registration is
+  kept. The module already loaded stays in use until the pipes let go of
+  it: disable the CAKE entries and Apply, then enable them and Apply again,
+  or reboot.
+- **Roll back** to an earlier release with `pkg add -f` and that release's
+  packages (the repository has only the latest).
 - **Turn CAKE off** without uninstalling: disable the CAKE entries and
   Apply. The pipes go back to their own scheduler and the module is
   unloaded.
 - **Remove:** `pkg delete os-cake cake-kmod`, then
   `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`. The
-  CAKE entries stay in the configuration, unused.
+  CAKE entries stay in the configuration, unused. To drop the repository
+  too: `rm -r /usr/local/etc/pkg/repos/cake.conf /usr/local/etc/pkg/fingerprints/cake`.
 - **If the firewall doesn't come up** after enabling CAKE, run
   `pkg delete -y os-cake cake-kmod` from the console, or restore a VM
   snapshot.
@@ -252,14 +287,14 @@ privately, as described in [`SECURITY.md`](SECURITY.md).
   checks every value it takes from `config.xml` against what the GUI allows,
   so a hand-edited or restored configuration can't inject dnctl commands, and
   on any error it loads the shaper rules unchanged.
-- **Packages are not signed yet.** Check their SHA256 sums against the
-  release notes. Releases after 1.4.4 are built by CI with provenance
-  attestations, and the builds are reproducible; see
-  [`SECURITY.md`](SECURITY.md#verifying-packages). They are also
-  published in a package repository signed with the key in
-  [`plugin/keys/cake-repo.pub`](plugin/keys/cake-repo.pub), whose
-  fingerprint (the SHA256 of that file) is
+- **The package repository is signed** with the key in
+  [`plugin/keys/cake-repo.pub`](plugin/keys/cake-repo.pub), kept offline,
+  whose fingerprint (the SHA256 of that file) is
   `5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502`.
+  The same key signs each release's `SHA256SUMS` (`SHA256SUMS.sig`).
+  Releases after 1.4.4 are also built by CI with provenance attestations,
+  and the builds are reproducible; see
+  [`SECURITY.md`](SECURITY.md#verifying-packages).
 
 ## Layout
 

@@ -19,8 +19,10 @@ the module.
 
 ## Verifying packages
 
-Release packages are not signed yet. Compare their SHA256 sums with the
-ones in the release notes before installing:
+Installed from the package repository (see the README), packages are
+checked by pkg against the repository's signed catalogue. Downloaded by
+hand, compare their SHA256 sums with the ones in the release notes, or
+check `SHA256SUMS` with its signature as below:
 
 ```sh
 sha256 cake-kmod-*.pkg os-cake-*.pkg

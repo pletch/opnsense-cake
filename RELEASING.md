@@ -90,36 +90,21 @@ digests over a connection (`plugin/sign-server.py`).
 6. Write the notes, with the package SHA256s and the key fingerprint, and
    publish the release.
 
-## Making the signed repository the way to install
+## Installing from the repository
 
-Once the repository is live, the README's install section can become:
+The README's install section has the client setup: a fingerprint file with
+the key's SHA256 and a `cake` repository with `signature_type:
+"fingerprints"`. If the key ever changes, that section, `SECURITY.md` and
+the release notes need the new fingerprint, and every firewall its new
+fingerprint file.
 
-```sh
-mkdir -p /usr/local/etc/pkg/fingerprints/cake/trusted /usr/local/etc/pkg/fingerprints/cake/revoked
-cat > /usr/local/etc/pkg/fingerprints/cake/trusted/cake-repo <<'EOF'
-function: "sha256"
-fingerprint: "5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502"
-EOF
-cat > /usr/local/etc/pkg/repos/cake.conf <<'EOF'
-cake: {
-  url: "https://pletch.github.io/opnsense-cake/26.7",
-  signature_type: "fingerprints",
-  fingerprints: "/usr/local/etc/pkg/fingerprints/cake",
-  enabled: yes
-}
-EOF
-pkg update -r cake
-pkg install -r cake os-cake
-```
-
-`os-cake` then shows as installed on the Plugins page (not orphaned), and
-updates arrive with the firmware updates. Firewalls with packages installed
-from files move over with `pkg install -fy -r cake cake-kmod os-cake`.
-Tested on the bench with a throwaway key: the plugin installs and shows as
-provided by the `cake` repository; pkg refuses a package changed after
-signing (by its size, or by its checksum at the same size), and an edited
-`SHA256SUMS` fails its signature check. With the real key (v1.4.4): the
-catalogue loads against the fingerprint above, and is refused against
+Installed from the repository, `os-cake` shows on the Plugins page as
+provided by the `cake` repository (not orphaned), and updates arrive with
+the firmware updates. Tested on the bench with a throwaway key: pkg refuses
+a package changed after signing (by its size, or by its checksum at the
+same size), and an edited `SHA256SUMS` fails its signature check. With the
+real key (v1.4.4): the README's setup installs both packages from
+https://pletch.github.io/opnsense-cake/26.7; the catalogue is refused against
 another fingerprint and when edited. pkg's refusal is easy to miss: it
 prints `No trusted public keys found` or `No trusted certificate has been
 used to sign the repository`, then `cake repository is up to date` with
