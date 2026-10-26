@@ -32,7 +32,7 @@
 
 set -e
 
-VERSION=1.4.4
+VERSION=1.4.5
 # where the sources of the package are published
 WWW=${WWW:-https://github.com/pletch/opnsense-cake}
 SRCDIR=${SRCDIR:-/usr/src}
@@ -102,7 +102,7 @@ desc: <<EOD
 $(cat "$(dirname "$0")/pkg-descr")
 EOD
 scripts: {
-  post-install: "kldxref /boot/modules"
+  post-install: "kldxref /boot/modules; if [ -f /usr/local/opnsense/scripts/cake/dnctl.py -a -x /usr/local/sbin/configctl ]; then echo Reloading traffic shaper; /usr/local/sbin/configctl shaper reload; fi"
   post-deinstall: "kldunload -n dn_cake.ko 2> /dev/null; kldxref /boot/modules"
 }
 EOM

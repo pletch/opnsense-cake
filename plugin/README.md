@@ -113,6 +113,12 @@ in a VM*.
 
 ## Check
 
+- While a CAKE entry is enabled, System → Diagnostics → Services and the
+  dashboard's Services widget list **CAKE shaper** (from 1.3.4): running
+  when every enabled entry's pipe uses CAKE, stopped when any is left on its
+  own scheduler. Its button reloads the shaper. CAKE has no daemon, so a
+  placeholder process (`daemon: cake`, a `sleep`) runs while it is active,
+  with its PID in `/var/run/cake.pid`.
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used.
 - Below the pipes, the page shows each CAKE pipe's statistics per tin, as
@@ -133,10 +139,17 @@ in a VM*.
   used again if the plugin is reinstalled. Then run
   `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`, or
   the Plugins page lists it as *missing*.
-- A newer `cake-kmod` replaces the module file, but the module already
-  loaded stays in use as long as a pipe uses CAKE. To switch without a
-  reboot, disable the CAKE entries and Apply (the wrapper then unloads the
-  unused module), then enable them again and Apply.
+- A newer `cake-kmod` replaces the module file, and its install reloads the
+  shaper (as `os-cake`'s does). On each reload with CAKE pipes, the wrapper
+  checks that the loaded module is the installed file: it records the file's
+  SHA256, the kld id, the file and the boot time in
+  `/var/run/cake-kmod.loaded` when it loads the module. If not (upgraded,
+  loaded by hand or by an `os-cake` before 1.3.4), it loads the rules
+  unchanged, which frees and unloads the module, then loads the new one and
+  the CAKE rules, so shaping pauses for a moment. If a CAKE scheduler the
+  plugin does not manage holds the module, it stays loaded, the system log
+  says so, and the CAKE page warns until it is replaced. Before 1.3.4:
+  disable the CAKE entries and Apply, then enable them again and Apply.
 - dummynet does not let the module be unloaded while a CAKE scheduler
   exists, so removing `cake-kmod` on its own leaves the running module
   loaded.

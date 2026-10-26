@@ -110,6 +110,9 @@ if __name__ == '__main__':
         cake_pipes(result['warnings'])
     except (OSError, ET.ParseError):
         pass
+    if result['current'] is False:
+        result['warnings'].append('the loaded dn_cake.ko is not the one installed: Apply replaces it, '
+                                  'unless a CAKE pipe the plugin does not manage holds it (see the system log)')
     if result['loaded']:
         sched = None
         for line in subprocess.run([DNCTL, 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):

@@ -10,6 +10,18 @@ the shaper keeps running with the pipes' own scheduler.
 Plugin Changelog
 ================
 
+1.3.4
+
+* Upgrades take effect without disabling and re-enabling the CAKE
+  entries: on a shaper reload, a loaded dn_cake.ko that is not the
+  installed one is unloaded and the new one loaded. cake-kmod 1.4.5
+  reloads the shaper when it is installed or upgraded
+* The CAKE page warns when the loaded dn_cake.ko is not the installed one
+* A "CAKE shaper" entry in the services list and the dashboard's Services
+  widget, while a CAKE entry is enabled: running when every enabled
+  entry's pipe uses CAKE, stopped when any is left on its own scheduler
+  (see the CAKE page for why); its restart button reloads the shaper
+
 1.3.3
 
 * A pipe with a mask is left on its own scheduler, with the reason in

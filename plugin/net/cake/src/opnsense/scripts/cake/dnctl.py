@@ -30,13 +30,17 @@
     dnctl. When there are none, or the kernel module cannot be used, the rules are loaded
     unchanged with /sbin/dnctl, so the shaper keeps working with each pipe's own scheduler,
     and an unused module is unloaded, so a newer one is picked up when it is needed again.
+    A loaded module that is not the one installed (cake-kmod was upgraded) is replaced the
+    same way: the rules go in unchanged, which frees and unloads it, then the new one is
+    loaded and the CAKE rules go in. The CAKE service shows as running when every enabled
+    CAKE entry got CAKE.
 """
 import os
 import subprocess
 import sys
 import syslog
 import tempfile
-from lib import cake_pipes, kmod_status, DNCTL
+from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL
 
 
 def cake_rule(line, args):
@@ -92,8 +96,15 @@ if __name__ == '__main__':
     try:
         errors = []
         pipes = cake_pipes(errors)
+        # entries skipped (a mask, invalid settings, the pipe gone) leave the service stopped
+        enabled = cake_enabled()
         for error in errors:
             syslog.syslog(syslog.LOG_WARNING, error)
+        if pipes and kmod_current() is False:
+            syslog.syslog(syslog.LOG_NOTICE, 'the loaded dn_cake.ko is not the one installed, reloading it')
+            load_stock(rules_file)
+            if kmod_current() is not None:
+                syslog.syslog(syslog.LOG_WARNING, 'dn_cake.ko is still in use, the old one stays loaded')
         if pipes:
             status = kmod_status(load=True)
             if not status['usable']:
@@ -102,6 +113,7 @@ if __name__ == '__main__':
         if pipes:
             result = load_cake(rules_file, pipes)
             if result == 0:
+                set_active(len(pipes) == enabled)
                 sys.exit(0)
             syslog.syslog(syslog.LOG_ERR, 'dnctl failed on the CAKE rules (%d), pipes keep their own scheduler' % result)
     except SystemExit:
@@ -109,4 +121,5 @@ if __name__ == '__main__':
     except Exception as e:
         syslog.syslog(syslog.LOG_ERR, 'CAKE setup failed (%s), pipes keep their own scheduler' % e)
 
+    set_active(False)
     sys.exit(load_stock(rules_file))

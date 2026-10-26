@@ -37,6 +37,10 @@ KMOD_KERNEL = '/usr/local/libexec/cake/kernel'
 KMOD_DUMMYNET = '/usr/local/libexec/cake/dummynet.sha256'
 DUMMYNET = '/boot/kernel/dummynet.ko'
 DNCTL = '/usr/local/libexec/cake/dnctl'
+# which dn_cake.ko the wrapper loaded: kld id, boot time, file and its SHA256
+KMOD_LOADED = '/var/run/cake-kmod.loaded'
+# the pidfile of the CAKE entry in the services list, see plugins.inc.d/cake.inc
+ACTIVE = '/var/run/cake.pid'
 
 
 # the values the model allows, checked again as config.xml may be edited or
@@ -152,6 +156,26 @@ def cake_pipes(errors=None):
     return result
 
 
+def cake_enabled():
+    """ the number of enabled CAKE entries, including any whose pipe is gone """
+    return len([item for item in ET.parse(CONFIG).getroot().findall('./OPNsense/Cake/pipes/pipe')
+                if item.findtext('enabled') == '1'])
+
+
+def set_active(active):
+    """ mark the CAKE service running (every enabled entry's pipe uses CAKE) or not.
+    The services list shows a service running while the process in its pidfile is, and
+    pgrep -F takes no PID below 5, so a placeholder process stands for CAKE: a sleep,
+    under daemon(8), which holds the pidfile and removes it when the sleep is killed.
+    """
+    running = subprocess.run(['/bin/pgrep', '-qF', ACTIVE], capture_output=True).returncode == 0
+    if active and not running:
+        subprocess.run(['/usr/sbin/daemon', '-f', '-t', 'cake', '-p', ACTIVE, '/bin/sleep', '2147483647'],
+                       capture_output=True)
+    elif not active and running:
+        subprocess.run(['/bin/pkill', '-F', ACTIVE], capture_output=True)
+
+
 def dummynet_file():
     """ the dummynet.ko in use: the loaded one, else the one kldload picks
     :return: path, or None if dummynet is built into the kernel
@@ -189,6 +213,64 @@ def dummynet_check():
     return 'match', ''
 
 
+def kmod_digest():
+    """ SHA256 of the installed dn_cake.ko, None if it cannot be read """
+    try:
+        with open(KMOD, 'rb') as f_in:
+            return hashlib.sha256(f_in.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def kmod_instance():
+    """ the loaded dn_cake.ko, as its kld id, the boot time and the file it was loaded
+    from. A kld id (and address) is reused after an unload, so this does not tell two
+    loads from the same file apart; kmod_current compares the file's SHA256 for that.
+    :return: string, None if it is not loaded
+    """
+    out = subprocess.run(['/sbin/kldstat', '-v', '-n', 'dn_cake.ko'], capture_output=True, text=True)
+    kld = None
+    for line in out.stdout.split('\n') if out.returncode == 0 else []:
+        parts = line.split()
+        if len(parts) == 6 and parts[0].isdigit() and parts[4] == 'dn_cake.ko':
+            kld = '%s %s' % (parts[0], parts[5].strip('()'))
+    boot = subprocess.run(['/sbin/sysctl', '-n', 'kern.boottime'], capture_output=True, text=True).stdout.split()
+    # "{ sec = 1793050555, usec = 0 } ..."
+    if kld is None or len(boot) < 4 or not boot[3].rstrip(',').isdigit():
+        return None
+    return '%s %s' % (boot[3].rstrip(','), kld)
+
+
+def kmod_record():
+    """ note which dn_cake.ko is loaded, just after loading it """
+    instance, digest = kmod_instance(), kmod_digest()
+    if instance is None or digest is None:
+        return
+    try:
+        with open(KMOD_LOADED + '.new', 'w') as f_out:
+            f_out.write('%s %s\n' % (digest, instance))
+        os.replace(KMOD_LOADED + '.new', KMOD_LOADED)
+    except OSError:
+        pass
+
+
+def kmod_current():
+    """ whether the loaded dn_cake.ko is the one installed: False when the installed file
+    changed (the package was upgraded) since the wrapper loaded it, or when the wrapper
+    did not load it (kldload, another file, or an os-cake before 1.3.4)
+    :return: bool, None if it is not loaded
+    """
+    instance = kmod_instance()
+    if instance is None:
+        return None
+    try:
+        with open(KMOD_LOADED) as f_in:
+            recorded = f_in.read().rstrip('\n').split(' ', 1)
+    except OSError:
+        return False
+    return len(recorded) == 2 and recorded[1] == instance and recorded[0] == kmod_digest()
+
+
 def kmod_status(load=False):
     """ whether dn_cake.ko is installed, built for the running kernel and loaded
     :param load: load the module if it is usable but not loaded yet
@@ -219,8 +301,10 @@ def kmod_status(load=False):
         if result['reason'] == '' and not result['loaded'] and load:
             if subprocess.run(['/sbin/kldload', '-n', KMOD], capture_output=True).returncode == 0:
                 result['loaded'] = True
+                kmod_record()
             else:
                 result['reason'] = 'loading %s failed' % KMOD
 
     result['usable'] = result['reason'] == '' and (result['loaded'] or not load)
+    result['current'] = kmod_current() if result['loaded'] else None
     return result

@@ -189,7 +189,9 @@ with their results (`test/ticks.sh`).
 
 - **Upgrade:** from the repository, `pkg upgrade -r cake`; from files,
   `pkg add` the new packages over the old ones. The plugin registration is
-  kept. The module already loaded stays in use until the pipes let go of
+  kept. The install reloads the shaper, which swaps the loaded module for
+  the new one (from os-cake 1.3.4: upgrading to it already does). Before
+  1.3.4, the module already loaded stays in use until the pipes let go of
   it: disable the CAKE entries and Apply, then enable them and Apply again,
   or reboot.
 - **Roll back** to an earlier release with `pkg add -f` and that release's
