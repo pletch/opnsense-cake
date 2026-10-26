@@ -110,11 +110,11 @@ over to the repository with `pkg install -fy -r cake cake-kmod os-cake`.
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.4
-fetch $R/cake-kmod-1.4.4.pkg $R/os-cake-1.3.3.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.5
+fetch $R/cake-kmod-1.4.5.pkg $R/os-cake-1.3.4.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.4.4.pkg
-pkg add os-cake-1.3.3.pkg
+pkg add cake-kmod-1.4.5.pkg
+pkg add os-cake-1.3.4.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
