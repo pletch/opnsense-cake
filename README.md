@@ -80,11 +80,11 @@ versions of the latest release:
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.3
-fetch $R/cake-kmod-1.4.3.pkg $R/os-cake-1.3.2.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.4
+fetch $R/cake-kmod-1.4.4.pkg $R/os-cake-1.3.3.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.4.3.pkg
-pkg add os-cake-1.3.2.pkg
+pkg add cake-kmod-1.4.4.pkg
+pkg add os-cake-1.3.3.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
