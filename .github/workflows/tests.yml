@@ -1,0 +1,45 @@
+# The userland tests, on every push and pull request: the fuzzer, the
+# packet-by-packet and COBALT comparisons with Linux's sch_cake, and the
+# plugin wrapper's unit tests. The VM suites (robustness.sh, features.sh)
+# need the test bench and are run by hand.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: fuzz.sh, 3 seeds of a million packets
+        run: for seed in 1 2 3; do test/fuzz.sh 1000000 $seed; done
+
+  sch-cake:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: sched-diff.sh, lockstep
+        run: test/sched-diff.sh
+      - name: sched-diff.sh, link clock
+        run: test/sched-diff.sh link
+      - name: cobalt-diff.sh
+        run: test/cobalt-diff.sh
+
+  plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: wrapper unit tests
+        run: python3 test/plugin-lib.py
+      - name: syntax of the shell, Python and PHP sources
+        run: |
+          for f in $(git ls-files '*.sh'); do sh -n "$f"; done
+          git ls-files '*.py' | xargs python3 -c 'import ast, sys
+          for f in sys.argv[1:]: ast.parse(open(f).read(), f)'
+          for f in $(git ls-files '*.php'); do php -l "$f" >/dev/null; done

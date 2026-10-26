@@ -41,6 +41,27 @@ On an OPNsense machine of the target series (a VM will do), as root:
    `os-cake` with the `opnsense/plugins` framework from the series' stable
    branch, which needs network access. Both packages end up in `/root/pkgs`.
 
+### Rebuild a release exactly
+
+`ci-build.sh` builds the packages the way the CI does, from scratch on
+OPNsense or on FreeBSD of the series' release (15.1 for 26.7): it fetches
+`opnsense/src` and `opnsense/plugins` at the commits in `build.conf`, takes
+`dummynet.ko` from OPNsense's newest kernel set for the series, and needs
+`git`. The builds are reproducible, so the result can be checked against a
+release:
+
+```sh
+sh opnsense-cake/plugin/ci-build.sh /root/out vX.Y.Z
+```
+
+It writes the packages, `SHA256SUMS` and `CONTENTS` (the SHA256 of every
+file in each package) to `/root/out`, then fetches that release's packages
+and fails if any file in them differs. Every file of a package gets the
+time of the sources' commit (`SOURCE_DATE_EPOCH`), so the package files
+themselves come out byte for byte the same as well. Releases built by CI
+start with the first one after 1.4.4; earlier ones were built on the test
+VM, and only their `dn_cake.ko` is known to reproduce.
+
 ## Install
 
 Get the two packages onto the firewall: your own build, or a release's,

@@ -1,0 +1,73 @@
+# Build both packages in a FreeBSD VM with plugin/ci-build.sh, from the
+# commits in plugin/build.conf, and attest their provenance. A pushed v*
+# tag also gets a draft release with the packages, to publish once the
+# notes are written. Run by hand, it can compare the build with a
+# published release's packages, file by file.
+name: packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      compare:
+        description: Release tag to compare the build with (empty for none)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build in FreeBSD
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        env:
+          COMPARE: ${{ inputs.compare }}
+        with:
+          release: '15.1'
+          envs: COMPARE
+          prepare: |
+            pkg install -y git-lite
+            git config --global --add safe.directory '*'
+          run: sh plugin/ci-build.sh out $COMPARE
+
+      - name: Attest the packages
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/*.pkg
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: out/
+
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists already, left as it is"
+            exit 0
+          fi
+          {
+            echo "Draft: write the notes, check the packages, then publish."
+            echo
+            echo "Built by CI from $GITHUB_SHA ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)), with provenance attestations:"
+            echo
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "opnsense-cake ${GITHUB_REF_NAME#v}" --notes-file notes.md \
+            out/*.pkg out/SHA256SUMS

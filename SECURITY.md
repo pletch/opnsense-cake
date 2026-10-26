@@ -19,12 +19,23 @@ the module.
 
 ## Verifying packages
 
-Release packages are not signed. Compare their SHA256 sums with the ones
-in the release notes before installing:
+Release packages are not signed yet. Compare their SHA256 sums with the
+ones in the release notes before installing:
 
 ```sh
 sha256 cake-kmod-*.pkg os-cake-*.pkg
 ```
 
-For the strongest assurance, build the packages yourself from the tagged
-sources with `plugin/build.sh` (see `plugin/README.md`).
+Releases after 1.4.4 are built by GitHub Actions
+(`.github/workflows/packages.yml`) with build provenance attestations,
+which tie each package to the commit and workflow run that built it:
+
+```sh
+gh attestation verify cake-kmod-X.Y.Z.pkg -R pletch/opnsense-cake
+```
+
+The builds are reproducible: `plugin/ci-build.sh` rebuilds a release's
+packages from its tag on OPNsense or FreeBSD and compares them with the
+published ones, file by file (see `plugin/README.md`). A signed package
+repository is prepared (`plugin/repo.sh`, see `RELEASING.md`), with the
+signing key kept offline rather than in GitHub.

@@ -39,12 +39,27 @@ PLUGINS_TREE=${PLUGINS_TREE:-$(mktemp -d -t cake-plugins)/plugins}
 # a commit of opnsense/plugins to build with, for a reproducible build
 PLUGINS_COMMIT=${PLUGINS_COMMIT:-}
 
+# reproducible packages: every file gets the time of the sources' commit,
+# from git, or from the times git archive gives the files
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+	SOURCE_DATE_EPOCH=$(git -C "${HERE}" log -1 --format=%ct 2>/dev/null ||
+	    stat -f %m "${HERE}/build.sh")
+fi
+export SOURCE_DATE_EPOCH
+
 sh "${HERE}/kmod/build.sh" "${OUT}"
 pkg add -f "${OUT}"/cake-kmod-*.pkg
 
+# the series, e.g. 26.7: the running OPNsense's, or SERIES on another
+# FreeBSD of the same release (as in CI)
+SERIES=${SERIES:-$(opnsense-version -a 2>/dev/null || true)}
+if [ -z "${SERIES}" ]; then
+	echo ">>> Not on OPNsense: set SERIES to the OPNsense series, e.g. 26.7" >&2
+	exit 1
+fi
 # the stable branch of the series, the main branch builds -devel packages
 if [ ! -d "${PLUGINS_TREE}/Mk" ]; then
-	git clone -q -b "stable/$(opnsense-version -a)" \
+	git clone -q -b "stable/${SERIES}" \
 	    https://github.com/opnsense/plugins.git "${PLUGINS_TREE}"
 fi
 if [ -n "${PLUGINS_COMMIT}" ]; then
@@ -53,6 +68,7 @@ fi
 echo ">>> Building os-cake with opnsense/plugins $(git -C "${PLUGINS_TREE}" rev-parse HEAD)"
 rm -rf "${PLUGINS_TREE}/net/cake"
 cp -R "${HERE}/net/cake" "${PLUGINS_TREE}/net/cake"
-make -C "${PLUGINS_TREE}/net/cake" package
+make -C "${PLUGINS_TREE}/net/cake" PLUGIN_ABI="${SERIES}" \
+    PKG="${HERE}/pkg-epoch.sh" package
 cp "${PLUGINS_TREE}"/net/cake/work/pkg/*.pkg "${OUT}/"
 ls -l "${OUT}"/*.pkg

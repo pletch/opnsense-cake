@@ -1,0 +1,49 @@
+# Weekly: does OPNsense's newest kernel set for the series still ship the
+# dummynet.ko the latest cake-kmod release is built against? If an update
+# changed it, the plugin falls back to each pipe's own scheduler on
+# firewalls that install it, until cake-kmod is rebuilt: open an issue.
+name: opnsense-watch
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dummynet:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare dummynet.ko
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . plugin/build.conf
+          sets=https://pkg.opnsense.org/$ABI/$SERIES/sets
+          kset=$(curl -fsSL "$sets/" | grep -o "kernel-$SERIES[0-9.]*-${ABI##*:}\.txz" | sort -u -V | tail -1)
+          curl -fsSLo kernel.txz "$sets/$kset"
+          now=$(tar -xOJf kernel.txz ./boot/kernel/dummynet.ko | sha256sum | cut -d' ' -f1)
+
+          tag=$(gh release view --json tagName -q .tagName)
+          gh release download "$tag" --pattern 'cake-kmod-*.pkg' --dir rel
+          known=$(tar --zstd -xOf rel/cake-kmod-*.pkg /usr/local/libexec/cake/dummynet.sha256)
+
+          echo "$kset: dummynet.ko $now" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "cake-kmod of $tag is built against: $known" | tee -a "$GITHUB_STEP_SUMMARY"
+          if printf '%s\n' "$known" | grep -qx "$now"; then
+            echo "Unchanged: CAKE keeps working on $kset." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          title="OPNsense $kset changes dummynet.ko: cake-kmod needs a rebuild"
+          if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
+            echo "Issue already open."
+          else
+            gh issue create --title "$title" --body "The newest OPNsense kernel set for $SERIES, \`$kset\`, ships a \`dummynet.ko\` with SHA256 \`$now\`. The latest release, $tag, is built against \`$known\`. On firewalls updated to it, the plugin leaves each pipe on its own scheduler until \`cake-kmod\` is rebuilt against the new kernel (update \`plugin/build.conf\` and release)."
+          fi
+          exit 1

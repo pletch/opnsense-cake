@@ -62,7 +62,9 @@ echo ">>> Building dnctl"
 mkdir -p "${WRK}/src/sbin"
 cp -R "${SRCDIR}/sbin/ipfw" "${SRCDIR}/sbin/Makefile.inc" "${WRK}/src/sbin/"
 patch -s -d "${WRK}/src" -p1 < "${TOP}/patches/ipfw-cake.patch"
-IPFW_MAKE="make -C ${WRK}/src/sbin/ipfw -m ${SRCDIR}/share/mk SRCTOP=${SRCDIR} MK_TESTS=no"
+# no separate debug file: its CRC, in the binary, would depend on the
+# build directory, and the build should be reproducible
+IPFW_MAKE="make -C ${WRK}/src/sbin/ipfw -m ${SRCDIR}/share/mk SRCTOP=${SRCDIR} MK_TESTS=no MK_DEBUG_FILES=no"
 ${IPFW_MAKE} > "${WRK}/ipfw.log" 2>&1 || { tail -20 "${WRK}/ipfw.log"; exit 1; }
 
 echo ">>> Staging files"
@@ -70,8 +72,8 @@ mkdir -p "${STAGE}/boot/modules" "${STAGE}/usr/local/libexec/cake" \
     "${STAGE}/usr/local/share/licenses/cake-kmod"
 install -m 555 "${WRK}/kmod/modules/dn_sched_cake/dn_cake.ko" \
     "${STAGE}/boot/modules/dn_cake.ko"
-install -m 555 "$(${IPFW_MAKE} -V .OBJDIR)/ipfw" \
-    "${STAGE}/usr/local/libexec/cake/dnctl"
+strip -o "${STAGE}/usr/local/libexec/cake/dnctl" "$(${IPFW_MAKE} -V .OBJDIR)/ipfw"
+chmod 555 "${STAGE}/usr/local/libexec/cake/dnctl"
 # the FreeBSD release the module is built for, checked before it is loaded
 uname -r | cut -d- -f1 > "${STAGE}/usr/local/libexec/cake/kernel"
 # and the dummynet.ko it is built against: the module depends on dummynet's
@@ -106,5 +108,13 @@ scripts: {
 EOM
 (cd "${STAGE}" && find . -type f | sed 's,^\./,/,' | sort) > "${WRK}/plist"
 
-pkg create -M "${WRK}/+MANIFEST" -r "${STAGE}" -p "${WRK}/plist" -o "${OUT}"
+# reproducible: every file at SOURCE_DATE_EPOCH, if set (plugin/build.sh
+# sets it), as pkg records the files' own times
+EPOCH=
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+	find "${STAGE}" -exec env TZ=UTC touch -h \
+	    -t "$(TZ=UTC date -r "${SOURCE_DATE_EPOCH}" +%Y%m%d%H%M.%S)" {} +
+	EPOCH="-t ${SOURCE_DATE_EPOCH}"
+fi
+pkg create ${EPOCH} -M "${WRK}/+MANIFEST" -r "${STAGE}" -p "${WRK}/plist" -o "${OUT}"
 echo ">>> Created ${OUT}/cake-kmod-${VERSION}.pkg for FreeBSD $(cat "${STAGE}/usr/local/libexec/cake/kernel")"
