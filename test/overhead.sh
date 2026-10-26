@@ -9,6 +9,7 @@ set -u
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/ticks.sh"
 UP=${UP:-2}		# Mbit/s; keeps 48-byte packets near 5k pps, well
 			# below what the VM path forwards (8k with dn_cake.ko)
 LEN=${LEN:-12}
@@ -58,6 +59,7 @@ printf '%s\n' "$CASES" | while IFS='|' read -r label params ovh mpu fr sizes; do
 	for m in $sizes; do
 		ip=$((m + 28))
 		w=$(wire $ip "$ovh" "$mpu" "$fr")
+		ticks_mark
 		pps=$(cli "N='sudo ip netns exec'
 		\$N cli netperf -H 10.10.2.2 -t UDP_STREAM -l $LEN -P 0 -- -m $m -R 1 >/dev/null 2>&1 &
 		sleep 3
@@ -67,7 +69,8 @@ printf '%s\n' "$CASES" | while IFS='|' read -r label params ovh mpu fr sizes; do
 		echo \$(( (b - a) / 6 ))")
 		awk -v l="$label" -v m="$m" -v ip="$ip" -v w="$w" -v up="$UP" -v got="$pps" 'BEGIN {
 			want = up * 1e6 / (8 * w)
-			printf "%-14s %8d %7d %7d %10.0f %10d %7.3f\n", l, m, ip, w, want, got, got / want
+			printf "%-14s %8d %7d %7d %10.0f %10d %7.3f ", l, m, ip, w, want, got, got / want
 		}'
+		ticks_late
 	done
 done

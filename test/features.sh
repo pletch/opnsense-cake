@@ -34,6 +34,7 @@ set -u
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
 fails=0
+. "$(dirname "$0")/ticks.sh"
 
 opn() {
 	tag=R$(date +%N)
@@ -47,13 +48,15 @@ cli() {
 	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
 }
 
+# each result with how late dummynet's tick ran since the previous one
 result() { # name ok detail
 	if [ "$2" = 1 ]; then
-		echo "PASS  $1  $3"
+		echo "PASS  $1  $3; $(ticks_late)"
 	else
-		echo "FAIL  $1  $3"
+		echo "FAIL  $1  $3; $(ticks_late)"
 		fails=$((fails + 1))
 	fi
+	ticks_mark
 }
 
 sched() { opn "/root/work/lul-sched.sh cake $* >/dev/null" 30 >/dev/null; }
@@ -71,6 +74,7 @@ flood_pps() {
 
 "$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "cd /root/work && DOWN=50Mbit/s UP=10Mbit/s ./lul-setup.sh" 60 | tail -1
+ticks_mark
 
 echo "== wash"
 opn '/root/work/opn-robust.sh v6up' 30 >/dev/null

@@ -11,6 +11,7 @@ set -e
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/ticks.sh"
 LEN=${LEN:-60}
 OUT=${OUT:-$HOME/VMs/lul-results/$(date +%Y%m%d-%H%M%S)}
 [ $# -gt 0 ] || set -- fifo fq_codel cake
@@ -35,9 +36,11 @@ ssh_cli 'sudo rm -rf /tmp/lul && mkdir -p /tmp/lul'
 for s in "$@"; do
 	echo "== $s"
 	opn "/root/work/lul-sched.sh $s"
+	ticks_mark
 	ssh_cli "sudo ip netns exec cli flent rrul -l $LEN -H 10.10.2.2 \
 	    -t $s -D /tmp/lul -o /tmp/lul/rrul-$s.png >/tmp/lul/flent-$s.log 2>&1" ||
 		echo "   flent reported an error, see flent-$s.log" >&2
+	echo "   $(ticks_late)"
 done
 
 ssh_cli 'cd /tmp/lul && flent -p ping_cdf -o ping-cdf.png *.flent.gz \

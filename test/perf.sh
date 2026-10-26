@@ -18,6 +18,7 @@ set -u
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/ticks.sh"
 RATE=${RATE:-300Mbit/s}
 LEN=${LEN:-40}
 PROF=${PROF:-0}
@@ -63,6 +64,7 @@ printf '%s\n' "$CONFIGS" | while IFS='|' read -r label args; do
 	[ -n "$label" ] || continue
 	[ "$PROF" = 1 ] && [ "${args%% *}" = fifo ] && continue
 	opn "/root/work/lul-sched.sh $args >/dev/null" 30
+	ticks_mark
 	cli "sudo ip netns exec cli flent $test -l $LEN -H 10.10.2.2 -D /tmp \
 	    -f summary 2>/dev/null" >"$tmp" &
 	fl=$!
@@ -75,10 +77,11 @@ printf '%s\n' "$CONFIGS" | while IFS='|' read -r label args; do
 			/enqueue/ { ec = $4; ea = $6; em = $8 }
 			/dequeue/ { dc = $4; da = $6; dm = $8 }
 			END {
-				printf "%-24s %9s %9d %10d %9.1f %9d %10d %9.1f\n",
+				printf "%-24s %9s %9d %10d %9.1f %9d %10d %9.1f ",
 				    label, down, ec / 20, ea, em / 1000,
 				    dc / 20, da, dm / 1000
 			}'
+		ticks_late
 		continue
 	fi
 	cpu=$(opn '/root/work/opn-robust.sh cpu 20' 60 | sed -n 's/^cpu //p')
@@ -90,8 +93,9 @@ printf '%s\n' "$CONFIGS" | while IFS='|' read -r label args; do
 		/TCP upload sum/ { up = $(NF-4) }
 		END {
 			split(cpu, c, " ")
-			printf "%-24s %9s %9s %10s %10s %7s %6s %6s\n", label,
+			printf "%-24s %9s %9s %10s %10s %7s %6s %6s ", label,
 			    down == "" ? "-" : down, up == "" ? "-" : up,
 			    med, p99, c[2], c[4], c[6]
 		}' "$tmp"
+	ticks_late
 done

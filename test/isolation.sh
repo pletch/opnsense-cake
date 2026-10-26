@@ -18,6 +18,7 @@
 set -u
 
 CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/ticks.sh"
 API=${API:-https://127.0.0.1:8443/api}
 KEYFILE=${KEYFILE:?KEYFILE must name the API key file}
 LEN=${LEN:-20}
@@ -77,10 +78,11 @@ for mode in $MODES; do
 	api POST trafficshaper/service/reconfigure >/dev/null
 	sleep 2
 	line=$(printf '%-15s' "$mode")
+	ticks_mark
 	for t in TCP_STREAM TCP_MAERTS; do
 		set -- $(measure $t)
 		line="$line $(printf '%-28s' "$(awk -v a="$1" -v b="$2" \
 		    'BEGIN { printf "%.1f / %.1f (%.0f%%)", a, b, 100 * b / (a + b) }')")"
 	done
-	echo "$line"
+	echo "$line $(ticks_late)"
 done

@@ -18,6 +18,7 @@ set -u
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/ticks.sh"
 TARGET=${1:-bench}
 LEN=${LEN:-15}
 
@@ -77,6 +78,7 @@ cli "N='sudo ip netns exec'; \$N $S ss -lun | grep -q ':2113 ' ||
 run() {
 	name=$1 iq=$2
 	shift 2
+	[ "$TARGET" = linux ] || ticks_mark
 	cli "N='sudo ip netns exec'; cd /tmp; sudo rm -f /tmp/cv.json.gz; rm -f /tmp/cv-*.txt
 	\$N $C irtt client -i 2ms -l 1250 -d $((LEN + 2))s --dscp=$iq -Q -o /tmp/cv $H:2113 >/dev/null 2>&1 &
 	sleep 1
@@ -97,6 +99,7 @@ print('%-11s flow %.1f of %.1f Mbit/s (loss %.2f%%), RTT median %.2f ms; greedy:
       % (name, got, sent, 100.0 * (1 - s['packets_received'] / max(s['packets_sent'], 1)),
          s['rtt']['median'] / 1e6, greedy))
 EOF"
+	[ "$TARGET" = linux ] || echo "            $(ticks_late)"
 }
 
 echo "$TARGET, diffserv4, 50 Mbit/s each way, ${LEN}s per scenario"
