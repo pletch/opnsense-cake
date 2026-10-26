@@ -1,6 +1,10 @@
 # CAKE for OPNsense: build and install
 
-Two packages, built on an OPNsense machine of the series they are for:
+Two packages. For OPNsense 26.7 (amd64), each
+[release](https://github.com/pletch/opnsense-cake/releases) has them ready
+built: skip to [Install](#install). Build them yourself only for another
+series, or to run your own build of the sources. They are built on an
+OPNsense machine of the series they are for:
 
 | package | contents |
 |---|---|
@@ -39,8 +43,19 @@ On an OPNsense machine of the target series (a VM will do), as root:
 
 ## Install
 
-Copy the two packages to the firewall and install `cake-kmod` first, then
-register `os-cake` as an installed plugin:
+Get the two packages onto the firewall: your own build, or a release's,
+which can be fetched and checked on the firewall itself (as root, with the
+versions of that release):
+
+```sh
+cd /tmp
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.3
+fetch $R/cake-kmod-1.4.3.pkg $R/os-cake-1.3.2.pkg $R/SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+Both must say `OK`. Then install `cake-kmod` first, and register `os-cake`
+as an installed plugin:
 
 ```sh
 pkg add cake-kmod-<version>.pkg

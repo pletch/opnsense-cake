@@ -71,11 +71,35 @@ built for another FreeBSD release or another `dummynet.ko`, it passes the rules 
 `/sbin/dnctl`, logs why, and the shaper keeps running with each pipe's own
 scheduler.
 
-Build and install: see [`plugin/README.md`](plugin/README.md). After
-`pkg add`, register the plugin with
-`/usr/local/opnsense/scripts/firmware/register.php install os-cake`, or
-System → Firmware → Plugins lists it as *misconfigured*; registered, it is
-listed as *orphaned*, as any plugin installed from a file (see there). Then:
+### Install the packages
+
+The [releases](https://github.com/pletch/opnsense-cake/releases) have both
+packages ready built for **OPNsense 26.7 (amd64)**, so there is nothing to
+build. As root on the firewall (console or ssh, shell option 8), with the
+versions of the latest release:
+
+```sh
+cd /tmp
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.3
+fetch $R/cake-kmod-1.4.3.pkg $R/os-cake-1.3.2.pkg $R/SHA256SUMS
+sha256sum -c SHA256SUMS
+pkg add cake-kmod-1.4.3.pkg
+pkg add os-cake-1.3.2.pkg
+/usr/local/opnsense/scripts/firmware/register.php install os-cake
+```
+
+`sha256sum -c` must say `OK` for both packages; they are not signed (see
+[Security notes](#security-notes)). Install `cake-kmod` first: `os-cake`
+depends on it. The last command registers the plugin, as the Plugins page
+does after installing from a repository; without it, System → Firmware →
+Plugins lists `os-cake` as *misconfigured*. Registered, it is listed as
+*orphaned*, as any plugin installed from a file. That is expected. Upgrading,
+removing, and building the packages yourself (for another series, or from
+source) are in [`plugin/README.md`](plugin/README.md).
+
+### Set up the shaper
+
+Then:
 
 1. On **Firewall → Shaper**, set up pipes and queues as for FQ-CoDel, and point
    the shaper rules at the **queues**. Rules that target a pipe itself go
