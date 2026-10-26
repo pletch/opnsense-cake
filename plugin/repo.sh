@@ -25,12 +25,20 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 # Make the signed pkg(8) repository firewalls install os-cake and cake-kmod
-# from, out of a release's packages, on FreeBSD or OPNsense, where the
-# signing key is. The key signs the repository's catalogue, which lists
-# every package's SHA256, and SHA256SUMS, for those who download the
-# packages by hand. The result goes to the gh-pages branch as it is.
+# from, out of a release's packages, on FreeBSD or OPNsense. The key signs
+# the repository's catalogue, which lists every package's SHA256, through
+# sign.sh, so the key can stay on another machine; clients check the
+# signature against the key's fingerprint. The result goes to the gh-pages
+# branch as it is.
 #
 #	repo.sh key.pem output-directory package ...
+#	repo.sh host:port output-directory package ...
+#
+# With the key here, it also signs SHA256SUMS, for those who download the
+# packages by hand, into SHA256SUMS.sig; with host:port (sign-server.py on
+# the machine with the key), sign SHA256SUMS there:
+#
+#	openssl dgst -sha256 -sign key.pem -out SHA256SUMS.sig SHA256SUMS
 #
 # The layout is ${SERIES}/ under the output directory (the series fixes the
 # ABI), with the packages in All/, so one site can serve several series. A
@@ -39,16 +47,17 @@
 #
 # The key: openssl genrsa -out cake-repo.key 4096, kept offline;
 # openssl rsa -in cake-repo.key -pubout -out plugin/keys/cake-repo.pub.
+# sign.sh hands pkg that public key as the certificate.
 
 set -e
 
 if [ $# -lt 3 ]; then
-	echo "usage: $0 key.pem output-directory package ..." >&2
+	echo "usage: $0 key.pem|host:port output-directory package ..." >&2
 	exit 1
 fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "${HERE}/build.conf"
-KEY=$1
+SIGNER=$1
 OUT=$2
 shift 2
 DIR=${OUT}/${SERIES}
@@ -64,13 +73,15 @@ done
 rm -rf "${DIR}"
 mkdir -p "${DIR}/All"
 cp "$@" "${DIR}/All/"
-pkg repo -q "${DIR}" "${KEY}"
+pkg repo -q "${DIR}" signing_command: sh "${HERE}/sign.sh" "${SIGNER}"
 (cd "${DIR}/All" && sha256 -r *.pkg | sed 's/ /  /') > "${DIR}/SHA256SUMS"
-openssl dgst -sha256 -sign "${KEY}" -out "${DIR}/SHA256SUMS.sig" "${DIR}/SHA256SUMS"
+if [ -f "${SIGNER}" ]; then
+	openssl dgst -sha256 -sign "${SIGNER}" -out "${DIR}/SHA256SUMS.sig" "${DIR}/SHA256SUMS"
+fi
 # GitHub Pages: serve files and directories as they are
 touch "${OUT}/.nojekyll"
 
 echo ">>> ${DIR}:"
 ls -l "${DIR}" "${DIR}/All"
-echo ">>> Public key fingerprint (SHA256 of the DER key):"
-openssl rsa -in "${KEY}" -pubout -outform DER 2>/dev/null | sha256
+echo ">>> Key fingerprint (SHA256 of plugin/keys/cake-repo.pub):"
+sha256 -q "${HERE}/keys/cake-repo.pub"

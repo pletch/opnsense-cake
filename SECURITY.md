@@ -36,17 +36,23 @@ gh attestation verify cake-kmod-X.Y.Z.pkg -R pletch/opnsense-cake
 
 The builds are reproducible: `plugin/ci-build.sh` rebuilds a release's
 packages from its tag on OPNsense or FreeBSD and compares them with the
-published ones, file by file (see `plugin/README.md`). A signed package
-repository is prepared (`plugin/repo.sh`, see `RELEASING.md`), with the
-signing key kept offline rather than in GitHub. Its public key is
+published ones, file by file (see `plugin/README.md`).
+
+The packages are also published in a pkg(8) repository,
+https://pletch.github.io/opnsense-cake/26.7, whose catalogue lists every
+package's SHA256 and is signed with a key kept offline rather than in
+GitHub (`plugin/repo.sh`, see `RELEASING.md`). Its public key is
 `plugin/keys/cake-repo.pub` (RSA 4096), with the fingerprint
 
 ```
-160571d7cf1eb36cbb421f031395ec68630ddc3d7de4f42e827b9bc30dc61d92
+5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502
 ```
 
-which you can check with:
+the SHA256 of that file (`sha256 cake-repo.pub`). pkg checks the
+catalogue against this fingerprint (`signature_type: "fingerprints"`), and
+each package against the catalogue. `SHA256SUMS.sig` next to the catalogue
+signs `SHA256SUMS`, for packages downloaded by hand:
 
 ```sh
-openssl rsa -pubin -in cake-repo.pub -outform DER | sha256
+openssl dgst -sha256 -verify cake-repo.pub -signature SHA256SUMS.sig SHA256SUMS
 ```
