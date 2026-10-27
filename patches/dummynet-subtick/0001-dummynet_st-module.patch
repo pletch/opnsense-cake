@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 14:57:21 -0400
+Subject: [PATCH] dummynet_st: the dummynet module as dummynet_st.ko,
+ release_us at one tick
+
+The first of the sub-tick release series (opnsense-cake SUBTICK.md), on
+top of opnsense-src-cake.patch. sys/modules/dummynet_st builds dummynet
+with CAKE as dummynet_st.ko, to install beside the stock dummynet.ko;
+it is the dummynet module all the same, so one or the other is loaded.
+
+net.inet.ip.dummynet.subtick tells this dummynet from the stock one, and
+net.inet.ip.dummynet.release_us, the longest a due packet waits for
+release, is the tick: this build still releases once per tick.
+---
+ sys/modules/dummynet_st/Makefile | 16 ++++++++++++++++
+ sys/netpfil/ipfw/ip_dn_io.c      | 24 ++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+ create mode 100644 sys/modules/dummynet_st/Makefile
+
+diff --git a/sys/modules/dummynet_st/Makefile b/sys/modules/dummynet_st/Makefile
+new file mode 100644
+index 00000000000..74822c6687d
+--- /dev/null
++++ b/sys/modules/dummynet_st/Makefile
+@@ -0,0 +1,16 @@
++# dummynet with CAKE and sub-tick release (opnsense-cake, SUBTICK.md),
++# installed as dummynet_st.ko next to the stock dummynet.ko. It is the
++# dummynet module all the same, so only one of the two can be loaded.
++# Its own headers come first, so that it can be built against another
++# tree's (SYSDIR) with the patched sources in SRCTOP.
++
++.PATH:  ${SRCTOP}/sys/netpfil/ipfw
++KMOD=   dummynet_st
++SRCS=   ip_dummynet.c ip_dn_io.c
++SRCS+= dn_aqm_codel.c dn_aqm_pie.c
++SRCS+= dn_heap.c dn_sched_fifo.c dn_sched_qfq.c dn_sched_rr.c dn_sched_wf2q.c
++SRCS+= dn_sched_prio.c dn_sched_fq_codel.c dn_sched_fq_pie.c dn_sched_cake.c
++SRCS+=	opt_inet6.h
++CFLAGS+= -I${SRCTOP}/sys
++
++.include <bsd.kmod.mk>
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index da5edb152c4..fdd29d7cecd 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -136,6 +136,23 @@ sysctl_limits(SYSCTL_HANDLER_ARGS)
+ 	return (0);
+ }
+ 
++/*
++ * Sub-tick release (opnsense-cake, SUBTICK.md): the longest a pipe's
++ * packets wait to be released once they are due, in us. This dummynet
++ * still releases once per tick, so the only value is the tick.
++ */
++static int
++sysctl_release_us(SYSCTL_HANDLER_ARGS)
++{
++	int error, value;
++
++	value = tick;
++	error = sysctl_handle_int(oidp, &value, 0, req);
++	if (error != 0 || req->newptr == NULL)
++		return (error);
++	return (value == tick ? 0 : EINVAL);
++}
++
+ SYSBEGIN(f4)
+ 
+ SYSCTL_DECL(_net_inet);
+@@ -171,6 +188,13 @@ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, io_fast,
+     CTLFLAG_RW | CTLFLAG_VNET, DC(io_fast), 0, "Enable fast dummynet io.");
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, debug,
+     CTLFLAG_RW | CTLFLAG_VNET, DC(debug), 0, "Dummynet debug level");
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, subtick,
++    CTLFLAG_RD, SYSCTL_NULL_INT_PTR, 1,
++    "Version of the sub-tick release in this dummynet");
++SYSCTL_PROC(_net_inet_ip_dummynet, OID_AUTO, release_us,
++    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
++    0, 0, sysctl_release_us, "I",
++    "Longest wait to release a packet once due (us)");
+ 
+ /* RED parameters */
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, red_lookup_depth,

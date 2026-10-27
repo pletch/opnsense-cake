@@ -4,10 +4,12 @@
 # plugin/build.conf, on FreeBSD of the series' release (CI runs it in a
 # FreeBSD VM): the out-of-tree dn_cake.ko as released and with CAKE_DEBUG,
 # and, with patches/opnsense-src-cake.patch applied, dummynet.ko with CAKE
-# built in (DN_WIRE_LEN), with and without CAKE_DEBUG, and the patched
-# dnctl. Kernel modules build with -Werror, so a warning fails too. Each
-# build is checked for the code it should and should not contain, so a
-# variant that silently built as another fails.
+# built in (DN_WIRE_LEN), with and without CAKE_DEBUG, the forked
+# dummynet_st.ko of SUBTICK.md (patches/dummynet-subtick), with and
+# without CAKE_DEBUG, and the patched dnctl. Kernel modules build with
+# -Werror, so a warning fails too. Each build is checked for the code it
+# should and should not contain, so a variant that silently built as
+# another fails.
 #
 #	test/build-variants.sh [opnsense/src checkout at the commit]
 #
@@ -84,6 +86,21 @@ for V in release debug; do
 	else
 		check "dn_cake.ko" "${WRK}/kmod/modules/dn_sched_cake/dn_cake.ko" \
 		    cake_enqueue=yes cake_check=no cake_wire_len=no
+	fi
+done
+
+# the forked dummynet of SUBTICK.md, dummynet_st.ko, as its build.sh
+# builds it from the stock tree (it checks the patched code is in)
+for V in release debug; do
+	build "dummynet_st.ko ${V}" env SRCDIR="${SRC}" \
+	    $([ ${V} = debug ] && echo CAKE_DEBUG=1) \
+	    sh "${TOP}/patches/dummynet-subtick/build.sh" "${WRK}/st-${V}"
+	if [ ${V} = debug ]; then
+		check "dummynet_st.ko, CAKE_DEBUG" "${WRK}/st-${V}/dummynet_st.ko" \
+		    cake_check=yes sysctl_release_us=yes
+	else
+		check "dummynet_st.ko" "${WRK}/st-${V}/dummynet_st.ko" \
+		    cake_check=no sysctl_release_us=yes
 	fi
 done
 

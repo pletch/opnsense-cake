@@ -124,10 +124,14 @@ s) at 50 Mbit/s.
 - **A faster kern.hz costs CPU all the time.** dummynet re-arms its
   callout every tick even with no traffic, and the router's qemu goes
   from about 30% of a host CPU to 105% idle at 10 kHz, and from 85% to
-  160% under load; at 4000 Hz an eighth of the ticks ran late. Voice RTT
-  doubled at 10 kHz, likely the vCPUs' contention. (That the idle cost
-  is dummynet's callout rather than the kernel's own hardclock is not yet
-  checked.)
+  160% under load; at 4000 Hz an eighth of the ticks ran late. (That the
+  idle cost is dummynet's callout rather than the kernel's own hardclock
+  is not yet checked.)
+- **Voice RTT is the bench's, not kern.hz's.** It was 1.97 ms at 10 kHz
+  against 0.9 at 1000 and 4000 Hz, but in phase 2 stock dummynet at 1000
+  Hz gave 1.8–1.9 ms too, after another reboot of the router: the median
+  is about 0.9 or 1.9 ms depending on the boot, whatever the module or
+  kern.hz. Compare it only within one boot.
 - **Gate.** `kern.hz=10000` is no substitute in a VM: it costs a host CPU
   at idle for little gain here. But this bench gains little from finer
   release at all; the case for the fork is a fast NIC feeding a slower
@@ -235,3 +239,54 @@ runs and `link` 30 runs, 0 mismatches; `pace` as before (Bulk 3.41 /
 mismatching runs; `dn_cake.ko` built on the OPNsense 26.7 VM, as released
 and with CAKE_DEBUG. The in-tree DN_WIRE_LEN build is left to the variants
 workflow.
+
+### Phase 2: the fork, releasing once per tick
+
+The fork is `patches/dummynet-subtick/`: patches made with `git
+format-patch` against opnsense/src at `SRC_COMMIT` with
+`opnsense-src-cake.patch` applied, in the order of `series`, and
+`build.sh`, which copies the dummynet sources of a stock tree (`SRCDIR`,
+by default `/usr/src`), applies `opnsense-src-cake.patch` and the series,
+builds `dummynet_st.ko` against that tree's headers and checks that the
+patched code is in it. `test/build-variants.sh` builds it too, as
+released and with CAKE_DEBUG.
+
+`0001-dummynet_st-module.patch`:
+- `sys/modules/dummynet_st`: dummynet with CAKE, as `dummynet_st.ko`. It
+  declares the `dummynet` module like the stock one, so ipfw, the AQMs
+  and the schedulers bind to it, and only one of the two can be loaded.
+  Its own headers come before `SYSDIR`'s.
+- `net.inet.ip.dummynet.subtick` (1) tells it from the stock dummynet.
+- `net.inet.ip.dummynet.release_us` is the tick, the only value it takes
+  so far (100 is refused).
+
+`test/subtick-swap.sh fork KO` turns off the os-cake entries that are on
+(they keep `dn_cake.ko` in use), noting which, unloads `dn_cake.ko` and
+the dummynet module and loads the fork; `stock` loads `dummynet.ko` again
+and turns those entries back on. Run `lul-setup.sh` after either: a new
+dummynet starts without the bench's pipes and with the default
+`pipe_slot_limit`.
+
+Measured 2026-10-27 on the bench at 1000 Hz, the fork built on the VM
+against its `/usr/src` (the 81 files the build copies are `SRC_COMMIT`'s):
+
+| | stock (phase 0) | fork |
+|---|---|---|
+| host CPU of the router's qemu, idle / under the TCP load | 32%, 26% / 84%, 89% | 29% / 85% |
+| bursts out of the download pipe: per s, mean packets | 976, 25.4; 960, 26.0 | 946, 26.3 |
+| ticks late under the TCP load | 3.9%, 4.8% | 6.3% |
+| rrul ICMP median / 99th percentile | 1.85 / 5.49 ms | 1.91 / 7.34 ms |
+
+Stock and fork alternated in the same boot (two contention runs each, the
+fork loaded twice), Bulk against greedy Voice: stock 4.2, 4.3, 4.3, 4.4
+Mbit/s, the fork 4.3, 4.2, 4.2, 4.2; Voice RTT against greedy Bulk 1.92–
+1.94 ms stock, 1.77–1.96 the fork. The fork's first runs (4.2, 5.0, 4.6
+Mbit/s, one at 0.5% loss) were within that spread.
+
+`test/robustness.sh` with the fork's CAKE_DEBUG build (CAKE built in):
+all tests passed (normal, overflow, flood, ipv6, churn, allocfail,
+expiry, vnet, leaks; unload is skipped for a built-in CAKE), check_errors
+0, dummynet's memory and the mbufs back to their baselines.
+
+**Gate:** passed; the fork releases as stock dummynet does. Phase 3 lets
+`release_us` go below the tick.
