@@ -131,7 +131,8 @@ s) at 50 Mbit/s.
   against 0.9 at 1000 and 4000 Hz, but in phase 2 stock dummynet at 1000
   Hz gave 1.8–1.9 ms too, after another reboot of the router: the median
   is about 0.9 or 1.9 ms depending on the boot, whatever the module or
-  kern.hz. Compare it only within one boot.
+  kern.hz. Compare it only within one boot. (Phase 3 found why: the
+  tick's phase, see there.)
 - **Gate.** `kern.hz=10000` is no substitute in a VM: it costs a host CPU
   at idle for little gain here. But this bench gains little from finer
   release at all; the case for the fork is a fast NIC feeding a slower
@@ -290,3 +291,80 @@ expiry, vnet, leaks; unload is skipped for a built-in CAKE), check_errors
 
 **Gate:** passed; the fork releases as stock dummynet does. Phase 3 lets
 `release_us` go below the tick.
+
+### Phase 3: releases between ticks
+
+`0002-release-between-ticks.patch` (`net.inet.ip.dummynet.subtick` 2):
+- **Time in microseconds.** A pipe's times go from ticks to µs of uptime
+  (`sbinuptime()`, `V_dn_cfg.now_us`, never going back): the scheduler
+  instances' credit (bits × `DN_CREDIT_HZ`, 10^6), `sched_time` and
+  `idle_time`, the packets' output times, the event heap's keys and the
+  link's delay. `curr_time` stays in ticks for the AQMs and RED. CAKE
+  takes `DN_CREDIT_HZ` and `DN_RELEASE_NS` from `ip_dn_private.h`.
+- **A callout between ticks.** With `release_us` below the tick, heap
+  keys are rounded up to a grid of `release_us`, and `dn_fine_arm()` arms
+  an absolute callout (`C_DIRECT_EXEC`, guarded by a spin lock) at the
+  first key whenever it moves earlier; it queues `dummynet_fine_task` on
+  dummynet's taskqueue, which serves the heap and arms again. The tick
+  task still runs and serves the heap too, so a missed wakeup waits a tick
+  at most. At the tick (`release_us` 0, the default) nothing is armed.
+- **The packet that overdraws the credit leaves at once,** as from
+  sch_cake's shaper, and an idle pipe starts at no credit instead of
+  io_fast's tick of it. Stock dummynet holds that packet until it is paid
+  for; with credit in µs that would delay every packet of a sparse flow
+  by its own time and the grid. A pipe's `burst` after idle is clamped so
+  that a long idle cannot overflow.
+- `release_catchup_us` caps the credit gained in one release (0: all it
+  is owed, as stock). `release_wakeups`, `release_pkts`,
+  `release_late_us`, `release_late_max` and `release_catchups` count the
+  releases between ticks and how late they ran.
+
+Measured 2026-10-27 on the bench at 1000 Hz, `subtick-baseline.sh` (300
+Mbit/s, 4 TCP downloads):
+
+| release_us | router idle / host qemu under load | bursts per s, mean packets, gaps 0.5–1 ms | wakeups between ticks: packets each, mean late, later than a slot |
+|---|---|---|---|
+| tick | 78% / 90% | 895, 27.8, 1611 | – |
+| 500 | 65% / 139% | 1725, 14.2, 1374 | not counted, 95 µs, 2.1% |
+| 250 | 45% / 182% | 3912, 6.3, 47 | not counted, 61 µs, 1.2% |
+| 100 | 29% / 193% | 6877, 3.6, 16 | 4.1, 62 µs, 15% |
+
+Idle, no wakeups: the router's qemu at 27–29% of a host CPU at every
+setting, as stock. The latest release was 6–11 ms late (the VM's stalls).
+
+In one boot, `contention.sh` and rrul (50 Mbit/s):
+
+| | tick | release_us 100 |
+|---|---|---|
+| Voice RTT median against greedy Bulk | 1.90, 1.94 ms | 0.55, 0.53 ms |
+| Voice RTT median against Video, Best Effort, Bulk | 1.94, 1.94 ms | 0.52, 0.53 ms |
+| Bulk against greedy Voice | 4.7, 4.3 Mbit/s | 4.3, 4.3 Mbit/s |
+| rrul ICMP median / 99th percentile | 1.78 / 7.00 ms | 0.91 / 5.95 ms |
+| rrul UDP BE, EF median | 2.19, 2.35 ms | 1.08, 1.64 ms |
+| rrul TCP download sum | 47.2 Mbit/s | 46.9 Mbit/s |
+
+- **Latency falls as modelled, and more.** The Voice flow's RTT crosses
+  two busy pipes; at the tick each Voice packet waits for the next one,
+  and irtt sends every 2 ms, so the wait is the same phase for the whole
+  run: which phase depends on when the router booted, hence phase 0's
+  0.9 or 1.9 ms. At 100 µs the phase no longer matters (0.53 ms). rrul's
+  ICMP median halves.
+- **The cost is per release, and large in this VM.** The router's CPU
+  under the load goes from 22% at the tick to 35, 55 and 68% at 500, 250
+  and 100 µs, about 80 µs of guest CPU per extra release, where bare metal
+  takes a few: the bench's router is a KVM guest inside a KVM guest, so
+  each timer and each NIC doorbell (a smaller burst each time) is an
+  expensive exit. Two changes did not reduce it: serving from the callout
+  thread instead of the taskqueue (192% host, 75 µs late), and a callout
+  precision of half a slot (188%, but 104 µs late, i.e. a longer slot).
+  Phase 5 has to measure it on real hardware.
+- `robustness.sh` with the CAKE_DEBUG build at `release_us` 100: all
+  tests passed (1.15 million releases between ticks, 1.8 million packets,
+  check_errors 0, memory and mbufs back to baseline).
+  `test/subtick-stress.sh`: `release_us` changed every 0.2 s under RRUL
+  (70,688 releases), and the fork swapped for the stock dummynet and back
+  under RRUL: both passed.
+
+**Gate:** passed for behaviour (no regression, bursts and latency as
+modelled or better); the CPU cost on this bench is high and is the open
+question for phase 5. `release_us` stays opt-in, the tick by default.

@@ -43,7 +43,7 @@ make -C "${WRK}/src/sys/modules/dummynet_st" \
 KO=${WRK}/src/sys/modules/dummynet_st/dummynet_st.ko
 
 # built from the patched sources and headers, not SRCDIR's
-for S in cake_enqueue cake_wire_len sysctl_release_us; do
+for S in cake_enqueue cake_wire_len sysctl_release_us dummynet_fine_task; do
 	if ! nm "${KO}" | awk '{print $NF}' | grep -qx "${S}"; then
 		echo ">>> dummynet_st.ko has no ${S}" >&2
 		exit 1

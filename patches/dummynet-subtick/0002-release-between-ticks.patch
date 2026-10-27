@@ -1,0 +1,532 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 15:48:44 -0400
+Subject: [PATCH] dummynet_st: release packets between ticks
+
+The second of the sub-tick release series (opnsense-cake SUBTICK.md). A
+pipe's times go from ticks to microseconds of uptime: the scheduler
+instances' credit (now bits * DN_CREDIT_HZ, 10^6), sched_time and
+idle_time, the packets' output times, the event heap's keys and the
+link's delay. curr_time stays in ticks for the AQMs and RED.
+
+With net.inet.ip.dummynet.release_us below the tick, the heap's keys are
+rounded up to a grid of release_us, and a callout at the first key,
+armed whenever it moves earlier, queues dummynet_fine_task, which serves
+the heap and arms it again; the tick task carries on as before and
+serves the heap too, so a missed wakeup waits a tick at most. At the
+tick (the default) no callout is armed and releases go by the tick.
+
+The packet that takes a pipe's credit below zero now leaves at once, as
+from sch_cake's shaper, rather than when it is paid for, and an idle
+pipe starts at no credit rather than io_fast's tick: with credit in us,
+holding the packet would delay every packet of a sparse flow by its own
+time and the grid. release_catchup_us caps the credit a pipe gains in
+one release (0, the default: all it is owed). release_wakeups,
+release_pkts, release_late_us, release_late_max and release_catchups
+count the releases between ticks. net.inet.ip.dummynet.subtick is 2.
+---
+ sys/netpfil/ipfw/ip_dn_io.c      | 196 ++++++++++++++++++++++++-------
+ sys/netpfil/ipfw/ip_dn_private.h |  24 ++++
+ sys/netpfil/ipfw/ip_dummynet.c   |  65 ++++++++--
+ 3 files changed, 236 insertions(+), 49 deletions(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index fdd29d7cecd..d0afc9e2e46 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -138,19 +138,28 @@ sysctl_limits(SYSCTL_HANDLER_ARGS)
+ 
+ /*
+  * Sub-tick release (opnsense-cake, SUBTICK.md): the longest a pipe's
+- * packets wait to be released once they are due, in us. This dummynet
+- * still releases once per tick, so the only value is the tick.
++ * packets wait to be released once they are due, in us, from
++ * DN_RELEASE_MIN to the tick (and 0, or the tick or more: the tick).
+  */
++#define DN_RELEASE_MIN	10
++int dn_release_us;
++static int dn_catchup_us;	/* cap on the credit after a late wakeup */
++static u_long dn_rel_wakeups, dn_rel_pkts, dn_rel_late_sum, dn_rel_late_max;
++static u_long dn_rel_catchups;
++
+ static int
+ sysctl_release_us(SYSCTL_HANDLER_ARGS)
+ {
+ 	int error, value;
+ 
+-	value = tick;
++	value = dn_release();
+ 	error = sysctl_handle_int(oidp, &value, 0, req);
+ 	if (error != 0 || req->newptr == NULL)
+ 		return (error);
+-	return (value == tick ? 0 : EINVAL);
++	if (value < 0 || (value > 0 && value < DN_RELEASE_MIN))
++		return (EINVAL);
++	dn_release_us = value >= tick ? 0 : value;
++	return (0);
+ }
+ 
+ SYSBEGIN(f4)
+@@ -189,12 +198,25 @@ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, io_fast,
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, debug,
+     CTLFLAG_RW | CTLFLAG_VNET, DC(debug), 0, "Dummynet debug level");
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, subtick,
+-    CTLFLAG_RD, SYSCTL_NULL_INT_PTR, 1,
++    CTLFLAG_RD, SYSCTL_NULL_INT_PTR, 2,
+     "Version of the sub-tick release in this dummynet");
+ SYSCTL_PROC(_net_inet_ip_dummynet, OID_AUTO, release_us,
+-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
++    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
+     0, 0, sysctl_release_us, "I",
+     "Longest wait to release a packet once due (us)");
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_catchup_us,
++    CTLFLAG_RWTUN, &dn_catchup_us, 0,
++    "Most credit a pipe gains in one release (us of its rate, 0: all owed)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_wakeups,
++    CTLFLAG_RD, &dn_rel_wakeups, 0, "Releases between ticks");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_pkts,
++    CTLFLAG_RD, &dn_rel_pkts, 0, "Packets sent by releases between ticks");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_late_us,
++    CTLFLAG_RD, &dn_rel_late_sum, 0, "Releases' total lateness (us)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_late_max,
++    CTLFLAG_RW, &dn_rel_late_max, 0, "Latest release (us)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_catchups,
++    CTLFLAG_RD, &dn_rel_catchups, 0, "Releases later than release_us");
+ 
+ /* RED parameters */
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, red_lookup_depth,
+@@ -575,6 +597,36 @@ dn_enqueue(struct dn_queue *q, struct mbuf* m, int drop)
+ 	return (1);
+ }
+ 
++/* the pipes' clock, now: us of uptime, never going back */
++static uint64_t
++dn_now_us(void)
++{
++	uint64_t t = sbttous(sbinuptime());
++
++	DN_BH_LOCK_ASSERT();
++	if (t > V_dn_cfg.now_us)
++		V_dn_cfg.now_us = t;
++	return (V_dn_cfg.now_us);
++}
++
++/* an event's time as its heap key: below the tick, on the release grid */
++static uint64_t
++dn_key(uint64_t t)
++{
++	uint64_t r = (uint64_t)dn_release();
++
++	return (r < (uint64_t)tick ? (t + r - 1) / r * r : t);
++}
++
++/* wake for the first event, if it comes before the tick */
++static void
++dn_arm_top(void)
++{
++	DN_BH_LOCK_ASSERT();
++	if (V_dn_cfg.evheap.elements > 0)
++		dn_fine_arm(HEAP_TOP(&V_dn_cfg.evheap)->key);
++}
++
+ /*
+  * Fetch packets from the delay line which are due now. If there are
+  * leftover packets, reinsert the delay line in the heap.
+@@ -601,7 +653,7 @@ transmit_event(struct mq *q, struct delay_line *dline, uint64_t now)
+ 	}
+ 	if (m != NULL) {
+ 		dline->oid.subtype = 1; /* in heap */
+-		heap_insert(&V_dn_cfg.evheap, pkt->output_time, dline);
++		heap_insert(&V_dn_cfg.evheap, dn_key(pkt->output_time), dline);
+ 	}
+ }
+ 
+@@ -651,9 +703,12 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
+ 	bw = s->link.bandwidth;
+ 	si->kflags &= ~DN_ACTIVE;
+ 
+-	if (bw > 0)
++	if (bw > 0) {
+ 		si->credit += (now - si->sched_time) * bw;
+-	else
++		if (dn_catchup_us > 0 &&
++		    si->credit > (int64_t)dn_catchup_us * bw)
++			si->credit = (int64_t)dn_catchup_us * bw;
++	} else
+ 		si->credit = 0;
+ 	si->sched_time = now;
+ 	done = 0;
+@@ -661,13 +716,13 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
+ 		uint64_t len_scaled;
+ 
+ 		done++;
+-		len_scaled = (bw == 0) ? 0 : hz *
++		len_scaled = (bw == 0) ? 0 : DN_CREDIT_HZ *
+ 			((uint64_t)((s->fp->flags & DN_WIRE_LEN) ?
+ 			s->fp->wire_len(si, m) : m->m_pkthdr.len) * 8 +
+ 			extra_bits(m, s));
+ 		si->credit -= len_scaled;
+ 		/* Move packet in the delay line */
+-		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
++		dn_tag_get(m)->output_time = now + s->link.delay;
+ 		if (m->m_pkthdr.rcvif != NULL)
+ 			m_rcvif_serialize(m);
+ 		mq_append(&si->dline.mq, m);
+@@ -675,8 +730,11 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
+ 
+ 	/*
+ 	 * If credit >= 0 the instance is idle, mark time.
+-	 * Otherwise put back in the heap, and adjust the output
+-	 * time of the last inserted packet, m, which was too early.
++	 * Otherwise put back in the heap for when the credit is back.
++	 * The last packet, which took the credit below zero, leaves now,
++	 * as from sch_cake's shaper, not when it is paid for: with a pipe
++	 * starting at no credit, holding it would delay every packet of a
++	 * sparse flow by its own time and the release grid.
+ 	 */
+ 	if (si->credit >= 0) {
+ 		si->idle_time = now;
+@@ -684,16 +742,33 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
+ 		uint64_t t;
+ 		KASSERT (bw > 0, ("bw=0 and credit<0 ?"));
+ 		t = div64(bw - 1 - si->credit, bw);
+-		if (m)
+-			dn_tag_get(m)->output_time += t;
+ 		si->kflags |= DN_ACTIVE;
+-		heap_insert(&V_dn_cfg.evheap, now + t, si);
++		heap_insert(&V_dn_cfg.evheap, dn_key(now + t), si);
+ 	}
+ 	if (delay_line_idle && done)
+ 		transmit_event(q, &si->dline, now);
+ 	return q->head;
+ }
+ 
++/* serve the events due by now, accumulate in q */
++static void
++dn_serve_heap(struct mq *q, uint64_t now)
++{
++	struct dn_id *p;    /* generic parameter to handler */
++
++	for (;;) {
++		if (V_dn_cfg.evheap.elements == 0 ||
++		    DN_KEY_LT(now, HEAP_TOP(&V_dn_cfg.evheap)->key))
++			break;
++		p = HEAP_TOP(&V_dn_cfg.evheap)->object;
++		heap_extract(&V_dn_cfg.evheap, NULL);
++		if (p->type == DN_SCH_I)
++			serve_sched(q, (struct dn_sch_inst *)p, now);
++		else /* extracted a delay line */
++			transmit_event(q, (struct delay_line *)p, now);
++	}
++}
++
+ /*
+  * The timer handler for dummynet. Time is computed in ticks, but
+  * but the code is tolerant to the actual rate at which this is called.
+@@ -757,26 +832,13 @@ dummynet_task(void *context, int pending)
+ 			V_dn_cfg.tick_adjustment++;
+ 		}
+ 
+-		/* serve pending events, accumulate in q */
+-		for (;;) {
+-			struct dn_id *p;    /* generic parameter to handler */
+-
+-			if (V_dn_cfg.evheap.elements == 0 ||
+-			    DN_KEY_LT(V_dn_cfg.curr_time, HEAP_TOP(&V_dn_cfg.evheap)->key))
+-				break;
+-			p = HEAP_TOP(&V_dn_cfg.evheap)->object;
+-			heap_extract(&V_dn_cfg.evheap, NULL);
+-			if (p->type == DN_SCH_I) {
+-				serve_sched(&q, (struct dn_sch_inst *)p, V_dn_cfg.curr_time);
+-			} else { /* extracted a delay line */
+-				transmit_event(&q, (struct delay_line *)p, V_dn_cfg.curr_time);
+-			}
+-		}
++		dn_serve_heap(&q, dn_now_us());
+ 		if (V_dn_cfg.expire && ++V_dn_cfg.expire_cycle >= V_dn_cfg.expire) {
+ 			V_dn_cfg.expire_cycle = 0;
+ 			dn_drain_scheduler();
+ 			dn_drain_queue();
+ 		}
++		dn_arm_top();
+ 		DN_BH_WUNLOCK();
+ 		if (q.head != NULL)
+ 			dummynet_send(q.head);
+@@ -790,6 +852,51 @@ dummynet_task(void *context, int pending)
+ 	dn_reschedule();
+ }
+ 
++/*
++ * A release between ticks (dn_fine_arm()): serve the events due by now,
++ * and wake again for the next one.
++ */
++void
++dummynet_fine_task(void *context, int pending)
++{
++	struct mq q;
++	struct epoch_tracker et;
++	uint64_t now, late;
++
++	VNET_ITERATOR_DECL(vnet_iter);
++	VNET_LIST_RLOCK();
++	NET_EPOCH_ENTER(et);
++
++	VNET_FOREACH(vnet_iter) {
++		memset(&q, 0, sizeof(struct mq));
++		CURVNET_SET(vnet_iter);
++		if (! V_dn_cfg.init_done) {
++			CURVNET_RESTORE();
++			continue;
++		}
++		DN_BH_WLOCK();
++		now = dn_now_us();
++		dn_serve_heap(&q, now);
++		if (q.count > 0) {
++			late = now > dn_fine_fired ? now - dn_fine_fired : 0;
++			dn_rel_wakeups++;
++			dn_rel_pkts += q.count;
++			dn_rel_late_sum += late;
++			if (late > dn_rel_late_max)
++				dn_rel_late_max = late;
++			if (late > (uint64_t)dn_release())
++				dn_rel_catchups++;
++		}
++		dn_arm_top();
++		DN_BH_WUNLOCK();
++		if (q.head != NULL)
++			dummynet_send(q.head);
++		CURVNET_RESTORE();
++	}
++	NET_EPOCH_EXIT(et);
++	VNET_LIST_RUNLOCK();
++}
++
+ /*
+  * forward a chain of packets to the proper destination.
+  * This runs outside the dummynet lock.
+@@ -918,7 +1025,7 @@ tag_mbuf(struct mbuf *m, int dir, struct ip_fw_args *fwa)
+ 		dt->if_idxgen = fwa->ifp->if_idxgen;
+ 	}
+ 	/* dt->output_time is updated as we move through */
+-	dt->output_time = V_dn_cfg.curr_time;
++	dt->output_time = V_dn_cfg.now_us;
+ 	dt->iphdr_off = (dir & PROTO_LAYER2) ? ETHER_HDR_LEN : 0;
+ 	return 0;
+ }
+@@ -936,6 +1043,7 @@ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ 	struct dn_fsk *fs = NULL;
+ 	struct dn_sch_inst *si;
+ 	struct dn_queue *q = NULL;	/* default */
++	uint64_t now;
+ 	int fs_id, dir;
+ 
+ 	fs_id = (fwa->rule.info & IPFW_INFO_MASK) +
+@@ -989,21 +1097,25 @@ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ 	}
+ 
+ 	/* compute the initial allowance */
+-	if (si->idle_time < V_dn_cfg.curr_time) {
+-	    /* Do this only on the first packet on an idle pipe */
++	now = dn_now_us();
++	if (si->idle_time < now) {
++	    /* Do this only on the first packet on an idle pipe. No
++	     * io_fast credit: the first packet goes at once anyway
++	     * (serve_sched()), and a tick's worth would be a burst. */
+ 	    struct dn_link *p = &fs->sched->link;
+ 
+-	    si->sched_time = V_dn_cfg.curr_time;
+-	    si->credit = V_dn_cfg.io_fast ? p->bandwidth : 0;
+-	    if (p->burst) {
+-		uint64_t burst = (V_dn_cfg.curr_time - si->idle_time) * p->bandwidth;
+-		if (burst > p->burst)
+-			burst = p->burst;
+-		si->credit += burst;
++	    si->sched_time = now;
++	    si->credit = 0;
++	    if (p->burst && p->bandwidth > 0) {
++		uint64_t idle = now - si->idle_time;
++
++		si->credit = idle > p->burst / p->bandwidth ? p->burst :
++		    idle * p->bandwidth;
+ 	    }
+ 	}
+ 	/* pass through scheduler and delay line */
+-	m = serve_sched(NULL, si, V_dn_cfg.curr_time);
++	m = serve_sched(NULL, si, now);
++	dn_arm_top();
+ 
+ 	/* optimization -- pass it back to ipfw for immediate send */
+ 	/* XXX Don't call dummynet_send() if scheduler return the packet
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 9a43b86791e..13ddfe05115 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -90,6 +90,26 @@ set_oid(struct dn_id *o, int type, int len)
+         o->subtype = 0;
+ }
+ 
++/*
++ * Sub-tick release (opnsense-cake, SUBTICK.md). A pipe's times are in
++ * microseconds of uptime rather than ticks: its scheduler instances'
++ * times, its packets' output times, the event heap's keys and its delay,
++ * and its credit is in bits * DN_CREDIT_HZ. curr_time stays in ticks for
++ * the AQMs and RED. While dn_release() is below the tick, a callout
++ * (dn_fine_arm()) wakes dummynet when the first event is due, on a grid
++ * of dn_release() us, besides the tick.
++ */
++#define DN_CREDIT_HZ	1000000
++#define DN_RELEASE_NS	((uint64_t)dn_release() * 1000)
++extern int dn_release_us;	/* net.inet.ip.dummynet.release_us, 0: the tick */
++
++/* the longest a due packet waits for release, in us */
++static __inline int
++dn_release(void)
++{
++	return (dn_release_us > 0 && dn_release_us < tick ? dn_release_us : tick);
++}
++
+ /*
+  * configuration and data for a dummynet instance
+  *
+@@ -136,6 +156,7 @@ struct dn_parms {
+ 
+ 	/* ticks and other stuff */
+ 	uint64_t	curr_time;
++	uint64_t	now_us;		/* the pipes' clock, us of uptime */
+ 	/* flowsets and schedulers are in hash tables, with 'hash_size'
+ 	 * buckets. fshash is looked up at every packet arrival
+ 	 * so better be generous if we expect many entries.
+@@ -409,7 +430,10 @@ int dummynet_io(struct mbuf **, struct ip_fw_args *);
+ void dummynet_sched_lock(void);
+ void dummynet_sched_unlock(void);
+ void dummynet_task(void *context, int pending);
++void dummynet_fine_task(void *context, int pending);
+ void dn_reschedule(void);
++void dn_fine_arm(uint64_t);
++extern uint64_t dn_fine_fired;
+ struct dn_pkt_tag * dn_tag_get(struct mbuf *m);
+ 
+ struct dn_queue *ipdn_q_find(struct dn_fsk *, struct dn_sch_inst *,
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 61442c61775..9d303876ac0 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -92,6 +92,18 @@ static int dn_gone;
+ static struct task	dn_task;
+ static struct taskqueue	*dn_tq = NULL;
+ 
++/*
++ * Releases between ticks (SUBTICK.md): dn_fine fires at the first event
++ * due before the next tick, at dn_fine_at us of uptime, and queues
++ * dn_fine_task. dn_fine_mtx guards dn_fine_at; it is a spin lock, as
++ * dn_fine runs directly from the timer interrupt.
++ */
++static struct callout	dn_fine;
++static struct mtx	dn_fine_mtx;
++static struct task	dn_fine_task;
++static uint64_t		dn_fine_at;	/* 0: not armed */
++uint64_t		dn_fine_fired;	/* what the last wakeup was for */
++
+ /* global scheduler list */
+ struct mtx		sched_mtx;
+ CK_LIST_HEAD(, dn_alg)	schedlist;
+@@ -107,6 +119,39 @@ dummynet(void *arg)
+ 	taskqueue_enqueue(dn_tq, &dn_task);
+ }
+ 
++static void
++dummynet_fine(void *arg)
++{
++
++	(void)arg;	/* UNUSED */
++	/* with dn_fine_mtx held */
++	dn_fine_fired = dn_fine_at;
++	dn_fine_at = 0;
++	taskqueue_enqueue(dn_tq, &dn_fine_task);
++}
++
++/*
++ * Wake dummynet at key (us of uptime), unless it is already woken by then
++ * or releases go by the tick. The unlocked look is only a shortcut: a
++ * wakeup it misses waits for the tick, which serves the heap as well.
++ */
++void
++dn_fine_arm(uint64_t key)
++{
++
++	if (dn_gone != 0 || dn_release() >= tick)
++		return;
++	if (dn_fine_at != 0 && dn_fine_at <= key)
++		return;
++	mtx_lock_spin(&dn_fine_mtx);
++	if (dn_fine_at == 0 || key < dn_fine_at) {
++		dn_fine_at = key;
++		callout_reset_sbt(&dn_fine, ustosbt(key), 0, dummynet_fine,
++		    NULL, C_ABSOLUTE | C_DIRECT_EXEC);
++	}
++	mtx_unlock_spin(&dn_fine_mtx);
++}
++
+ void
+ dummynet_sched_lock(void)
+ {
+@@ -629,7 +674,7 @@ si_reset_credit(void *_si, void *arg)
+ 	struct dn_sch_inst *si = _si;
+ 	struct dn_link *p = &si->sched->link;
+ 
+-	si->credit = p->burst + (V_dn_cfg.io_fast ?  p->bandwidth : 0);
++	si->credit = p->burst;
+ 	return 0;
+ }
+ 
+@@ -972,8 +1017,8 @@ copy_obj(char **start, char *end, void *_o, const char *msg, int i)
+ 	if (o.type == DN_LINK) {
+ 		memcpy(&dn.l, _o, sizeof(dn.l));
+ 		/* Adjust burst parameter for link */
+-		dn.l.burst = div64(dn.l.burst, 8 * hz);
+-		dn.l.delay = dn.l.delay * 1000 / hz;
++		dn.l.burst = div64(dn.l.burst, 8 * DN_CREDIT_HZ);
++		dn.l.delay = dn.l.delay / 1000;
+ 		memcpy(*start, &dn.l, sizeof(dn.l));
+ 	} else if (o.type == DN_SCH) {
+ 		/* Set dn.s.sch.oid.id to the number of instances */
+@@ -1567,13 +1612,13 @@ config_link(struct dn_link *p, struct dn_id *arg)
+ 	/*
+ 	 * The config program passes parameters as follows:
+ 	 * bw = bits/second (0 means no limits),
+-	 * delay = ms, must be translated into ticks.
++	 * delay = ms, must be translated into us (SUBTICK.md).
+ 	 * qsize = slots/bytes
+ 	 * burst ???
+ 	 */
+-	p->delay = (p->delay * hz) / 1000;
+-	/* Scale burst size: bytes -> bits * hz */
+-	p->burst *= 8 * hz;
++	p->delay *= 1000;
++	/* Scale burst size: bytes -> bits * DN_CREDIT_HZ */
++	p->burst *= 8 * DN_CREDIT_HZ;
+ 
+ 	DN_BH_WLOCK();
+ 	/* do it twice, base link and FIFO link */
+@@ -2585,6 +2630,9 @@ ip_dn_init(void)
+ 
+ 	dn_tasks_started = 1;
+ 	TASK_INIT(&dn_task, 0, dummynet_task, NULL);
++	TASK_INIT(&dn_fine_task, 0, dummynet_fine_task, NULL);
++	mtx_init(&dn_fine_mtx, "dn_fine", NULL, MTX_SPIN);
++	callout_init_mtx(&dn_fine, &dn_fine_mtx, 0);
+ 	dn_tq = taskqueue_create_fast("dummynet", M_WAITOK,
+ 	    taskqueue_thread_enqueue, &dn_tq);
+ 	taskqueue_start_threads(&dn_tq, 1, PI_NET, "dummynet");
+@@ -2608,8 +2656,11 @@ ip_dn_destroy(int last)
+ 	}
+ 
+ 	callout_drain(&dn_timeout);
++	callout_drain(&dn_fine);
+ 	taskqueue_drain(dn_tq, &dn_task);
++	taskqueue_drain(dn_tq, &dn_fine_task);
+ 	taskqueue_free(dn_tq);
++	mtx_destroy(&dn_fine_mtx);
+ }
+ 
+ static int
