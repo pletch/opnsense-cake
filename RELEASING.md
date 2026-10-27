@@ -58,7 +58,7 @@ digests over a connection (`plugin/sign-server.py`).
    new version, not a re-tag.
 
    The `packages` workflow runs the tests and compiles every variant of
-   the scheduler (`test/build-variants.sh`), then builds both packages in a
+   the scheduler (`test/build-variants.sh`), then builds the three packages in a
    FreeBSD VM from the commits and the kernel set pinned in
    `plugin/build.conf` (it fails if the kernel set's `dummynet.ko` is not
    the pinned one), attests their provenance, and creates a draft release

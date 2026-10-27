@@ -40,7 +40,7 @@ On an OPNsense machine of the target series (a VM will do), as root:
 
    This builds `cake-kmod` (`kmod/build.sh`), installs it, and builds
    `os-cake` with the `opnsense/plugins` framework from the series' stable
-   branch, which needs network access. Both packages end up in `/root/pkgs`.
+   branch, which needs network access. All three packages end up in `/root/pkgs`.
 
 ### Rebuild a release exactly
 
@@ -65,19 +65,19 @@ VM, and only their `dn_cake.ko` is known to reproduce.
 
 ## Install
 
-Get the two packages onto the firewall: your own build, or a release's,
+Get the three packages onto the firewall: your own build, or a release's,
 which can be fetched and checked on the firewall itself (as root, with the
 versions of that release):
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.5
-fetch $R/cake-kmod-1.4.5.pkg $R/os-cake-1.3.4.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.0
+fetch $R/cake-kmod-1.5.0.pkg $R/dummynet-st-1.0.0.pkg $R/os-cake-1.4.0.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
-Both must say `OK`. Then install `cake-kmod` first, and register `os-cake`
-as an installed plugin:
+All three must say `OK`. Then install `cake-kmod` and `dummynet-st`
+first, and register `os-cake` as an installed plugin:
 
 ```sh
 pkg add cake-kmod-<version>.pkg

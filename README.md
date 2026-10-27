@@ -82,7 +82,7 @@ scheduler.
 
 ### Install the packages
 
-Both packages are ready built for **OPNsense 26.7 (amd64)**, so there is
+The packages are ready built for **OPNsense 26.7 (amd64)**, so there is
 nothing to build. They are in a signed package repository, and attached to
 the [releases](https://github.com/pletch/opnsense-cake/releases).
 
@@ -109,32 +109,33 @@ pkg install -r cake os-cake
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
-`pkg update -r cake` must say `2 packages processed`. If it prints `No
+`pkg update -r cake` must say `3 packages processed`. If it prints `No
 trusted public keys found` or `No trusted certificate`, the catalogue does
 not match the fingerprint, and pkg installs nothing from the repository
 (check the fingerprint against [Security notes](#security-notes) and the
 release notes). pkg checks every package it installs against the signed
-catalogue; `os-cake` brings `cake-kmod` along. The last command registers
+catalogue; `os-cake` brings `cake-kmod` and `dummynet-st` along. The last command registers
 the plugin, as the Plugins page does when it installs one; from the shell,
 `pkg` skips that, and System → Firmware → Plugins would list `os-cake` as
 *misconfigured*. A firewall that installed the packages from files moves
-over to the repository with `pkg install -fy -r cake cake-kmod os-cake`.
+over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-cake`.
 
 **From the files:** with the versions of the latest release,
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.4.5
-fetch $R/cake-kmod-1.4.5.pkg $R/os-cake-1.3.4.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.0
+fetch $R/cake-kmod-1.5.0.pkg $R/dummynet-st-1.0.0.pkg $R/os-cake-1.4.0.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.4.5.pkg
-pkg add os-cake-1.3.4.pkg
+pkg add cake-kmod-1.5.0.pkg
+pkg add dummynet-st-1.0.0.pkg
+pkg add os-cake-1.4.0.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
-`sha256sum -c` must say `OK` for both packages; `SHA256SUMS.sig` on the
+`sha256sum -c` must say `OK` for the three packages; `SHA256SUMS.sig` on the
 release signs `SHA256SUMS` (see [`SECURITY.md`](SECURITY.md#verifying-packages)).
-Install `cake-kmod` first: `os-cake` depends on it. Registered, the plugin
+Install `cake-kmod` and `dummynet-st` first: `os-cake` depends on them. Registered, the plugin
 is listed as *orphaned*, as any plugin installed from a file. That is
 expected. Building the packages yourself (for another series, or from
 source) is in [`plugin/README.md`](plugin/README.md).
