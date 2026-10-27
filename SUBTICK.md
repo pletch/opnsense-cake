@@ -85,4 +85,50 @@ what has been measured along the way. Work happens on the
 
 ## Results
 
-None yet.
+### Phase 0: stock dummynet at kern.hz 1000, 4000, 10000
+
+Measured 2026-10-27 on the bench (cake-kmod 1.4.5, stock `dummynet.ko`,
+VMs pinned: router qemu on host CPUs 0–1, client on 2–3, host otherwise
+idle). `test/subtick-baseline.sh` at 300 Mbit/s each way with CAKE, 4
+TCP downloads; `test/contention.sh bench` and `test/run-lul.sh cake` (30
+s) at 50 Mbit/s.
+
+| | 1000 | 4000 | 10000 |
+|---|---|---|---|
+| host CPU of the router's qemu, no traffic | 32%, 26% | 51% | 105%, 105% |
+| under the TCP load: router idle / host qemu | 87% / 84%, 83% / 89% | 76% / 152% | 85% / 164% |
+| ticks late under the TCP load | 3.9%, 4.8% | 12.8% | 6.5% |
+| bursts out of the download pipe: per s, mean packets, largest | 976, 25.4, 146; 960, 26.0, 124 | 1898, 12.9, 156 | 1796, 13.7, 100 |
+| Bulk flow against greedy Voice (Mbit/s, loss) | 4.1 (17%), 4.2 (16%), 4.2 (16%) | 3.8 (24%) | 3.9 (21%), 4.3 (14%), 3.8 (24%) |
+| Voice RTT median against greedy Bulk | 0.88–0.93 ms | 0.92 ms | 1.97–1.98 ms |
+| rrul ICMP median / 99th percentile | 1.85 / 5.49 ms | 1.48 / 5.98 ms | 1.68 / 2.90 ms |
+| rrul UDP BK median | 4.93 ms | 4.68 ms | 3.73 ms |
+
+- **dummynet does tick at 10 kHz.** DTrace on `dummynet_task` under the
+  TCP load at `kern.hz=10000`: 9,300 runs/s, most 64–127 µs apart.
+  Still, the capture shows only half the bursts of 1000 Hz (about 940
+  gaps/s of 0.5–1 ms remain): the packets arrive from the client VM in
+  bursts about a millisecond apart, and between them the pipe runs empty
+  (287 of 300 Mbit/s). The bench cannot show release finer than that.
+  An unpaced UDP flood (`LOAD=udp`) keeps the pipe backlogged but loads
+  the router itself (41% interrupt, 70% of ticks late at 10 kHz), so it
+  measures overload instead.
+- **Tin shares do not depend on kern.hz any more.** Bulk against greedy
+  Voice is 3.8–4.3 Mbit/s at every rate, within the run-to-run spread
+  (Linux 4.2): the 1.4.2 link clock already took the tick out of the
+  scheduler's decisions. Finer release would not improve them on this
+  bench.
+- **A faster kern.hz costs CPU all the time.** dummynet re-arms its
+  callout every tick even with no traffic, and the router's qemu goes
+  from about 30% of a host CPU to 105% idle at 10 kHz, and from 85% to
+  160% under load; at 4000 Hz an eighth of the ticks ran late. Voice RTT
+  doubled at 10 kHz, likely the vCPUs' contention. (That the idle cost
+  is dummynet's callout rather than the kernel's own hardclock is not yet
+  checked.)
+- **Gate.** `kern.hz=10000` is no substitute in a VM: it costs a host CPU
+  at idle for little gain here. But this bench gains little from finer
+  release at all; the case for the fork is a fast NIC feeding a slower
+  shaped link on real hardware (DESIGN.md, release bursts), and a fork
+  that arms its timer only when packets are due would also drop the idle
+  cost. Next: a burst capture on real hardware at 1000 and 4000 Hz, and
+  phase 1 in the harness.
