@@ -26,9 +26,9 @@
 
 # Build both packages from scratch on FreeBSD (or OPNsense) of the series'
 # release, as the CI does: opnsense/src and opnsense/plugins at the commits
-# in build.conf, and the dummynet.ko of OPNsense's newest kernel set for
-# the series. Writes the packages, SHA256SUMS and CONTENTS (the SHA256 of
-# every file in each package) to the output directory.
+# in build.conf, and the dummynet.ko of the kernel set it names, which must
+# have the SHA256 it gives. Writes the packages, SHA256SUMS and CONTENTS
+# (the SHA256 of every file in each package) to the output directory.
 #
 #	ci-build.sh output-directory [release tag to compare with]
 #
@@ -50,18 +50,23 @@ SETS=https://pkg.opnsense.org/${ABI}/${SERIES}/sets
 WRK=$(mktemp -d -t cake-ci)
 trap 'rm -rf "${WRK}"' EXIT
 
+echo ">>> dummynet.ko from ${SETS}/${KSET}"
+fetch -qo "${WRK}/${KSET}" "${SETS}/${KSET}"
+mkdir "${WRK}/kernel"
+tar -xf "${WRK}/${KSET}" -C "${WRK}/kernel" ./boot/kernel/dummynet.ko
+# the package records this dummynet.ko as the one the module matches, so it
+# has to be the one the pinned sources are known to match
+DIGEST=$(sha256 -q "${WRK}/kernel/boot/kernel/dummynet.ko")
+if [ "${DIGEST}" != "${DUMMYNET_SHA256}" ]; then
+	echo ">>> ${KSET} has dummynet.ko ${DIGEST}, build.conf expects ${DUMMYNET_SHA256}" >&2
+	exit 1
+fi
+
 echo ">>> opnsense/src ${SRC_COMMIT}"
 git clone -q --filter=blob:none --no-checkout --sparse -b "stable/${SERIES}" \
     https://github.com/opnsense/src.git "${WRK}/src"
 git -C "${WRK}/src" sparse-checkout set sys sbin/ipfw share/mk
 git -C "${WRK}/src" checkout -q "${SRC_COMMIT}"
-
-KSET=$(fetch -qo - "${SETS}/" | grep -o "kernel-${SERIES}[0-9.]*-${ABI##*:}\.txz" |
-    sort -u -V | tail -1)
-echo ">>> dummynet.ko from ${SETS}/${KSET}"
-fetch -qo "${WRK}/${KSET}" "${SETS}/${KSET}"
-mkdir "${WRK}/kernel"
-tar -xf "${WRK}/${KSET}" -C "${WRK}/kernel" ./boot/kernel/dummynet.ko
 
 SRCDIR="${WRK}/src" DUMMYNET="${WRK}/kernel/boot/kernel/dummynet.ko" \
     SERIES="${SERIES}" PLUGINS_COMMIT="${PLUGINS_COMMIT}" \

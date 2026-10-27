@@ -19,7 +19,11 @@ permissions:
   contents: read
 
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: tests
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -37,8 +41,10 @@ jobs:
           envs: COMPARE
           prepare: |
             pkg install -y git-lite
-            git config --global --add safe.directory '*'
-          run: sh plugin/ci-build.sh out $COMPARE
+          # the checkout is synced in by another user: trust it, and only it
+          run: |
+            git config --global --add safe.directory "$PWD"
+            sh plugin/ci-build.sh out $COMPARE
 
       - name: Attest the packages
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

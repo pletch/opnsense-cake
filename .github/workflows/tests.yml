@@ -1,13 +1,16 @@
 # The userland tests, on every push and pull request: the fuzzer, the
 # packet-by-packet and COBALT comparisons with Linux's sch_cake, and the
-# plugin wrapper's unit tests. The VM suites (robustness.sh, features.sh)
-# need the test bench and are run by hand.
+# plugin wrapper's and the repository signing checks' unit tests. The VM
+# suites (robustness.sh, features.sh) need the test bench and are run by
+# hand. The packages workflow runs these first too, and builds only if they
+# pass.
 name: tests
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -37,9 +40,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: wrapper unit tests
         run: python3 test/plugin-lib.py
+      - name: signing server checks
+        run: python3 test/sign-check.py
       - name: syntax of the shell, Python and PHP sources
         run: |
           for f in $(git ls-files '*.sh'); do sh -n "$f"; done
           git ls-files '*.py' | xargs python3 -c 'import ast, sys
           for f in sys.argv[1:]: ast.parse(open(f).read(), f)'
-          for f in $(git ls-files '*.php'); do php -l "$f" >/dev/null; done
+          for f in $(git ls-files '*.php' '*.inc'); do php -l "$f" >/dev/null; done

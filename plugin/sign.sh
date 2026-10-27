@@ -29,9 +29,12 @@
 # check the signature against the key's fingerprint (signature_type
 # "fingerprints"), the SHA256 of plugin/keys/cake-repo.pub.
 #
-#	sign.sh key.pem		with the key on this machine
-#	sign.sh host:port	through sign-server.py on the machine with the
-#				key (reached with ssh -R, say)
+#	sign.sh key.pem repository-directory
+#		with the key on this machine
+#	sign.sh host:port repository-directory
+#		through sign-server.py on the machine with the key (reached
+#		with ssh -R, say), which is sent the catalogue file being
+#		signed, and signs it only if it lists the release's packages
 
 read -t 5 SUM || exit 1
 case "${SUM}" in
@@ -43,7 +46,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$1" ]; then
 	SIG=$(printf %s "${SUM}" | openssl dgst -sha256 -sign "$1" | openssl base64 -A)
 else
-	SIG=$(echo "${SUM}" | nc -N "${1%:*}" "${1##*:}")
+	# pkg passes only the SHA256; the file is in the repository directory
+	# while it waits (packagesite.yaml, then data)
+	FILE=
+	for NAME in packagesite.yaml data; do
+		if [ -f "$2/${NAME}" ] && [ "$(sha256 -q "$2/${NAME}")" = "${SUM}" ]; then
+			FILE=${NAME}
+		fi
+	done
+	[ -n "${FILE}" ] || exit 1
+	SIG=$({ echo "${SUM} ${FILE} $(stat -f %z "$2/${FILE}")"; cat "$2/${FILE}"; } |
+	    nc -N "${1%:*}" "${1##*:}")
 fi
 [ -n "${SIG}" ] || exit 1
 echo SIGNATURE

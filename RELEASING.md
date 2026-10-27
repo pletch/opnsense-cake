@@ -53,28 +53,38 @@ digests over a connection (`plugin/sign-server.py`).
    git push origin main vX.Y.Z
    ```
 
-   The `packages` workflow builds both packages in a FreeBSD VM from the
-   commits in `plugin/build.conf`, attests their provenance, and creates a
-   draft release with the packages and `SHA256SUMS`.
+   The `packages` workflow runs the tests, then builds both packages in a
+   FreeBSD VM from the commits and the kernel set pinned in
+   `plugin/build.conf` (it fails if the kernel set's `dummynet.ko` is not
+   the pinned one), attests their provenance, and creates a draft release
+   with the packages and `SHA256SUMS`.
 4. Check the draft's packages: install them on the bench, and if you like,
    rebuild them yourself with `plugin/ci-build.sh` and compare
    `SHA256SUMS` (the builds are reproducible).
-5. Sign the repository. With the key on the FreeBSD or OPNsense machine:
+5. Sign the repository, from the draft's files: `repo.sh` uses exactly the
+   packages its `SHA256SUMS` lists, refuses any that differ, and checks the
+   catalogue it made is signed with the key (`pkg repo` reports success
+   even when signing fails). With the key on the FreeBSD or OPNsense
+   machine:
 
    ```sh
-   gh release download vX.Y.Z --pattern '*.pkg' --dir pkgs
+   gh release download vX.Y.Z --dir release
    git worktree add site gh-pages
-   sh plugin/repo.sh cake-repo.key site pkgs/*.pkg
+   sh plugin/repo.sh cake-repo.key release site
    ```
 
-   With the key on another machine, run the signing server there, which
-   listens on 127.0.0.1 only and signs two digests (packagesite and data),
-   forward it to the FreeBSD machine, and build the repository there:
+   With the key on another machine, download the draft's files there too,
+   and run the signing server with them. It listens on 127.0.0.1 only, and
+   signs a catalogue file only if it lists exactly those packages, with
+   their checksums and sizes (`sign.sh` sends it the file being signed),
+   each of the two files once. Forward it to the FreeBSD machine, and build
+   the repository there:
 
    ```sh
-   key$ python3 plugin/sign-server.py cake-repo.key &
+   key$ gh release download vX.Y.Z --dir release
+   key$ python3 plugin/sign-server.py cake-repo.key release &
    key$ ssh -R 8471:127.0.0.1:8471 freebsd-machine
-   freebsd$ sh plugin/repo.sh 127.0.0.1:8471 site pkgs/*.pkg
+   freebsd$ sh plugin/repo.sh 127.0.0.1:8471 release site
    ```
 
    (A QEMU guest with user networking reaches the host's 127.0.0.1 at
@@ -85,8 +95,8 @@ digests over a connection (`plugin/sign-server.py`).
    openssl dgst -sha256 -sign cake-repo.key -out site/26.7/SHA256SUMS.sig site/26.7/SHA256SUMS
    ```
 
-   Check `site/26.7/SHA256SUMS` against the release's, commit `site/` to
-   `gh-pages` and push it, and attach `SHA256SUMS.sig` to the release.
+   `site/26.7/SHA256SUMS` is the release's. Commit `site/` to `gh-pages`
+   and push it, and attach `SHA256SUMS.sig` to the release.
 6. Write the notes, with the package SHA256s and the key fingerprint, and
    publish the release.
 

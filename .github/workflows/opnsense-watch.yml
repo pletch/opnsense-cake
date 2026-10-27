@@ -44,6 +44,6 @@ jobs:
           if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
             echo "Issue already open."
           else
-            gh issue create --title "$title" --body "The newest OPNsense kernel set for $SERIES, \`$kset\`, ships a \`dummynet.ko\` with SHA256 \`$now\`. The latest release, $tag, is built against \`$known\`. On firewalls updated to it, the plugin leaves each pipe on its own scheduler until \`cake-kmod\` is rebuilt against the new kernel (update \`plugin/build.conf\` and release)."
+            gh issue create --title "$title" --body "The newest OPNsense kernel set for $SERIES, \`$kset\`, ships a \`dummynet.ko\` with SHA256 \`$now\`. The latest release, $tag, is built against \`$known\`. On firewalls updated to it, the plugin leaves each pipe on its own scheduler until \`cake-kmod\` is rebuilt against the new kernel: in \`plugin/build.conf\`, move \`SRC_COMMIT\` to that kernel's source and set \`KSET\` and \`DUMMYNET_SHA256\` to \`$kset\` and \`$now\`, then release."
           fi
           exit 1

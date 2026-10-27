@@ -417,8 +417,9 @@ scripts are in [`test/`](test/); the design they test is in
 - Builds and CI (after 1.4.4):
   - `plugin/ci-build.sh` builds both packages from scratch, from the
     `opnsense/src` and `opnsense/plugins` commits in `plugin/build.conf`
-    and the `dummynet.ko` of OPNsense's newest kernel set (26.7.8, the same
-    file as 26.7's). On the test VM, in 80 s, its `dn_cake.ko` is byte for
+    and the `dummynet.ko` of the kernel set pinned there with its SHA256
+    (26.7.8, the same file as 26.7's); a kernel set whose `dummynet.ko`
+    differs fails the build, before anything is compiled. On the test VM, in 80 s, its `dn_cake.ko` is byte for
     byte the 1.4.4 release's. Two builds give byte-identical packages: every
     file gets the commit's time, and `dnctl` is built without a separate
     debug file, whose CRC in the binary depended on the build directory
@@ -427,8 +428,10 @@ scripts are in [`test/`](test/); the design they test is in
     `sched-diff.sh` (lockstep and link clock), `cobalt-diff.sh`, the
     plugin wrapper's unit tests (`test/plugin-lib.py`: options, masks,
     memory limit, invalid and injected values) and syntax checks on every
-    push. `packages.yml` builds the packages in a FreeBSD 15.1 VM on a
-    tag, with provenance attestations, and drafts the release;
+    push, and the signing server's checks (`test/sign-check.py`).
+    `packages.yml` runs those tests first, then builds the packages in a
+    FreeBSD 15.1 VM on a tag, with provenance attestations, and drafts the
+    release;
     `opnsense-watch.yml` checks weekly that OPNsense's newest kernel set
     still ships the `dummynet.ko` the latest `cake-kmod` is built against,
     and opens an issue if not.
@@ -438,3 +441,13 @@ scripts are in [`test/`](test/); the design they test is in
     pkg drops the repository when checked against another key, and
     refuses a package changed after signing, by size or, at the same
     size, by checksum; an edited `SHA256SUMS` fails its signature check.
+  - Signing with the key on another machine (`plugin/sign-server.py`),
+    on the bench with the v1.4.5 release: the server signs a catalogue
+    only if it lists exactly the release's packages with their pkg
+    checksums and sizes, which it computes from the release's files
+    (BLAKE2b in pkg's base32, the same as pkg 2.8.4 writes). It refused a
+    bare digest, and the catalogue of a repository with another
+    `os-cake`; `repo.sh` refused a release directory with a changed
+    package before asking for a signature, and fails when signing is
+    refused, which `pkg repo` itself reports as success. The signed
+    catalogue is byte for byte the published 1.4.5 one.
