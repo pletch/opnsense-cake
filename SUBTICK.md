@@ -526,10 +526,63 @@ FQ-PIE gains as FQ-CoDel does; with a single queue the pings wait behind
 the bulk flows, which the AQM's target sets (PIE's is 15 ms), so finer
 release does not show. No panics, lock warnings or CAKE check errors.
 
-**Still to do on real hardware:** the CPU cost per release (the bench's
+**Was still to do on real hardware** (done below): the CPU cost per release (the bench's
 nested VM puts it at about 80 µs, which bare metal should not), a burst
 capture as in DESIGN.md (2.5 Gbit/s NICs shaping 1950 Mbit/s) at the tick
 and at 100 and 250 µs, and the latency gains with a NIC much faster than
 the shaped rate. The fork built on the bench VM loads on a firewall with
 the same kernel: the VM's `dummynet.ko` is the pinned kernel set's
 (26.7.8, `DUMMYNET_SHA256` in `plugin/build.conf`).
+
+### Phase 5: a live firewall
+
+Measured 2026-10-27 on a live OPNsense 26.7 firewall: a Proxmox VM on an
+Intel i5-12600K, 4 vCPUs, `kern.hz=1000`, kernel 15.1-p4 with the pinned
+`dummynet.ko`; Intel `igc` 2.5 Gbit/s NICs in passthrough; os-cake 1.3.4
+and cake-kmod 1.4.5 with CAKE on both pipes (download 1950 Mbit/s,
+besteffort, dual-dsthost, wash, ingress; upload 2070 Mbit/s, diffserv4,
+dual-srchost; both ECN and the ethernet overhead). The fork's release
+build from the bench loaded as it was. The load was Waveform's bufferbloat
+test from a wired LAN client; `test/subtick-fw-run.sh` waits for the
+download phase (over 500 Mbit/s out on the LAN VLAN), measures the CPU
+(all 4 vCPUs), late ticks and the fork's releases over 5 s, then captures
+100,000 full-size packets leaving on the LAN VLAN.
+
+| run | captured rate | router idle | bursts per s, mean / largest packets | gaps 0.5–1 ms | releases between ticks: per s, packets each, mean late, later than a slot |
+|---|---|---|---|---|---|
+| stock | 1847 Mbit/s | 79.1% | 1007, 165 / 170 | 599 | – |
+| fork, tick | 1574 | 88.2% | 1118, 121 / 164 | 722 | – |
+| fork, 250 µs | 1828 | 85.2% | 4011, 40 / 64 | 0 | 3875, 48.3, 5 µs, 0.0% |
+| fork, 100 µs | 1685 | 83.1% | 9551, 15 / 49 | 0 | 9045, 21.4, 5 µs, 0.1% |
+| stock, again | 1462 | 85.9% | 1528, 82 / 159 | 324 | – |
+
+- **On time.** Releases between ticks ran 5 µs late on average at both 250
+  and 100 µs, against 61–75 µs on the bench's nested VM, and almost never
+  later than a slot: the slot holds on real hardware.
+- **Bursts as modelled.** At the tick a release carries a millisecond of
+  the link (165 packets at 1847 Mbit/s); at 250 µs 40, at 100 µs 15, with
+  the largest burst down from 170 to 64 and 49, and no gaps between ticks
+  left. The second stock run's rate was lower (the internet path to the
+  test server varied between runs, 1462–1847 Mbit/s), with the pipe not
+  always full, hence its smaller mean burst and mixed gaps.
+- **No measurable CPU cost.** Busy time per Gbit/s captured: stock 11.3
+  and 9.6%, the fork at the tick 7.5%, at 250 µs 8.1%, at 100 µs 10.0%
+  (of 4 vCPUs): 9000 releases a second fall within stock's own spread. The
+  bench's 80 µs per release was its nested virtualization.
+- **Latency from the client** was not recorded: Waveform's grades and
+  loaded latency for these runs are missing, so the latency gain on this
+  link is not measured here; on the bench it was 1.9 to 0.5 ms (Voice RTT)
+  at 50 Mbit/s.
+
+The swap: `ipfw -q pipe|sched|queue flush`, unload `dn_cake.ko` and
+`dummynet.ko`, `kldload` the fork, then os-cake's own rule builder
+(`dnctl.cake_pipes()` and `load_cake()`) put CAKE back on the pipes with
+the same settings, with the fork's built-in CAKE; WAN traffic stopped for
+a second or two. os-cake's check refuses `dn_cake.ko` while the fork is
+loaded (it sees no `dummynet.ko` file), so a shaper reload during the
+test would only fall back to the pipes' own scheduler. The restore was
+the same flush, `kldload dummynet` and os-cake's `dnctl.py`.
+
+**Gate:** passed. The per-release cost that was the open question is not
+measurable on this firewall at 100 µs and 1.5–1.8 Gbit/s, releases are on
+time, and bursts shrink as modelled. Phase 6 decides what to do with it.
