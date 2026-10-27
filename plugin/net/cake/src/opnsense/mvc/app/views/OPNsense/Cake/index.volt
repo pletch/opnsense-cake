@@ -132,7 +132,13 @@
             ajaxGet("/api/cake/service/status", {}, function(data, status) {
                 let $status = $("#cake_status");
                 $status.removeClass("alert-info alert-success alert-warning");
-                if (data.usable) {
+                let st = data.subtick || {};
+                if (st.loaded) {
+                    $status.addClass("alert-success").text(
+                        "{{ lang._('dummynet-st is loaded, releasing packets at most %s us after they are due; %s pipes use its CAKE.') }}"
+                        .replace("%s", st.now_release_us).replace("%s", data.schedulers.length)
+                    );
+                } else if (data.usable) {
                     $status.addClass("alert-success").text(
                         "{{ lang._('The CAKE kernel module is loaded, %s pipes use it.') }}"
                         .replace("%s", data.schedulers.length)
@@ -147,7 +153,9 @@
                 }
 
                 let $hz = $("#cake_hz");
-                if (data.hz && data.hz < 1000) {
+                /* releasing between ticks, dummynet-st takes the tick out of CAKE and the AQMs */
+                let fine = st.loaded && data.hz && st.now_release_us < 1000000 / data.hz;
+                if (data.hz && data.hz < 1000 && !fine) {
                     let vm = data.vm_guest && data.vm_guest != "none";
                     $hz.text(
                         (vm ? "{{ lang._('kern.hz is %s, the FreeBSD default in a virtual machine.') }}"
@@ -186,7 +194,22 @@
             }
         );
 
+        mapDataToFormUI({'frm_general': "/api/cake/settings/get"}).done(function() {
+            formatTokenizersUI();
+            $('.selectpicker').selectpicker('refresh');
+        });
+
         $("#reconfigureAct").SimpleActionButton({
+            onPreAction: function() {
+                /* the general settings first, the shaper reload applies them */
+                const dfObj = new $.Deferred();
+                saveFormToEndpoint("/api/cake/settings/set", 'frm_general', function() {
+                    dfObj.resolve();
+                }, true, function() {
+                    dfObj.reject();
+                });
+                return dfObj;
+            },
             onAction: function() {
                 updateStatus();
             }
@@ -209,6 +232,10 @@
 <div class="alert alert-warning" role="alert" id="cake_hz" style="display: none;"></div>
 
 <div class="alert alert-warning" role="alert" id="cake_warnings" style="display: none;"></div>
+
+<div class="content-box">
+    {{ partial("layout_partials/base_form", ['fields': formGeneral, 'id': 'frm_general']) }}
+</div>
 
 <div class="content-box">
     {{ partial('layout_partials/base_bootgrid_table', formGridPipe) }}

@@ -41,6 +41,18 @@ DNCTL = '/usr/local/libexec/cake/dnctl'
 KMOD_LOADED = '/var/run/cake-kmod.loaded'
 # the pidfile of the CAKE entry in the services list, see plugins.inc.d/cake.inc
 ACTIVE = '/var/run/cake.pid'
+# dummynet-st: dummynet with CAKE built in and packets released between
+# ticks (SUBTICK.md), loaded instead of dummynet.ko and dn_cake.ko
+ST_KMOD = '/boot/modules/dummynet_st.ko'
+ST_KERNEL = '/usr/local/libexec/dummynet-st/kernel'
+ST_DUMMYNET = '/usr/local/libexec/dummynet-st/dummynet.sha256'
+# the SHA256 of the dummynet_st.ko the wrapper loaded
+ST_LOADED = '/var/run/dummynet-st.loaded'
+# there from loading dummynet_st.ko until its rules are in, kept across a reboot: left
+# behind, a crash on the way stops the wrapper trying it again at every boot
+ST_TRYING = '/conf/dummynet-st.loading'
+# net.inet.ip.dummynet.release_us when the setting is missing or invalid
+RELEASE_DEFAULT = 250
 
 
 # the values the model allows, checked again as config.xml may be edited or
@@ -308,3 +320,118 @@ def kmod_status(load=False):
     result['usable'] = result['reason'] == '' and (result['loaded'] or not load)
     result['current'] = kmod_current() if result['loaded'] else None
     return result
+
+
+def subtick_settings():
+    """ whether to use dummynet-st, and the longest a due packet waits for release.
+    On unless switched off, also with a config.xml from before the setting.
+    :return: (bool, us)
+    """
+    general = ET.parse(CONFIG).getroot().find('./OPNsense/Cake/general')
+    if general is None:
+        return True, RELEASE_DEFAULT
+    release = int_value(general.findtext('release_us'), 10, 10000)
+    return (general.findtext('subtick') or '1') == '1', release or RELEASE_DEFAULT
+
+
+def file_digest(path):
+    """ SHA256 of a file, None if it cannot be read """
+    try:
+        with open(path, 'rb') as f_in:
+            return hashlib.sha256(f_in.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def st_loaded():
+    """ whether dummynet_st.ko is the loaded dummynet """
+    return subprocess.run(['/sbin/kldstat', '-q', '-n', 'dummynet_st.ko']).returncode == 0
+
+
+def st_status():
+    """ whether dummynet-st is installed, built for the running kernel, and loaded. Like
+    cake-kmod, it is built for one FreeBSD release and replaces one stock dummynet.ko,
+    whose SHA256 it records; the stock file is checked on disk, as the fork may be the
+    one loaded.
+    :return: dict
+    """
+    result = {'installed': os.path.isfile(ST_KMOD), 'loaded': st_loaded(), 'reason': ''}
+    running = os.uname().release.split('-')[0]
+    if not result['installed']:
+        result['reason'] = 'dummynet-st is not installed'
+    else:
+        try:
+            with open(ST_KERNEL) as f_in:
+                built = f_in.read().strip()
+            with open(ST_DUMMYNET) as f_in:
+                known = [line.strip() for line in f_in if line.strip()]
+        except OSError:
+            built, known = None, []
+        if built != running:
+            result['reason'] = 'dummynet-st is built for FreeBSD %s, this is %s' % (built, running)
+        elif file_digest(DUMMYNET) not in known:
+            result['reason'] = '%s is not the one dummynet-st replaces (kernel updated?)' % DUMMYNET
+    if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:
+        result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' \
+                           'Apply on the CAKE page tries it again'
+    result['usable'] = result['reason'] == ''
+    # an upgrade replaced the file since the wrapper loaded it
+    result['current'] = None
+    if result['loaded']:
+        try:
+            with open(ST_LOADED) as f_in:
+                result['current'] = f_in.read().strip() == file_digest(ST_KMOD)
+        except OSError:
+            result['current'] = False
+    return result
+
+
+def load_dummynet(fork):
+    """ make the forked dummynet_st.ko (fork) or the stock dummynet.ko the loaded dummynet,
+    reloading a dummynet_st.ko an upgrade replaced. This removes every pipe, scheduler and
+    queue, and dn_cake.ko; the caller loads the rules again. If dummynet_st.ko does not
+    load, the stock dummynet is loaded instead.
+    :return: whether the one asked for is loaded
+    """
+    loaded = st_loaded()
+    if loaded == fork and (not fork or st_status()['current']):
+        return True
+    for what in ['pipe', 'sched', 'queue']:
+        subprocess.run(['/sbin/ipfw', '-q', what, 'flush'], capture_output=True)
+    subprocess.run(['/sbin/kldunload', '-n', 'dn_cake.ko'], capture_output=True)
+    for name in ['dummynet_st.ko', 'dummynet.ko']:
+        subprocess.run(['/sbin/kldunload', '-n', name], capture_output=True)
+    if fork:
+        st_trying(True)
+    if fork and subprocess.run(['/sbin/kldload', ST_KMOD], capture_output=True).returncode == 0:
+        try:
+            with open(ST_LOADED + '.new', 'w') as f_out:
+                f_out.write('%s\n' % file_digest(ST_KMOD))
+            os.replace(ST_LOADED + '.new', ST_LOADED)
+        except OSError:
+            pass
+        return True
+    st_trying(False)
+    if subprocess.run(['/sbin/kldstat', '-q', '-m', 'dummynet']).returncode != 0:
+        subprocess.run(['/sbin/kldload', 'dummynet'], capture_output=True)
+    return not fork and not st_loaded()
+
+
+def st_trying(trying):
+    """ mark dummynet_st.ko being loaded and set up (ST_TRYING), or done with """
+    try:
+        if trying:
+            with open(ST_TRYING, 'w') as f_out:
+                f_out.write('%d\n' % os.getpid())
+                f_out.flush()
+                os.fsync(f_out.fileno())
+        elif os.path.exists(ST_TRYING):
+            os.unlink(ST_TRYING)
+    except OSError:
+        pass
+
+
+def set_release(release_us):
+    """ net.inet.ip.dummynet.release_us of the loaded dummynet_st.ko """
+    subprocess.run(['/sbin/sysctl', '-q', 'net.inet.ip.dummynet.release_us=%d' % release_us],
+                   capture_output=True)

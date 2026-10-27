@@ -586,3 +586,54 @@ the same flush, `kldload dummynet` and os-cake's `dnctl.py`.
 **Gate:** passed. The per-release cost that was the open question is not
 measurable on this firewall at 100 µs and 1.5–1.8 Gbit/s, releases are on
 time, and bursts shrink as modelled. Phase 6 decides what to do with it.
+
+### Phase 6: the package, on by default
+
+The fork ships as a third package, `dummynet-st` (`plugin/dummynet-st/`,
+built by `plugin/build.sh` with the others and so by CI): the release
+build of `patches/dummynet-subtick` as `/boot/modules/dummynet_st.ko`,
+with the FreeBSD release and the stock `dummynet.ko` it replaces recorded
+as cake-kmod records them. os-cake depends on it and uses it unless
+**Sub-tick release** is switched off on its page (general settings above
+the pipes; the release interval there, 250 µs by default, 10–10000):
+
+- **When.** `rc.d/dnctl` loads the stock dummynet, then runs the wrapper
+  (`dnctl.py`), at boot and at every shaper reload. With CAKE entries
+  enabled, the setting on and `dummynet-st` matching the kernel, the
+  wrapper flushes the pipes, unloads `dn_cake.ko` and `dummynet.ko`, loads
+  `dummynet_st.ko`, sets `release_us`, and loads the CAKE rules on its
+  built-in CAKE. Without CAKE entries, switched off, or not matching, it
+  goes back to the stock dummynet and `dn_cake.ko`. Nothing loads the fork
+  at boot, so a fork that fails to load does not stop the firewall coming
+  up.
+- **Fallbacks.** A `dummynet-st` built for another release or another
+  `dummynet.ko`, or one that does not load, leaves the stock dummynet in
+  place, logged and shown as a warning on the page. A crash while the fork
+  loads or its rules go in leaves `/conf/dummynet-st.loading` (kept across
+  reboots); the wrapper then stays on the stock dummynet, and Apply on the
+  CAKE page (configd `cake retry`) clears it and tries again. An upgraded
+  `dummynet_st.ko` replaces the loaded one at the next reload, as for
+  `dn_cake.ko`.
+- **Removing** `dummynet-st` swaps the stock dummynet back before the file
+  goes and reloads the shaper after, whether os-cake is still installed or
+  not.
+- **Status:** the page says whether the fork is in use and its interval;
+  `status.py` reports its counters.
+
+Checked 2026-10-27 on the bench VM with the three packages built there by
+`plugin/build.sh` and installed over the released ones: installing os-cake
+switched the VM's two CAKE entries to the fork at 250 µs (a config.xml
+without the setting counts as on); the API reads and saves the setting and
+rejects 5 µs; switching it off gives the stock dummynet with `dn_cake.ko`,
+on again the fork at 100 µs; a wrong recorded `dummynet.ko` gives the stock
+dummynet with the warning; after a reboot the fork came up at boot with the
+CAKE service running; a marker left as after a crash keeps a reload on the
+stock dummynet, with the warning, until Apply; deleting `dummynet-st` (and
+os-cake with it) brought the stock dummynet back; the CAKE page renders
+with the new settings and its script parses. `test/plugin-lib.py` covers
+the setting's defaults and `st_status()` (26 tests). The VM is back on the
+released 1.4.5 / 1.3.4 from the `cake` repository.
+
+Before a release: version bumps (cake-kmod has the link clock change, os-cake
+the new dependency and setting) and the README's file-install commands, as
+in RELEASING.md, and a soak on a live firewall.

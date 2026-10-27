@@ -44,6 +44,8 @@ class ServiceController extends ApiControllerBase
     {
         if ($this->request->isPost()) {
             $backend = new Backend();
+            /* Apply tries dummynet-st again after a crash left its marker behind */
+            $backend->configdRun('cake retry');
             $backend->configdRun('template reload OPNsense/Shaper');
             $backend->configdRun('template reload OPNsense/IPFW');
 

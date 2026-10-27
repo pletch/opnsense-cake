@@ -40,6 +40,7 @@ class IndexController extends \OPNsense\Base\IndexController
      */
     public function indexAction()
     {
+        $this->view->formGeneral = $this->getForm("general");
         $this->view->formDialogPipe = $this->getForm("dialogPipe");
         $this->view->formGridPipe = $this->getFormGrid("dialogPipe");
         $this->view->pick('OPNsense/Cake/index');

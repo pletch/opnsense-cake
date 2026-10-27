@@ -204,5 +204,107 @@ class LoadedModule(unittest.TestCase):
         self.assertIs(lib.kmod_current(), False)
 
 
+
+class Subtick(unittest.TestCase):
+    """ dummynet-st: the setting, and whether the package can be used """
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED,
+                      lib.ST_TRYING, lib.DUMMYNET, lib.subprocess.run)
+        d = self.dir.name
+        lib.CONFIG = os.path.join(d, 'config.xml')
+        lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
+        lib.ST_KERNEL = os.path.join(d, 'kernel')
+        lib.ST_DUMMYNET = os.path.join(d, 'dummynet.sha256')
+        lib.ST_LOADED = os.path.join(d, 'dummynet-st.loaded')
+        lib.ST_TRYING = os.path.join(d, 'dummynet-st.loading')
+        lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
+        self.loaded = False
+        lib.subprocess.run = self.run_cmd
+
+    def tearDown(self):
+        (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED, lib.ST_TRYING,
+         lib.DUMMYNET, lib.subprocess.run) = self.saved
+        self.dir.cleanup()
+
+    def run_cmd(self, args, **kwargs):
+        # kldstat -q -n dummynet_st.ko
+        return lib.subprocess.CompletedProcess(args, 0 if self.loaded else 1, '', '')
+
+    def general(self, fields):
+        with open(lib.CONFIG, 'w') as f:
+            f.write('<opnsense><OPNsense><Cake>%s<pipes/></Cake></OPNsense></opnsense>' % (
+                '' if fields is None else '<general>%s</general>' % ''.join(
+                    '<%s>%s</%s>' % (k, v, k) for k, v in fields.items())))
+
+    def install(self, release=None, stock=b'stock dummynet', known=None):
+        for path, data in [(lib.ST_KMOD, b'fork'), (lib.DUMMYNET, stock)]:
+            with open(path, 'wb') as f:
+                f.write(data)
+        with open(lib.ST_KERNEL, 'w') as f:
+            f.write((release or os.uname().release.split('-')[0]) + '\n')
+        with open(lib.ST_DUMMYNET, 'w') as f:
+            f.write((known or lib.file_digest(lib.DUMMYNET)) + '\n')
+
+    def test_settings_default_on(self):
+        # a config.xml from before the setting: on, the default interval
+        self.general(None)
+        self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT))
+
+    def test_settings(self):
+        self.general({'subtick': '0', 'release_us': '100'})
+        self.assertEqual(lib.subtick_settings(), (False, 100))
+
+    def test_settings_invalid_interval(self):
+        for value in ['5', '20000', 'x', '']:
+            self.general({'subtick': '1', 'release_us': value})
+            self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT), value)
+
+    def test_not_installed(self):
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertEqual(st['reason'], 'dummynet-st is not installed')
+
+    def test_other_release(self):
+        self.install(release='14.3')
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertIn('built for FreeBSD 14.3', st['reason'])
+
+    def test_other_dummynet(self):
+        self.install(known='0' * 64)
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertIn('is not the one dummynet-st replaces', st['reason'])
+
+    def test_usable(self):
+        self.install()
+        st = lib.st_status()
+        self.assertTrue(st['usable'])
+        self.assertEqual((st['loaded'], st['current']), (False, None))
+
+    def test_crash_marker(self):
+        # left behind by a crash while loading: not used until Apply removes it
+        self.install()
+        lib.st_trying(True)
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertIn('went down while dummynet-st was loading', st['reason'])
+        lib.st_trying(False)
+        self.assertTrue(lib.st_status()['usable'])
+
+    def test_loaded_current_and_upgraded(self):
+        self.install()
+        self.loaded = True
+        with open(lib.ST_LOADED, 'w') as f:
+            f.write(lib.file_digest(lib.ST_KMOD) + '\n')
+        self.assertTrue(lib.st_status()['current'])
+        with open(lib.ST_KMOD, 'wb') as f:
+            f.write(b'fork, upgraded')
+        self.assertFalse(lib.st_status()['current'])
+        os.unlink(lib.ST_LOADED)
+        self.assertFalse(lib.st_status()['current'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -34,13 +34,18 @@
     same way: the rules go in unchanged, which frees and unloads it, then the new one is
     loaded and the CAKE rules go in. The CAKE service shows as running when every enabled
     CAKE entry got CAKE.
+    With dummynet-st installed and not switched off, the CAKE rules go in on the forked
+    dummynet_st.ko instead (CAKE built in, packets released between ticks), loaded in place
+    of dummynet.ko and dn_cake.ko; without CAKE entries, or when it does not match the
+    kernel or load, the stock dummynet comes back.
 """
 import os
 import subprocess
 import sys
 import syslog
 import tempfile
-from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL
+from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
+    load_dummynet, set_release, st_loaded, st_status, st_trying, subtick_settings, ST_KMOD
 
 
 def cake_rule(line, args):
@@ -100,6 +105,28 @@ if __name__ == '__main__':
         enabled = cake_enabled()
         for error in errors:
             syslog.syslog(syslog.LOG_WARNING, error)
+        # dummynet-st, unless switched off: dummynet with CAKE built in, releasing
+        # packets between ticks. Otherwise, or when it does not match the kernel or
+        # does not load, the stock dummynet with dn_cake.ko.
+        st_wanted, release_us = subtick_settings()
+        st = st_status()
+        if pipes and st_wanted and not st['usable']:
+            syslog.syslog(syslog.LOG_WARNING, '%s, using the stock dummynet' % st['reason'])
+        fork = bool(pipes) and st_wanted and st['usable']
+        if not load_dummynet(fork) and fork:
+            syslog.syslog(syslog.LOG_WARNING, 'loading %s failed, using the stock dummynet' % ST_KMOD)
+        if pipes and st_loaded():
+            # before the rules: CAKE sets its targets by it when a pipe is configured
+            st_trying(True)
+            set_release(release_us)
+            result = load_cake(rules_file, pipes)
+            st_trying(False)
+            if result == 0:
+                set_active(len(pipes) == enabled)
+                sys.exit(0)
+            syslog.syslog(syslog.LOG_ERR, 'dnctl failed on the CAKE rules (%d), pipes keep their own scheduler' % result)
+            set_active(False)
+            sys.exit(load_stock(rules_file))
         if pipes and kmod_current() is False:
             syslog.syslog(syslog.LOG_NOTICE, 'the loaded dn_cake.ko is not the one installed, reloading it')
             load_stock(rules_file)

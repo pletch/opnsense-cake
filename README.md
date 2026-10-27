@@ -57,13 +57,20 @@ More documentation:
 ## Install on OPNsense
 
 The plugin route needs no changes to OPNsense's own files and survives its
-updates. There are two packages:
+updates. There are three packages:
 
 - **`cake-kmod`**: `/boot/modules/dn_cake.ko`, and a dnctl that can set CAKE
   parameters, in `/usr/local/libexec/cake/`. It is built for one OPNsense
   series (26.7 is FreeBSD 15.1) and records that release.
+- **`dummynet-st`**: `/boot/modules/dummynet_st.ko`, dummynet with CAKE
+  built in that releases packets between clock ticks
+  ([SUBTICK.md](SUBTICK.md)), built and checked like `cake-kmod`. Nothing
+  loads it at boot: the wrapper swaps it in for the stock `dummynet.ko`
+  while CAKE entries are enabled, unless *Sub-tick release* is switched
+  off on the CAKE page, and uses the stock dummynet and `dn_cake.ko` when
+  it does not match the kernel or does not load.
 - **`os-cake`**: a **Firewall → Shaper → CAKE** page and a dnctl wrapper.
-  It depends on `cake-kmod`.
+  It depends on `cake-kmod` and `dummynet-st`.
 
 `rc.d/dnctl` loads the shaper rules through the wrapper (`dnctl_program`, set
 in `/usr/local/etc/rc.conf.d/dnctl`). The wrapper switches the pipes listed on
@@ -206,13 +213,16 @@ with their results (`test/ticks.sh`).
 - **Turn CAKE off** without uninstalling: disable the CAKE entries and
   Apply. The pipes go back to their own scheduler and the module is
   unloaded.
-- **Remove:** `pkg delete os-cake cake-kmod`, then
+- **Remove:** `pkg delete os-cake dummynet-st cake-kmod`, then
   `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`. The
   CAKE entries stay in the configuration, unused. To drop the repository
   too: `rm -r /usr/local/etc/pkg/repos/cake.conf /usr/local/etc/pkg/fingerprints/cake`.
 - **If the firewall doesn't come up** after enabling CAKE, run
-  `pkg delete -y os-cake cake-kmod` from the console, or restore a VM
-  snapshot.
+  `pkg delete -y os-cake dummynet-st cake-kmod` from the console, or
+  restore a VM snapshot. A crash while the forked dummynet is loaded or
+  its rules go in leaves `/conf/dummynet-st.loading` behind, and the
+  wrapper then uses the stock dummynet until Apply on the CAKE page (or
+  `rm /conf/dummynet-st.loading` and a shaper reload) tries it again.
 
 Details, and building the packages yourself, are in
 [`plugin/README.md`](plugin/README.md).
@@ -254,8 +264,9 @@ privately, as described in [`SECURITY.md`](SECURITY.md).
 ## Security notes
 
 - **It runs in the kernel.** A bug in `dn_cake.ko` can crash the firewall.
-  Keep a way back: a VM snapshot, or console access to run
-  `pkg delete -y os-cake cake-kmod`.
+  `dummynet_st.ko`, which replaces all of dummynet, more so. Keep a way
+  back: a VM snapshot, or console access to run
+  `pkg delete -y os-cake dummynet-st cake-kmod`.
 - **Compatibility is checked against the exact `dummynet.ko`.** The module
   depends on dummynet's internal structures, which no interface version
   covers. From `cake-kmod` 1.3, the package records the SHA256 of the
@@ -312,7 +323,9 @@ sys/netpfil/ipfw/dn_sched_cake.[ch]   kernel scheduler (type "cake", id 8)
 sys/modules/dn_sched_cake/Makefile    out-of-tree kld build -> dn_cake.ko
 plugin/net/cake/                      os-cake, an opnsense/plugins plugin (GUI page, dnctl wrapper)
 plugin/kmod/                          cake-kmod package build (dn_cake.ko + a CAKE capable dnctl)
-plugin/build.sh                       builds both packages on an OPNsense machine
+plugin/dummynet-st/                   dummynet-st package build (dummynet_st.ko)
+plugin/build.sh                       builds the three packages on an OPNsense machine
+patches/dummynet-subtick/             the forked dummynet: patches on opnsense-src-cake.patch, build.sh
 patches/ipfw-cake.patch               ipfw(8)/dnctl(8): "type cake" parameters, display, manual
 patches/opnsense-src-cake.patch       opnsense/src: scheduler in dummynet.ko, wire_len hook, ipfw patch
 patches/opnsense-core-cake.patch      opnsense/core: Traffic Shaper support (older option set)

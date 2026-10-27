@@ -31,7 +31,8 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import cake_pipes, kmod_status, CONFIG, DNCTL
+from lib import cake_enabled, cake_pipes, kmod_status, st_status, subtick_settings, CONFIG, DNCTL, \
+    RELEASE_DEFAULT
 
 # tin names by diffserv mode, in the kernel's tin order, and the order
 # tc(8) shows them in (by priority)
@@ -95,8 +96,30 @@ def pipe_descriptions():
     return result
 
 
+def subtick_status():
+    """ dummynet-st: whether it is wanted, usable and loaded, and its releases between ticks
+    :return: dict
+    """
+    result = st_status()
+    try:
+        result['enabled'], result['release_us'] = subtick_settings()
+    except (OSError, ET.ParseError):
+        result['enabled'], result['release_us'] = True, RELEASE_DEFAULT
+    if result['loaded']:
+        for name in ['release_us', 'release_wakeups', 'release_pkts', 'release_late_us',
+                     'release_late_max', 'release_catchups']:
+            value = sysctl('net.inet.ip.dummynet.' + name)
+            result['now_' + name] = int(value) if value is not None and value.isdigit() else None
+    return result
+
+
 if __name__ == '__main__':
     result = kmod_status()
+    st = subtick_status()
+    result['subtick'] = st
+    if st['loaded']:
+        # CAKE is built into the loaded dummynet, dn_cake.ko does not apply
+        result['usable'], result['reason'] = True, ''
     result['status'] = 'ok'
     result['schedulers'] = []
     # dummynet times everything in clock ticks, and FreeBSD drops to 100 Hz
@@ -110,10 +133,20 @@ if __name__ == '__main__':
         cake_pipes(result['warnings'])
     except (OSError, ET.ParseError):
         pass
+    try:
+        cake_on = cake_enabled() > 0
+    except (OSError, ET.ParseError):
+        cake_on = False
+    if cake_on and st['enabled'] and not st['loaded']:
+        result['warnings'].append('dummynet-st is not in use: %s; the stock dummynet and dn_cake.ko are used '
+                                  'instead (see the system log)' % (st['reason'] or 'it did not load'))
+    if st['loaded'] and st['current'] is False:
+        result['warnings'].append('the loaded dummynet_st.ko is not the one installed: Apply replaces it')
     if result['current'] is False:
         result['warnings'].append('the loaded dn_cake.ko is not the one installed: Apply replaces it, '
                                   'unless a CAKE pipe the plugin does not manage holds it (see the system log)')
-    if result['loaded']:
+    cake_loaded = result['loaded'] or st['loaded']
+    if cake_loaded:
         sched = None
         for line in subprocess.run([DNCTL, 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):
             parts = line.split()
@@ -123,7 +156,7 @@ if __name__ == '__main__':
                 result['schedulers'].append({'sched': sched, 'config': line.strip()})
                 sched = None
     # None: the module has no statistics (cake-kmod before 1.3)
-    stats = tin_stats() if result['loaded'] else None
+    stats = tin_stats() if cake_loaded else None
     result['stats_available'] = stats is not None
     descriptions = pipe_descriptions()
     for scheduler in result['schedulers']:

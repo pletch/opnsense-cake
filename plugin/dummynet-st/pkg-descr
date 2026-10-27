@@ -1,0 +1,9 @@
+dummynet with the CAKE scheduler built in and packets released between
+clock ticks (net.inet.ip.dummynet.release_us), as dummynet_st.ko. os-cake
+loads it instead of the stock dummynet.ko, unless switched off on its
+page; nothing loads it at boot.
+
+The module is built for one FreeBSD release and replaces one stock
+dummynet.ko, whose SHA256 it records. os-cake does not load it on another
+release or with another dummynet.ko, and uses the stock dummynet and
+dn_cake.ko instead.

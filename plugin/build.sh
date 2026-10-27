@@ -24,9 +24,10 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# Build cake-kmod and os-cake on an OPNsense machine of the target series:
-# cake-kmod with kmod/build.sh, then os-cake with the opnsense/plugins
-# framework, which needs cake-kmod installed to record the dependency.
+# Build cake-kmod, dummynet-st and os-cake on an OPNsense machine of the
+# target series: cake-kmod with kmod/build.sh, dummynet-st with
+# dummynet-st/build.sh, then os-cake with the opnsense/plugins framework,
+# which needs both installed to record the dependencies.
 #
 #	build.sh [output directory]
 
@@ -49,6 +50,8 @@ export SOURCE_DATE_EPOCH
 
 sh "${HERE}/kmod/build.sh" "${OUT}"
 pkg add -f "${OUT}"/cake-kmod-*.pkg
+sh "${HERE}/dummynet-st/build.sh" "${OUT}"
+pkg add -f "${OUT}"/dummynet-st-*.pkg
 
 # the series, e.g. 26.7: the running OPNsense's, or SERIES on another
 # FreeBSD of the same release (as in CI)

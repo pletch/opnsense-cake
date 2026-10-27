@@ -87,7 +87,7 @@ sha256 -r *.pkg | sed 's/ /  /' > SHA256SUMS
 contents "${OUT}" > CONTENTS
 echo ">>> Built from ${SERIES} src ${SRC_COMMIT} plugins ${PLUGINS_COMMIT} with ${KSET}:"
 cat SHA256SUMS
-grep -E 'dn_cake.ko|libexec/cake/dnctl' CONTENTS
+grep -E 'dn_cake.ko|dummynet_st.ko|libexec/cake/dnctl' CONTENTS
 
 if [ -n "${TAG}" ]; then
 	mkdir "${WRK}/release"

@@ -1,0 +1,14 @@
+<form>
+    <field>
+        <id>cake.general.subtick</id>
+        <label>Sub-tick release</label>
+        <type>checkbox</type>
+        <help>Shape with dummynet-st: dummynet with CAKE built in, which releases packets between clock ticks rather than a tick's worth at a time, so they wait less and leave in smaller bursts. Off: the stock dummynet and dn_cake.ko. The stock dummynet is used anyway when dummynet-st does not match the kernel.</help>
+    </field>
+    <field>
+        <id>cake.general.release_us</id>
+        <label>Release interval (us)</label>
+        <type>text</type>
+        <help>The longest a packet waits for release once the pipe's rate lets it go, in microseconds. Lower releases more often, at more CPU cost on a router short of it; the clock tick (1000 at kern.hz=1000) or more releases once per tick, as the stock dummynet. Applies to every shaper pipe, not only the CAKE ones.</help>
+    </field>
+</form>

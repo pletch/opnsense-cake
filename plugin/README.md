@@ -1,6 +1,6 @@
 # CAKE for OPNsense: build and install
 
-Two packages. For OPNsense 26.7 (amd64), each
+Three packages. For OPNsense 26.7 (amd64), each
 [release](https://github.com/pletch/opnsense-cake/releases) has them ready
 built: skip to [Install](#install). Build them yourself only for another
 series, or to run your own build of the sources. They are built on an
@@ -9,7 +9,8 @@ OPNsense machine of the series they are for:
 | package | contents |
 |---|---|
 | `cake-kmod` | `/boot/modules/dn_cake.ko`, a CAKE capable dnctl in `/usr/local/libexec/cake/`, and the FreeBSD release and `dummynet.ko` (SHA256) they are built for |
-| `os-cake` | the Firewall → Shaper → CAKE page and the dnctl wrapper; depends on `cake-kmod` |
+| `dummynet-st` | `/boot/modules/dummynet_st.ko`, dummynet with CAKE built in and sub-tick release ([SUBTICK.md](../SUBTICK.md)), and the FreeBSD release and stock `dummynet.ko` it replaces |
+| `os-cake` | the Firewall → Shaper → CAKE page and the dnctl wrapper; depends on `cake-kmod` and `dummynet-st` |
 
 Neither changes a file of OPNsense itself, so they survive its updates. If the
 module doesn't match the running kernel, e.g. after an upgrade to a new
@@ -80,6 +81,7 @@ as an installed plugin:
 
 ```sh
 pkg add cake-kmod-<version>.pkg
+pkg add dummynet-st-<version>.pkg
 pkg add os-cake-<version>.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
@@ -120,7 +122,13 @@ in a VM*.
   placeholder process (`daemon: cake`, a `sleep`) runs while it is active,
   with its PID in `/var/run/cake.pid`.
 - The status line on the CAKE page says whether the module is in use and by
-  how many pipes, or why it can't be used.
+  how many pipes, or why it can't be used. With `dummynet-st` in use it says
+  so, with the release interval; if *Sub-tick release* is on but the fork is
+  not in use, a warning below it says why.
+- `kldstat | grep dummynet` shows `dummynet_st.ko` while the fork is in use,
+  `dummynet.ko` otherwise; `sysctl net.inet.ip.dummynet.release_us` gives
+  its interval, and `release_wakeups`, `release_late_us` and
+  `release_late_max` next to it how its releases between ticks run.
 - Below the pipes, the page shows each CAKE pipe's statistics per tin, as
   `tc -s qdisc` does on Linux, refreshed every 5 seconds. The same numbers
   come from `sysctl net.inet.ip.dummynet.cake.stats` (cake-kmod 1.3 on).
@@ -134,7 +142,7 @@ in a VM*.
 
 ## Upgrade and remove
 
-- `pkg delete os-cake cake-kmod` puts the pipes back on their own scheduler
+- `pkg delete os-cake dummynet-st cake-kmod` puts the pipes back on their own scheduler
   and unloads the module. The CAKE entries stay in the configuration and are
   used again if the plugin is reinstalled. Then run
   `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`, or
