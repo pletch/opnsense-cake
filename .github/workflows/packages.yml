@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       compare:
-        description: Release tag to compare the build with (empty for none)
+        description: Release tag to compare the build with, file by file (run the workflow on that tag; empty for none)
         required: false
         default: ''
 
