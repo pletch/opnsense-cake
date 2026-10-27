@@ -113,7 +113,7 @@ ours_serve(void (*sent)(struct trace_pkt *, int))
 	int n = 0, t;
 
 	si->_si.credit += (int64_t)(now - sched_time) * sched.s.link.bandwidth;
-	sched_time = now;
+	sched_time = si->_si.sched_time = now;
 	while (si->_si.credit >= 0 && (p = o_dequeue(&t)) != NULL) {
 		si->_si.credit -= (int64_t)hz * p->len * 8;
 		sent(p, t);
@@ -178,7 +178,7 @@ rp_serve(void (*sent)(struct trace_pkt *, int, uint64_t))
 	now_u = (uint64_t)((unsigned __int128)trace_now_ns * rp.unit /
 	    1000000000);
 	si->_si.credit += (int64_t)(now_u - rp.sched_u) * (int64_t)bw;
-	rp.sched_u = now_u;
+	rp.sched_u = si->_si.sched_time = now_u;
 	if (rp.cap && si->_si.credit > (int64_t)rp.cap)
 		si->_si.credit = (int64_t)rp.cap;
 	rp.active = 0;

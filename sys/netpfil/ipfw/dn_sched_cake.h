@@ -284,6 +284,9 @@ struct cake_si {
 	uint32_t gen;		/* cake_schk.gen the tables were built for */
 	uint32_t bw;		/* pipe rate the tin parameters are for */
 	uint64_t link_time;	/* when the last packet left a paced link */
+	uint64_t link_batch;	/* the pipe's sched_time for this release */
+	uint64_t link_cur;	/* real times of this release and the one */
+	uint64_t link_prev;	/* before it, 0 before there was one */
 	uint64_t link_rate_ns;	/* ns per byte at the pipe's rate, */
 	uint8_t	link_rate_shft;	/* shifted left by link_rate_shft */
 	uint64_t failsafe_time;	/* ingress: next send allowed despite drops */

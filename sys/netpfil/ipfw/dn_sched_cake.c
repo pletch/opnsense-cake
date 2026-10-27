@@ -118,6 +118,10 @@
 #define DN_CREDIT_HZ		hz
 #define DN_RELEASE_NS		(1000000000ULL / hz)
 #endif
+/* how far apart its releases can be, which widens a tin's target */
+#ifndef DN_RELEASE_GRAIN_NS
+#define DN_RELEASE_GRAIN_NS	((uint64_t)tick * 1000)
+#endif
 #define CAKE_TIN_QUANTUM_SHIFT	4	/* tin quantum = quantum << 4 >> weight */
 #define COBALT_CACHE		16	/* cached 1/sqrt(count) values */
 
@@ -1868,9 +1872,13 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
  * against greedy Voice got 13% less at kern.hz=1000). So they use the
  * time each packet would leave a link paced at the pipe's rate: the
  * previous one's plus its own length at that rate (and in ingress mode
- * the drops', up to the failsafe), at most one release interval (a tick
- * on a stock dummynet, DN_RELEASE_NS) behind now and never ahead of it. COBALT keeps the real time, as a packet may have arrived
- * after its slot on the link. link_clock=0 goes back to dummynet's time.
+ * the drops', up to the failsafe), never ahead of now and at most one
+ * release interval (a tick on a stock dummynet, DN_RELEASE_NS) behind
+ * it, or, while the queue has been backlogged since the last send, as
+ * far back as that send: a release that came late (a late tick) sends
+ * what the link would have sent since. COBALT keeps the real time, as a
+ * packet may have arrived after its slot on the link. link_clock=0 goes
+ * back to dummynet's time.
  */
 static u_int cake_link_clock = 1;
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_clock,
@@ -1895,6 +1903,10 @@ cake_link_now(struct cake_si *si, uint64_t now, int decide)
 	if (si->cfg.flags & CAKE_INGRESS)
 		t = MIN(t, si->failsafe_time);
 	lo = now - MIN(now, window);
+	/* backlogged since the pipe's previous release, the link could have
+	 * sent ever since: a late release's batch covers that span */
+	if (si->main_q.ni.length > 0 && si->link_prev != 0 && si->link_prev < lo)
+		lo = si->link_prev;
 	if (decide)
 		CAKE_LINK_STAT(t, lo, now);
 	return (MIN(MAX(t, lo), now));
@@ -1991,6 +2003,13 @@ cake_dequeue(struct dn_sch_inst *_si)
 	/* a rate change reaches a backlog without waiting for new packets */
 	if (__predict_false(CAKE_STALE(si, schk)))
 		cake_reconfig(si, schk);
+
+	/* a new release: serve_sched() stamps each with its time */
+	if (si->_si.sched_time != si->link_batch) {
+		si->link_batch = si->_si.sched_time;
+		si->link_prev = si->link_cur;
+		si->link_cur = now_ns;
+	}
 
 	for (;;) {
 		/* packets may have been dropped by COBALT on the way */
@@ -2157,7 +2176,8 @@ cake_link_params(struct cake_si *si)
  * and when the scheduler is reconfigured. As in sch_cake's
  * cake_set_rate(), target and interval are stretched when an MTU takes
  * longer than target to send at the tin's share of the link rate.
- * dummynet only releases packets once per tick, so a tick longer than
+ * dummynet only releases packets once per tick (DN_RELEASE_GRAIN_NS;
+ * a dummynet with a finer release clock sets it), so a tick longer than
  * target (e.g. kern.hz=100 in VMs) is treated the same way; otherwise
  * the batching delay alone looks like a standing queue to COBALT.
  */
@@ -2186,7 +2206,7 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 		 * so slow tins interleave their flows in smaller pieces */
 		tin->flow_quantum = MIN(MAX(rate >> 12, 300), cfg->quantum);
 	}
-	granularity = MAX(cp->mtu_time, (uint64_t)tick * 1000);
+	granularity = MAX(cp->mtu_time, DN_RELEASE_GRAIN_NS);
 	cp->target = MAX(granularity * 3 / 2, cfg->target * 1000);
 	cp->interval = MAX(cfg->interval * 1000 + cp->target -
 	    cfg->target * 1000, cp->target * 2);

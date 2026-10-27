@@ -196,6 +196,7 @@ struct dn_sch_inst {
 	struct dn_schk *sched;
 	int kflags;
 	int64_t credit;
+	uint64_t sched_time;	/* the release's time, set by the pipe */
 };
 struct dn_queue {
 	struct dn_flow ni;

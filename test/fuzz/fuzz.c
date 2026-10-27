@@ -367,7 +367,7 @@ serve(void)
 
 	si->_si.credit += (int64_t)(now - sched_time) *
 	    (sched.s.link.bandwidth ? sched.s.link.bandwidth : 1000000000);
-	sched_time = now;
+	sched_time = si->_si.sched_time = now;
 	while (si->_si.credit >= 0 && (m = cake_dequeue(&si->_si)) != NULL) {
 		si->_si.credit -= (int64_t)hz * m->m_pkthdr.len * 8;
 		sent++;

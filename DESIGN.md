@@ -293,13 +293,20 @@ tests and their results are in [VERIFICATION.md](VERIFICATION.md).
   leave a link paced at the pipe's rate (the previous packet's plus its
   own duration, at most a tick behind the real time and never ahead);
   COBALT keeps the real time. `net.inet.ip.dummynet.cake.link_clock=0`
-  turns it off, for comparison. The window is one tick: when a batch
-  carries more than a tick's credit (a late tick), the clock is pulled
-  forward to a tick back and then held at the real time for the rest of
-  the batch, i.e. falls back to dummynet's time; CAKE_DEBUG builds count
-  this (`link_reads`, `link_behind`, `link_ahead` and their largest
-  corrections, see *The link clock's clamp* in
-  [VERIFICATION.md](VERIFICATION.md)).
+  turns it off, for comparison. The window is one tick, or, while the
+  queue has been backlogged since the pipe's previous release, back to
+  that release (each `serve_sched()` call stamps the instance's
+  `sched_time`, which tells a release from the next packet of the same
+  one): a batch carrying more than a tick's credit (a late tick) keeps
+  the link's time. Before, the clock was pulled forward to a tick back
+  and held at the real time for the rest of such a batch, i.e. fell back
+  to dummynet's time: in `test/sched-diff.sh release bulkvoice` with a
+  quarter of the time stalled (60/s up to 8 ms), Bulk against greedy
+  Voice got 3.76 Mbit/s instead of sch_cake's 3.93, and now 3.92.
+  CAKE_DEBUG builds count the corrections (`link_reads`, `link_behind`,
+  `link_ahead` and their largest, see *The link clock's clamp* in
+  [VERIFICATION.md](VERIFICATION.md)); this experimental branch's
+  [SUBTICK.md](SUBTICK.md) has the measurements.
 - **Overflow drops** go to another flow's head. In that case `enqueue` returns
   0, so dummynet still activates the instance for the packet it just accepted.
 - **Instance expiry.** dummynet destroys a scheduler instance as soon as
