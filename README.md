@@ -8,6 +8,13 @@ not just between connections. FreeBSD's dummynet, and with it the OPNsense
 traffic shaper, offers FQ-CoDel but not CAKE. This repository is a port of
 CAKE to dummynet, and an OPNsense plugin to use it.
 
+CAKE is the work of Jonathan Morton, Toke Høiland-Jørgensen, Dave Taht,
+Sebastian Moeller, Kevin Darbyshire-Bryant and Ryan Mounce, who wrote
+Linux's `sch_cake`; this port follows their code, under its BSD-3-Clause
+license option, and is checked against it packet by packet. The dummynet
+side follows FreeBSD's FQ-CoDel scheduler by Rasool Al-Saadi (Centre for
+Advanced Internet Architectures, Swinburne University of Technology).
+
 What it adds over FQ-CoDel:
 
 - **Host isolation**: bandwidth is shared per device first, then per
