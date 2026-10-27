@@ -22,8 +22,11 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
 
+  variants:
+    uses: ./.github/workflows/variants.yml
+
   build:
-    needs: tests
+    needs: [tests, variants]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

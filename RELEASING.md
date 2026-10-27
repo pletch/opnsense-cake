@@ -53,14 +53,20 @@ digests over a connection (`plugin/sign-server.py`).
    git push origin main vX.Y.Z
    ```
 
-   The `packages` workflow runs the tests, then builds both packages in a
+   Release tags are protected on GitHub (a ruleset): once pushed, a tag
+   cannot be moved or deleted, so a mistake in a tagged release needs a
+   new version, not a re-tag.
+
+   The `packages` workflow runs the tests and compiles every variant of
+   the scheduler (`test/build-variants.sh`), then builds both packages in a
    FreeBSD VM from the commits and the kernel set pinned in
    `plugin/build.conf` (it fails if the kernel set's `dummynet.ko` is not
    the pinned one), attests their provenance, and creates a draft release
    with the packages and `SHA256SUMS`.
 4. Check the draft's packages: install them on the bench, and if you like,
    rebuild them yourself with `plugin/ci-build.sh` and compare
-   `SHA256SUMS` (the builds are reproducible).
+   `SHA256SUMS`: the builds are reproducible to the byte, and the packages
+   workflow run on the tag rebuilds and compares them too.
 5. Sign the repository, from the draft's files: `repo.sh` uses exactly the
    packages its `SHA256SUMS` lists, refuses any that differ, and checks the
    catalogue it made is signed with the key (`pkg repo` reports success

@@ -1,0 +1,42 @@
+# Compile every build of the scheduler in a FreeBSD VM against the pinned
+# opnsense/src (test/build-variants.sh): dn_cake.ko as released and with
+# CAKE_DEBUG, dummynet.ko with CAKE built in by the patch, with and without
+# CAKE_DEBUG, and the patched dnctl, each checked for the code it should
+# contain. On changes to the kernel code, the patch or the pins, and before
+# every package build.
+name: variants
+
+on:
+  push:
+    paths:
+      - 'sys/**'
+      - 'patches/**'
+      - 'plugin/build.conf'
+      - 'test/build-variants.sh'
+      - '.github/workflows/variants.yml'
+  pull_request:
+    paths:
+      - 'sys/**'
+      - 'patches/**'
+      - 'plugin/build.conf'
+      - 'test/build-variants.sh'
+      - '.github/workflows/variants.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the variants in FreeBSD
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: '15.1'
+          prepare: |
+            pkg install -y git-lite
+          run: sh test/build-variants.sh

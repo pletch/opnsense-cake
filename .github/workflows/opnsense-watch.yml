@@ -24,19 +24,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           . plugin/build.conf
+          # every way this can break says so, as a failure of the check rather
+          # than a compatibility change
+          fail() { echo "::error::$1"; echo "Check failed: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           sets=https://pkg.opnsense.org/$ABI/$SERIES/sets
-          kset=$(curl -fsSL "$sets/" | grep -o "kernel-$SERIES[0-9.]*-${ABI##*:}\.txz" | sort -u -V | tail -1)
-          curl -fsSLo kernel.txz "$sets/$kset"
-          now=$(tar -xOJf kernel.txz ./boot/kernel/dummynet.ko | sha256sum | cut -d' ' -f1)
+          listing=$(curl -fsSL --retry 3 "$sets/") || fail "cannot list $sets/"
+          kset=$(printf '%s\n' "$listing" | grep -o "kernel-$SERIES[0-9.]*-${ABI##*:}\.txz" | sort -u -V | tail -1)
+          [ -n "$kset" ] || fail "no kernel-$SERIES*-${ABI##*:}.txz in $sets/ (layout changed?)"
+          curl -fsSLo kernel.txz --retry 3 "$sets/$kset" || fail "cannot download $sets/$kset"
+          tar -xOJf kernel.txz ./boot/kernel/dummynet.ko > dummynet.ko 2>/dev/null && [ -s dummynet.ko ] ||
+            fail "$kset has no ./boot/kernel/dummynet.ko (layout changed?)"
+          now=$(sha256sum dummynet.ko | cut -d' ' -f1)
 
-          tag=$(gh release view --json tagName -q .tagName)
-          gh release download "$tag" --pattern 'cake-kmod-*.pkg' --dir rel
-          known=$(tar --zstd -xOf rel/cake-kmod-*.pkg /usr/local/libexec/cake/dummynet.sha256)
+          tag=$(gh release view --json tagName -q .tagName) || fail "no published release found"
+          gh release download "$tag" --pattern 'cake-kmod-*.pkg' --dir rel || fail "release $tag has no cake-kmod package"
+          known=$(tar --zstd -xOf rel/cake-kmod-*.pkg /usr/local/libexec/cake/dummynet.sha256 2>/dev/null) && [ -n "$known" ] ||
+            fail "the cake-kmod of $tag records no dummynet.ko (no /usr/local/libexec/cake/dummynet.sha256)"
 
           echo "$kset: dummynet.ko $now" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "cake-kmod of $tag is built against: $known" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "plugin/build.conf pins $KSET, dummynet.ko $DUMMYNET_SHA256" | tee -a "$GITHUB_STEP_SUMMARY"
           if printf '%s\n' "$known" | grep -qx "$now"; then
             echo "Unchanged: CAKE keeps working on $kset." | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$now" != "$DUMMYNET_SHA256" ]; then
+              echo "::warning::plugin/build.conf pins a dummynet.ko other than $kset's, which the release matches: update KSET and DUMMYNET_SHA256"
+            fi
             exit 0
           fi
 

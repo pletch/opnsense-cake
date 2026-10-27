@@ -429,12 +429,21 @@ scripts are in [`test/`](test/); the design they test is in
     plugin wrapper's unit tests (`test/plugin-lib.py`: options, masks,
     memory limit, invalid and injected values) and syntax checks on every
     push, and the signing server's checks (`test/sign-check.py`).
-    `packages.yml` runs those tests first, then builds the packages in a
-    FreeBSD 15.1 VM on a tag, with provenance attestations, and drafts the
-    release;
+    `variants.yml` compiles, in a FreeBSD 15.1 VM against the pinned
+    sources (`test/build-variants.sh`), `dn_cake.ko` as released and with
+    `CAKE_DEBUG`, `dummynet.ko` with CAKE built in by the patch, with and
+    without `CAKE_DEBUG`, and the patched `dnctl`; each build is checked for
+    the symbols it should and should not have (`cake_check` only with
+    `CAKE_DEBUG`, `cake_wire_len` only with `DN_WIRE_LEN`), and a Makefile
+    that dropped `CAKE_DEBUG` failed it. `packages.yml` runs the tests and
+    the variants first, then builds the packages in a FreeBSD 15.1 VM on a
+    tag, with provenance attestations, and drafts the release. Run on the
+    `v1.4.5` tag on a fresh runner, it rebuilt both `.pkg` files byte for
+    byte (the same SHA256s as the release);
     `opnsense-watch.yml` checks weekly that OPNsense's newest kernel set
     still ships the `dummynet.ko` the latest `cake-kmod` is built against,
-    and opens an issue if not.
+    and opens an issue if not; a listing, download or release it cannot
+    read fails the check with that reason instead (each case tried).
   - Signed repository (`plugin/repo.sh`), on the bench with a throwaway
     key: installing from it, `os-cake` is provided by the `cake`
     repository, so the Plugins page lists it as installed, not orphaned.
@@ -451,3 +460,11 @@ scripts are in [`test/`](test/); the design they test is in
     package before asking for a signature, and fails when signing is
     refused, which `pkg repo` itself reports as success. The signed
     catalogue is byte for byte the published 1.4.5 one.
+  - Package lifecycle (os-cake 1.3.4, on the bench): a module swap, and a
+    plain Apply, during a 45 s download through CAKE at 50 Mbit/s: the
+    TCP connection kept going, the one-second throughput dipped once to
+    47.3 Mbit/s (48.2-48.3 otherwise), and a 10 Hz ping lost none of 440
+    packets (worst 4.6 ms). Removing both packages while another CAKE pipe
+    holds the module leaves the pipes on FQ-CoDel and the module loaded
+    without its file; reinstalling from the repository puts CAKE back
+    without a swap (the same file).

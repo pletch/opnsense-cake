@@ -36,9 +36,17 @@ which tie each package to the commit and workflow run that built it:
 gh attestation verify cake-kmod-X.Y.Z.pkg -R pletch/opnsense-cake
 ```
 
-The builds are reproducible: `plugin/ci-build.sh` rebuilds a release's
-packages from its tag on OPNsense or FreeBSD and compares them with the
-published ones, file by file (see `plugin/README.md`).
+The builds are reproducible, down to the package archives: rebuilt from
+its tag on a fresh GitHub runner, v1.4.5's two `.pkg` files have the
+release's SHA256s. `plugin/ci-build.sh` rebuilds a release's packages from
+its tag on OPNsense or FreeBSD and compares them with the published ones,
+file by file (see `plugin/README.md`); comparing the `SHA256SUMS` of the
+two compares the archives.
+
+Release tags (`v*`) are protected on GitHub: they can be created but not
+moved or deleted, so a release's tag keeps naming the commit it was built
+from. From after v1.4.5 they are signed (`git tag -v vX.Y.Z`; GitHub shows
+them as verified).
 
 The packages are also published in a pkg(8) repository,
 https://pletch.github.io/opnsense-cake/26.7, whose catalogue lists every
