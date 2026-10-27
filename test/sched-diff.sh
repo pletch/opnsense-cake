@@ -9,6 +9,7 @@
 #
 #   test/sched-diff.sh [runs [seconds [seed]]]
 #   test/sched-diff.sh pace [seconds [hz ...]]
+#   test/sched-diff.sh release [bulkvoice|fast [seconds [slot_us ...]]]
 #
 # SD_TRACE=N prints both sides' tin states from packet N on.
 set -eu
@@ -76,7 +77,7 @@ ${CC:-cc} -O2 -DCAKE_DEBUG -DCAKE_ACK_SCAN=1000000 -I"$TOP/test/sched-diff" -I"$
     -I"$TOP/sys/netpfil/ipfw" -Wall -Wno-unused-function \
     -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable \
     -o "$WRK/sched-diff" "$TOP/test/sched-diff/main.c" \
-    "$TOP/test/sched-diff/linux.c" "$TOP/test/sched-diff/ours.c"
+    "$TOP/test/sched-diff/linux.c" "$TOP/test/sched-diff/ours.c" -lm
 echo "dn_sched_cake $(git -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo '?')" \
     "(working tree) vs sch_cake ${LINUX_COMMIT%"${LINUX_COMMIT#????????????}"}"
 "$WRK/sched-diff" "$@"

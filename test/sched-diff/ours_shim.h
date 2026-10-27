@@ -58,6 +58,12 @@ static inline uint32_t jenkins_hash(const void *k, size_t l, uint32_t i)
 #define SYSCTL_UINT(...)
 #define ppsratecheck(t, c, m)	0
 static int hz = 1000;
+/* the pipe's clock (dn_sched_cake.c's DN_CREDIT_HZ, DN_RELEASE_NS):
+ * dummynet's tick, unless sched-diff release models a finer one */
+static int64_t credit_hz = 1000;
+static uint64_t release_ns = 1000000;
+#define DN_CREDIT_HZ	credit_hz
+#define DN_RELEASE_NS	release_ns
 /* dummynet's tick widens the target on slow tick rates (a deliberate
  * FreeBSD adaptation, documented); 1 us takes it out of the comparison */
 static int tick = 1;

@@ -93,6 +93,8 @@ void
 ours_set_hz(int khz)
 {
 	hz = khz;
+	credit_hz = khz;
+	release_ns = 1000000000ULL / khz;
 	sched_time = trace_now_ns * hz / 1000000000;
 	si->_si.credit = 0;
 }
@@ -120,6 +122,115 @@ ours_serve(void (*sent)(struct trace_pkt *, int))
 	if (si->_si.credit >= 0)	/* idle: no credit saved up */
 		si->_si.credit = 0;
 	return (n);
+}
+
+/*
+ * sched-diff release: the pipe's release mechanism as a model of
+ * SUBTICK.md's. Its credit is in bits * unit and its time in 1/unit s;
+ * while it has packets due it wakes on a grid of slot_ns, at the first
+ * point at or after the next packet is due, and releases what is due by
+ * then. A packet enqueued on an idle pipe is served at once, as by
+ * dummynet_io(). stock: dummynet as it is, unit = hz and slot = a tick,
+ * with io_fast's initial credit of one tick; otherwise the fine clock,
+ * which starts an idle pipe at no credit.
+ */
+static struct {
+	uint64_t unit, slot_ns;
+	int stock, active;
+	uint64_t sched_u, idle_u;	/* in time units */
+	uint64_t wake_ns;		/* while active */
+	uint64_t cap;			/* credit cap after a late wakeup, 0 none */
+} rp;
+
+void
+ours_release_init(uint64_t unit, uint64_t slot_ns, int stock,
+    unsigned cap_slots)
+{
+	rp.unit = unit;
+	rp.slot_ns = slot_ns;
+	rp.stock = stock;
+	rp.active = 0;
+	rp.sched_u = rp.idle_u = (uint64_t)((unsigned __int128)trace_now_ns *
+	    unit / 1000000000);
+	rp.cap = (uint64_t)((unsigned __int128)cap_slots * slot_ns * unit /
+	    1000000000) * sched.s.link.bandwidth;
+	credit_hz = (int64_t)unit;
+	release_ns = slot_ns;
+	si->_si.credit = 0;
+}
+
+/* time units to ns, rounded up */
+static uint64_t
+rp_ns(uint64_t u)
+{
+	return ((uint64_t)(((unsigned __int128)u * 1000000000 + rp.unit - 1) /
+	    rp.unit));
+}
+
+/* serve the pipe now: sent() gets each packet and when it became due */
+static int
+rp_serve(void (*sent)(struct trace_pkt *, int, uint64_t))
+{
+	uint64_t bw = sched.s.link.bandwidth, now_u, due_u;
+	struct trace_pkt *p;
+	int n = 0, t;
+
+	now_u = (uint64_t)((unsigned __int128)trace_now_ns * rp.unit /
+	    1000000000);
+	si->_si.credit += (int64_t)(now_u - rp.sched_u) * (int64_t)bw;
+	rp.sched_u = now_u;
+	if (rp.cap && si->_si.credit > (int64_t)rp.cap)
+		si->_si.credit = (int64_t)rp.cap;
+	rp.active = 0;
+	while (si->_si.credit >= 0 && (p = o_dequeue(&t)) != NULL) {
+		/* the credit was last zero this long ago */
+		uint64_t ago = (uint64_t)((unsigned __int128)si->_si.credit *
+		    1000000000 / ((unsigned __int128)bw * rp.unit));
+
+		sent(p, t, trace_now_ns - (ago < trace_now_ns ? ago : trace_now_ns));
+		si->_si.credit -= (int64_t)rp.unit * 8 * p->len;
+		n++;
+	}
+	if (si->_si.credit >= 0) {
+		rp.idle_u = now_u;
+		return (n);
+	}
+	due_u = now_u + (uint64_t)((-si->_si.credit + (int64_t)bw - 1) /
+	    (int64_t)bw);
+	rp.wake_ns = (rp_ns(due_u) + rp.slot_ns - 1) / rp.slot_ns * rp.slot_ns;
+	rp.active = 1;
+	return (n);
+}
+
+/* after an enqueue: an idle pipe sends at once */
+int
+ours_release_enqueued(void (*sent)(struct trace_pkt *, int, uint64_t))
+{
+	uint64_t now_u;
+
+	if (rp.active)
+		return (0);
+	now_u = (uint64_t)((unsigned __int128)trace_now_ns * rp.unit /
+	    1000000000);
+	if (rp.idle_u < now_u) {
+		rp.sched_u = now_u;
+		si->_si.credit = rp.stock ? (int64_t)sched.s.link.bandwidth : 0;
+	}
+	return (rp_serve(sent));
+}
+
+/* the pipe's wakeup, now */
+int
+ours_release_wake(void (*sent)(struct trace_pkt *, int, uint64_t))
+{
+	return (rp_serve(sent));
+}
+
+/* when the pipe wants to wake next, UINT64_MAX if it is idle */
+uint64_t
+ours_release_next(void)
+{
+	return (rp.active ? rp.wake_ns : UINT64_MAX);
 }
 
 #ifdef CAKE_DEBUG

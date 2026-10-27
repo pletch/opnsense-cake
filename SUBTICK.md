@@ -36,14 +36,17 @@ what has been measured along the way. Work happens on the
    releases what is due within a slot. `release_us` equal to the tick
    should behave as stock dummynet, which is the A/B switch.
 5. **Catch up from the real clock.** A late wakeup reads `sbinuptime()`
-   rather than relying on the `tick_delta_sum` correction. Open: how much
-   backlog to release at once after a hypervisor stall (one or two slots?).
+   rather than relying on the `tick_delta_sum` correction. After a stall
+   it releases all it is owed, as stock dummynet does, unless a cap is
+   set (phase 1: a cap trades throughput for a smaller burst).
 6. **Output from the taskqueue first.** The callout enqueues `dn_task` on
    `dn_tq`, which adds jitter; measure it before sending directly from
    the callout.
-7. **CAKE's link clock from the fine clock,** through a flag like
-   `DN_WIRE_LEN`. With fine release it should stay close to the real
-   time; `link_clock=0` stays for comparison.
+7. **CAKE's link clock from the fine clock.** `dn_sched_cake.c` takes the
+   pipe's credit unit and its release interval from `DN_CREDIT_HZ` and
+   `DN_RELEASE_NS`, by default `hz` and a tick; the fork defines them, so
+   the link clock's window becomes the slot. `link_clock=0` stays for
+   comparison.
 
 ## Packaging
 
@@ -132,3 +135,103 @@ s) at 50 Mbit/s.
   that arms its timer only when packets are due would also drop the idle
   cost. Next: a burst capture on real hardware at 1000 and 4000 Hz, and
   phase 1 in the harness.
+
+### Phase 1: the release clock in the harness
+
+`test/sched-diff.sh release [bulkvoice|fast [seconds [slot_us ...]]]`
+drives sch_cake (its own shaper: the reference) and dn_sched_cake behind
+a model of the pipe (`test/sched-diff/ours.c`) with the same trace, event
+to event. Slot 0 is dummynet as it is at `SD_HZ`: credit in bits × hz,
+io_fast's initial credit, a wakeup every tick. Otherwise the fine clock:
+credit in bits × 10^6, and while packets are due a wakeup at the first
+point of a grid of the slot at or after the next one is due. Measured:
+wakeups, how long a packet waited after it was due (hold), the delay of
+a probe (100-byte datagrams every ms, a sparse flow) and the queue the
+releases build at a next hop 1/0.95 times the pipe's rate (a modem behind
+a shaper at 95%). `fast` is 16 greedy flows of full-size packets at 1.2
+times the rate, `bulkvoice` contention.sh's Bulk against greedy Voice.
+
+`fast` at 1 Gbit/s (3 s; µs):
+
+| release | wakeups/s | packets each | hold mean / max | next hop queue mean / max | probe delay mean / p99 |
+|---|---|---|---|---|---|
+| stock 1000 Hz | 1000 | 83.5 | 500 / 1000 | 464 / 945 | 506 / 993 |
+| slot 10 µs | 82,560 | 1.0 | 5 / 10 | 3 / 7 | 7 / 19 |
+| slot 25 µs | 40,000 | 2.1 | 12 / 25 | 8 / 23 | 13 / 24 |
+| slot 50 µs | 20,000 | 4.2 | 25 / 50 | 19 / 47 | 25 / 49 |
+| slot 100 µs | 10,000 | 8.3 | 50 / 100 | 42 / 93 | 51 / 99 |
+| slot 250 µs | 4000 | 20.9 | 125 / 250 | 112 / 231 | 126 / 247 |
+| slot 500 µs | 2000 | 41.7 | 250 / 500 | 229 / 473 | 251 / 496 |
+| sch_cake | | | | 0 / 0 | 6 / 11 |
+
+- **The slot sets the delay, not the rate.** At 100 Mbit/s and 2 Gbit/s
+  the hold and the next hop queue are the same in time (a mean of half
+  the slot, at most the slot); only the packets per wakeup scale with the
+  rate, and the wakeups are at most the packet rate (at 100 Mbit/s, 8300
+  packets/s, so slots of 100 µs and less wake for nearly every packet).
+  So stock dummynet at 1000 Hz adds a mean 0.5 ms, at most 1 ms, to each
+  packet of a backlogged pipe at any rate, and a sparse flow sees it: at
+  100 Mbit/s the probe waits 493 µs on average against sch_cake's 60.
+  DESIGN.md's "it matters when a much faster NIC feeds a slower link"
+  holds for the bytes a burst puts on the next hop, not for this. The
+  bench agrees: the rrul ICMP median fell 0.37 ms from 1000 to 4000 Hz
+  (phase 0), where the model's mean hold falls 0.375 ms.
+- **A slot is kern.hz = 1/slot,** to the microsecond: slot 1000 µs gives
+  exactly stock 1000 Hz, slot 250 µs stock 4000 Hz. The fine clock's gain
+  over a faster tick is its cost: it wakes only while packets are due
+  (never on an idle pipe), and at low rates per packet.
+- **Tin shares:** with the link clock (as released), Bulk gets sch_cake's
+  3.93 Mbit/s at every slot and at stock 1000 Hz. Without it, slots of
+  10–50 µs get 3.93 too, 100 µs 3.90, 250 µs 3.77, stock 1000 Hz 3.41.
+  The link clock is still needed above about 50 µs, with the slot as its
+  window.
+
+With the CPU away (`SD_STALLS`, `SD_STALL_US`), `fast` at 1 Gbit/s; a
+cap of n slots on the credit after a stall:
+
+| stalls | release | Mbit/s | next hop queue mean / max (µs) | probe delay mean / p99 (µs) |
+|---|---|---|---|---|
+| 40/s up to 1 ms | stock 1000 Hz | 1000 | 499 / 1809 | 511 / 998 |
+| | slot 100 µs | 1000 | 144 / 990 | 57 / 332 |
+| | slot 100 µs, cap 1 | 982 | 42 / 94 | 57 / 360 |
+| | slot 100 µs, cap 2 | 985 | 46 / 190 | 57 / 360 |
+| | slot 250 µs | 1000 | 201 / 1159 | 133 / 443 |
+| | slot 250 µs, cap 2 | 992 | 129 / 473 | 134 / 443 |
+| 60/s up to 8 ms | stock 1000 Hz | 1000 | 3874 / 8423 | 992 / 6551 |
+| | slot 100 µs | 998 | 4065 / 7658 | 606 / 6094 |
+| | slot 100 µs, cap 2 | 812 | 49 / 189 | 544 / 6152 |
+
+- **Light stalls:** the fine clock without a cap already cuts the next
+  hop queue to less than a third and the probe's delay ninefold; a cap of
+  one or two slots also removes the catch-up bursts, for 1.5–2% of the
+  throughput.
+- **Heavy stalls** (a quarter of the time away) dominate whatever the
+  slot. Catching up sends the backlog to the next hop at once; a cap keeps
+  it in CAKE, under COBALT, but the time away is lost (19% of the rate).
+  That is a choice for the user, so the default should catch up fully, as
+  stock dummynet does, with an optional cap in time
+  (`release_catchup_us`), not slots.
+- **Tin shares under stalls** are no better with the fine clock (Bulk
+  3.92 Mbit/s light, 3.75 heavy, as stock): the link clock's window is a
+  slot, so a catch-up batch falls back to the real time. A window as wide
+  as the catch-up is a phase 4 option.
+
+**Gate.** The gain is predictable and linear in the slot, so the default
+comes from the cost: 100 µs to start (a tenth of stock 1000 Hz's delay,
+at most 10,000 wakeups/s and only while packets are due), 250 µs if
+phase 3 finds a wakeup expensive. Phase 0 measured an always-on 10 kHz
+tick at about a host CPU in the VM; the cost per wakeup is not in the
+model.
+
+The model has one pipe, jittered arrivals rather than TCP, the kernel's
+timer coalescing as rounding up to the slot's grid, and stalls of
+uniform length.
+
+The hook (`DN_CREDIT_HZ`, `DN_RELEASE_NS`, and the src patch's copy of
+`dn_sched_cake.c`) leaves the stock build unchanged: `sched-diff.sh` 50
+runs and `link` 30 runs, 0 mismatches; `pace` as before (Bulk 3.41 /
+3.77 Mbit/s at 1000 / 4000 Hz, 3.92 / 3.93 with the link clock);
+`fuzz.sh` 1,000,000 packets, 0 check errors; `cobalt-diff.sh` 0
+mismatching runs; `dn_cake.ko` built on the OPNsense 26.7 VM, as released
+and with CAKE_DEBUG. The in-tree DN_WIRE_LEN build is left to the variants
+workflow.

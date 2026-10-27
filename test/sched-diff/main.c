@@ -7,6 +7,7 @@
  *   sched-diff link [runs [seconds [seed]]]
  *   sched-diff pace [seconds [hz ...]]
  *   sched-diff pace-random [hz [runs [seconds [seed]]]]
+ *   sched-diff release [bulkvoice|fast [seconds [slot_us ...]]]
  *
  * link: the same comparison with dn_sched_cake's link clock on. The clock
  * goes from event to event, each arrival and each moment sch_cake's
@@ -20,6 +21,7 @@
  * overflow (the offered load stays below the buffer limits).
  */
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -653,6 +655,310 @@ pace(int secs, int khz)
 }
 
 /*
+ * release: SUBTICK.md's finer release clock, modelled. The same trace goes
+ * to sch_cake, which sends whenever its shaper allows (the reference),
+ * and to dn_sched_cake behind a model of the pipe (ours.c): with slot 0,
+ * dummynet as it is at SD_HZ (default 1000), waking every tick; otherwise
+ * a fine clock that wakes on a grid of that many us, only while packets
+ * are due. Scenarios:
+ *
+ *   bulkvoice  pace's: a 5 Mbit/s Bulk flow against greedy Voice, at 50
+ *              Mbit/s in diffserv4; the tin shares
+ *   fast       16 greedy flows of full-size packets at SD_RATE Mbit/s
+ *              (default 1000), 1.2 times the rate, in besteffort, and a
+ *              probe: 100-byte datagrams every ms
+ *
+ * For each: the pipe's wakeups, how long a packet waited after it was due
+ * (hold), the probe's delay from arrival to release, and the queue the
+ * releases build at a next hop SD_DOWN times faster than the pipe
+ * (default 1/0.95, a modem behind a shaper at 95%). SD_STALLS=n/s and
+ * SD_STALL_US=d: the router's CPU is away n times a second for up to d
+ * us (uniform), and the pipe wakes, and sees arrivals, when it is back.
+ * SD_CAP=n caps the fine clock's credit at n slots after a stall.
+ */
+#define RB	20001			/* histogram bins, 1 us each */
+enum { H_HOLD, H_PROBE, H_DOWN, H_N };
+static struct rel_side {
+	uint32_t hist[H_N][RB];
+	uint64_t n[H_N], sum[H_N], max[H_N];
+	uint64_t busy_ns, bytes, flow_bytes[2];
+} rs[2];				/* [0] sch_cake, [1] dn_sched_cake */
+static uint64_t *rel_arrival;		/* by packet id: arrival, ns */
+static uint32_t rel_probe;		/* the probe's flow */
+static uint64_t rel_warm, rel_rate;
+static double rel_down;
+static uint64_t rel_wakes, rel_wake_pkts, rel_wake_max;
+
+static void
+rel_add(struct rel_side *r, int h, uint64_t ns)
+{
+	uint64_t us = ns / 1000;
+
+	r->hist[h][us < RB - 1 ? us : RB - 1]++;
+	r->n[h]++;
+	r->sum[h] += ns;
+	if (ns > r->max[h])
+		r->max[h] = ns;
+}
+
+static uint64_t
+rel_pct(struct rel_side *r, int h, double q)
+{
+	uint64_t c = 0, want = (uint64_t)(r->n[h] * q);
+	int i;
+
+	for (i = 0; i < RB; i++)
+		if ((c += r->hist[h][i]) > want)
+			return (i);
+	return (RB - 1);
+}
+
+/* a packet leaving side's pipe now, due since due_ns */
+static void
+rel_sent(int side, struct trace_pkt *p, uint64_t due_ns)
+{
+	struct rel_side *r = &rs[side];
+	uint64_t a = rel_arrival[p->id], start;
+
+	if (trace_now_ns < rel_warm)
+		return;
+	r->bytes += p->len;
+	if (p->flow - 1000 < 2)
+		r->flow_bytes[p->flow - 1000] += p->len;
+	if (side == 1)
+		rel_add(r, H_HOLD, trace_now_ns - (due_ns > a ? due_ns : a));
+	if (p->flow == rel_probe)
+		rel_add(r, H_PROBE, trace_now_ns - a);
+	start = r->busy_ns > trace_now_ns ? r->busy_ns : trace_now_ns;
+	rel_add(r, H_DOWN, start - trace_now_ns);
+	r->busy_ns = start + (uint64_t)(p->len * 8 * 1e9 / (rel_rate * rel_down));
+}
+
+static int rel_burst;			/* packets in the current wakeup */
+static void
+rel_sent_ours(struct trace_pkt *p, int tin, uint64_t due_ns)
+{
+	(void)tin;
+	rel_burst++;
+	rel_sent(1, p, due_ns);
+}
+
+void ours_release_init(uint64_t, uint64_t, int, unsigned);
+int ours_release_enqueued(void (*)(struct trace_pkt *, int, uint64_t));
+int ours_release_wake(void (*)(struct trace_pkt *, int, uint64_t));
+uint64_t ours_release_next(void);
+
+/* the CPU's stalls: [start, end) in order; the end of the one t is in */
+static uint64_t (*stalls)[2];
+static int nstalls;
+
+static uint64_t
+stall_end(uint64_t t)
+{
+	int lo = 0, hi = nstalls;
+
+	while (lo < hi) {		/* the first stall ending after t */
+		int mid = (lo + hi) / 2;
+
+		if (stalls[mid][1] <= t)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return (lo < nstalls && stalls[lo][0] <= t ? stalls[lo][1] : t);
+}
+
+static void
+release_run(const char *scen, int secs, int slot_us)
+{
+	struct gen_flow fl[17];
+	struct sd_config c;
+	struct trace_pkt *lp, *op, *p;
+	size_t npkts = 0, cap = 2000000, qhead = 0;
+	uint64_t end = (uint64_t)secs * 1000000000ULL, next, wake_sched = 0,
+	    wake_at = UINT64_MAX, t;
+	uint32_t id = 0;
+	int i, nfl, tl, khz = getenv("SD_HZ") ? atoi(getenv("SD_HZ")) : 1000;
+	double rate_stall = getenv("SD_STALLS") ? atof(getenv("SD_STALLS")) : 0;
+	uint64_t stall_ns = getenv("SD_STALL_US") ?
+	    strtoull(getenv("SD_STALL_US"), NULL, 0) * 1000 : 1000000;
+	unsigned capslots = getenv("SD_CAP") ? (unsigned)atoi(getenv("SD_CAP")) : 0;
+
+	rng_gen = 1;
+	rng_linux = rng_ours = 1 ^ 0xabcdef;
+	ndrops_linux = ndrops_ours = 0;
+	memset(rs, 0, sizeof(rs));
+	rel_wakes = rel_wake_pkts = rel_wake_max = 0;
+	memset(&c, 0, sizeof(c));
+	memset(fl, 0, sizeof(fl));
+	c.flow_mode = 7;
+	rel_warm = 500000000ULL;
+	rel_down = getenv("SD_DOWN") ? atof(getenv("SD_DOWN")) : 1 / 0.95;
+	if (strcmp(scen, "bulkvoice") == 0) {
+		c.diffserv = 2;
+		c.rate = 50000000;
+		nfl = 2;
+		for (i = 0; i < 2; i++) {
+			fl[i].proto.flow = 1000 + i;
+			fl[i].proto.src = 1;
+			fl[i].proto.dst = 101;
+			fl[i].window = 65535;
+		}
+		fl[0].kind = FLOW_SPARSE;
+		fl[0].proto.dscp = 8;
+		fl[0].len_lo = fl[0].len_hi = 1278;
+		fl[0].gap_ns = 2000000;
+		fl[1].kind = FLOW_DATA;
+		fl[1].proto.dscp = 46;
+		fl[1].len_lo = fl[1].len_hi = 1500;
+		fl[1].gap_ns = 1500ULL * 8 * 1000000000 / 60000000;
+		rel_probe = 0;
+	} else if (strcmp(scen, "fast") == 0) {
+		c.diffserv = 0;
+		c.rate = (getenv("SD_RATE") ? strtoull(getenv("SD_RATE"), NULL, 0) :
+		    1000) * 1000000ULL;
+		nfl = 17;
+		for (i = 0; i < nfl; i++) {
+			fl[i].proto.flow = 1000 + i;
+			fl[i].proto.src = 1 + i % 4;
+			fl[i].proto.dst = 101 + i % 3;
+			fl[i].window = 65535;
+			fl[i].kind = FLOW_DATA;
+			fl[i].len_lo = fl[i].len_hi = 1514;
+			fl[i].gap_ns = 1514ULL * 8 * 1000000000 * 16 /
+			    (c.rate * 12 / 10);
+			fl[i].next_ns = range(0, fl[i].gap_ns);
+		}
+		fl[16].kind = FLOW_SPARSE;
+		fl[16].len_lo = fl[16].len_hi = 100;
+		fl[16].gap_ns = 1000000;
+		rel_probe = 1016;
+	} else {
+		fprintf(stderr, "release: no scenario %s\n", scen);
+		exit(2);
+	}
+	rel_rate = c.rate;
+	lp = calloc(cap, sizeof(*lp));
+	op = calloc(cap, sizeof(*op));
+	rel_arrival = calloc(cap + 1, sizeof(*rel_arrival));
+
+	nstalls = 0;
+	free(stalls);
+	stalls = calloc((size_t)(rate_stall * secs * 2 + 10), sizeof(*stalls));
+	for (t = 1000000; rate_stall > 0 && t < end; ) {
+		t += (uint64_t)(-log((mix(&rng_late) % 1000000 + 1) / 1e6) / rate_stall * 1e9);
+		stalls[nstalls][0] = t;
+		t += mix(&rng_late) % (stall_ns + 1);
+		stalls[nstalls++][1] = t;
+	}
+
+	trace_now_ns = 1000000;
+	linux_impl.init(&c);
+	ours_impl.init(&c);
+	ours_set_link_clock(getenv("SD_LINK_CLOCK") == NULL ||
+	    atoi(getenv("SD_LINK_CLOCK")) != 0);
+	if (slot_us == 0)
+		ours_release_init((uint64_t)khz, 1000000000ULL / khz, 1, 0);
+	else
+		ours_release_init(1000000, (uint64_t)slot_us * 1000, 0, capslots);
+
+	while (trace_now_ns < end) {
+		/* the next event: an arrival, sch_cake's shaper, our wakeup */
+		next = linux_next_release();
+		for (i = 0; i < nfl; i++)
+			if (fl[i].next_ns < next)
+				next = fl[i].next_ns;
+		if (wake_at < next)
+			next = wake_at;
+		/* arrivals held back by a stall: its end */
+		if (qhead < npkts && (t = stall_end(trace_now_ns)) < next)
+			next = t;
+		trace_now_ns = next > trace_now_ns ? next : trace_now_ns + 1;
+
+		for (i = 0; i < nfl; i++) {
+			struct gen_flow *f = &fl[i];
+
+			while (f->next_ns <= trace_now_ns && npkts < cap) {
+				p = &lp[npkts];
+				*p = f->proto;
+				p->id = ++id;
+				build(p, f);
+				rel_arrival[id] = trace_now_ns;
+				op[npkts++] = *p;
+				linux_impl.enqueue(p);
+				f->next_ns += strcmp(scen, "fast") == 0 ?
+				    f->gap_ns / 2 + range(0, f->gap_ns) : f->gap_ns;
+			}
+		}
+		while ((p = linux_impl.dequeue(&tl)) != NULL)
+			rel_sent(0, p, 0);
+		/* ours, when the CPU is not away: arrivals, then the wakeup */
+		if (stall_end(trace_now_ns) != trace_now_ns)
+			continue;
+		while (qhead < npkts && rel_arrival[op[qhead].id] <= trace_now_ns) {
+			ours_impl.enqueue(&op[qhead++]);
+			rel_burst = 0;
+			ours_release_enqueued(rel_sent_ours);
+		}
+		if (wake_at <= trace_now_ns) {
+			rel_burst = 0;
+			ours_release_wake(rel_sent_ours);
+			if (trace_now_ns >= rel_warm) {
+				rel_wakes++;
+				rel_wake_pkts += rel_burst;
+				if ((uint64_t)rel_burst > rel_wake_max)
+					rel_wake_max = rel_burst;
+			}
+		}
+		if (ours_release_next() != wake_sched) {
+			wake_sched = ours_release_next();
+			wake_at = wake_sched == UINT64_MAX ? UINT64_MAX :
+			    stall_end(wake_sched);
+		}
+	}
+
+	{
+		double run_s = (end - rel_warm) / 1e9;
+		struct rel_side *l = &rs[0], *o = &rs[1];
+
+		if (slot_us == 0)
+			printf("%s, stock %5d Hz:", scen, khz);
+		else
+			printf("%s, slot %5d us:", scen, slot_us);
+		printf(" %.0f wakeups/s, %.1f packets each (max %" PRIu64 "),"
+		    " %.1f Mbit/s (sch_cake %.1f)\n", rel_wakes / run_s,
+		    rel_wakes ? (double)rel_wake_pkts / rel_wakes : 0.0, rel_wake_max,
+		    o->bytes * 8 / run_s / 1e6, l->bytes * 8 / run_s / 1e6);
+		printf("    hold after due: mean %.0f, p99 %" PRIu64 ", max %.0f us\n",
+		    o->n[H_HOLD] ? o->sum[H_HOLD] / 1e3 / o->n[H_HOLD] : 0.0,
+		    rel_pct(o, H_HOLD, 0.99), o->max[H_HOLD] / 1e3);
+		printf("    next hop queue: mean %.0f, p99 %" PRIu64 ", max %.0f us"
+		    " (sch_cake %.0f, %" PRIu64 ", %.0f)\n",
+		    o->n[H_DOWN] ? o->sum[H_DOWN] / 1e3 / o->n[H_DOWN] : 0.0,
+		    rel_pct(o, H_DOWN, 0.99), o->max[H_DOWN] / 1e3,
+		    l->n[H_DOWN] ? l->sum[H_DOWN] / 1e3 / l->n[H_DOWN] : 0.0,
+		    rel_pct(l, H_DOWN, 0.99), l->max[H_DOWN] / 1e3);
+		if (rel_probe)
+			printf("    probe delay: mean %.0f, p99 %" PRIu64 ", max %.0f us"
+			    " (sch_cake %.0f, %" PRIu64 ", %.0f)\n",
+			    o->n[H_PROBE] ? o->sum[H_PROBE] / 1e3 / o->n[H_PROBE] : 0.0,
+			    rel_pct(o, H_PROBE, 0.99), o->max[H_PROBE] / 1e3,
+			    l->n[H_PROBE] ? l->sum[H_PROBE] / 1e3 / l->n[H_PROBE] : 0.0,
+			    rel_pct(l, H_PROBE, 0.99), l->max[H_PROBE] / 1e3);
+		else
+			printf("    Bulk %.2f Mbit/s (sch_cake %.2f), Voice %.2f (%.2f)\n",
+			    o->flow_bytes[0] * 8 / run_s / 1e6,
+			    l->flow_bytes[0] * 8 / run_s / 1e6,
+			    o->flow_bytes[1] * 8 / run_s / 1e6,
+			    l->flow_bytes[1] * 8 / run_s / 1e6);
+		print_link_stats();
+	}
+	free(lp);
+	free(op);
+	free(rel_arrival);
+}
+
+/*
  * Ingress mode is compared but not required to match: a drop charges
  * sch_cake's own shaper, which it checks again when DRR finds an empty
  * flow, so a dequeue can end after a drop without sending; dn_sched_cake
@@ -687,6 +993,17 @@ main(int argc, char **argv)
 		memset(&t, 0, sizeof(t));
 		for (r = 0; r < runs; r++)
 			run(seed + r, secs, &t, verbose);
+		return (0);
+	}
+	if (argc > 1 && strcmp(argv[1], "release") == 0) {
+		/* sched-diff release scenario [seconds [slot_us ...]] */
+		const char *scen = argc > 2 ? argv[2] : "fast";
+
+		secs = argc > 3 ? atoi(argv[3]) : 3;
+		if (argc <= 4)
+			release_run(scen, secs, 0);
+		for (r = 4; r < argc; r++)
+			release_run(scen, secs, atoi(argv[r]));
 		return (0);
 	}
 	if (argc > 1 && strcmp(argv[1], "pace") == 0) {

@@ -707,10 +707,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..fdcc3ab
+index 0000000..e1c7a0f
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,2845 @@
+@@ -0,0 +1,2854 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -822,6 +822,15 @@ index 0000000..fdcc3ab
 +#endif
 +
 +#define CAKE_MTU		1514	/* used for AQM rate scaling */
++/*
++ * The pipe's clock: its credit is in bits * DN_CREDIT_HZ, and it releases
++ * packets at most DN_RELEASE_NS apart. A stock dummynet does both by the
++ * tick; a dummynet with a finer release clock defines them.
++ */
++#ifndef DN_CREDIT_HZ
++#define DN_CREDIT_HZ		hz
++#define DN_RELEASE_NS		(1000000000ULL / hz)
++#endif
 +#define CAKE_TIN_QUANTUM_SHIFT	4	/* tin quantum = quantum << 4 >> weight */
 +#define COBALT_CACHE		16	/* cached 1/sqrt(count) values */
 +
@@ -1328,19 +1337,19 @@ index 0000000..fdcc3ab
 +		tin->time_next = MAX(last, link_ns + interval);
 +	si->link_time = MAX(si->link_time, link_ns) + cake_link_dur(si, len);
 +
-+	/* pipe credit is in bits * hz, gained at bw per tick. The failsafe
++	/* pipe credit is in bits * DN_CREDIT_HZ, gained at bw a second. The failsafe
 +	 * time ahead of now is debt drops may add; behind now, it is credit
 +	 * owed to sends, which drops may not take. Up to a second either
 +	 * way counts, which keeps the product in range. */
-+	debt = (int64_t)hz * si->_si.sched->link.bandwidth / 1000000 *
++	debt = (int64_t)DN_CREDIT_HZ * si->_si.sched->link.bandwidth / 1000000 *
 +	    (interval / 1000);
 +	ahead = si->failsafe_time >= now_ns ?
 +	    (int64_t)MIN(si->failsafe_time - now_ns, 1000000000ULL) :
 +	    -(int64_t)MIN(now_ns - si->failsafe_time, 1000000000ULL);
-+	/* |ahead| / 1000 <= 10^6 us, bw / 1000 < 2^32 / 1000, hz <= 10^5:
-+	 * at most 4.3 * 10^17, within int64_t */
-+	failsafe = -(ahead / 1000) * (int64_t)(si->bw / 1000) * hz / 1000;
-+	si->_si.credit = MAX(credit - (int64_t)hz * 8 * len,
++	/* |ahead| / 1000 <= 10^6 us, bw / 1000 < 2^32 / 1000,
++	 * DN_CREDIT_HZ <= 10^6: at most 4.3 * 10^18, within int64_t */
++	failsafe = -(ahead / 1000) * (int64_t)(si->bw / 1000) * DN_CREDIT_HZ / 1000;
++	si->_si.credit = MAX(credit - (int64_t)DN_CREDIT_HZ * 8 * len,
 +	    MIN(credit, MAX(-debt, failsafe)));
 +}
 +
@@ -2572,8 +2581,8 @@ index 0000000..fdcc3ab
 + * against greedy Voice got 13% less at kern.hz=1000). So they use the
 + * time each packet would leave a link paced at the pipe's rate: the
 + * previous one's plus its own length at that rate (and in ingress mode
-+ * the drops', up to the failsafe), at most one tick behind now and never
-+ * ahead of it. COBALT keeps the real time, as a packet may have arrived
++ * the drops', up to the failsafe), at most one release interval (a tick
++ * on a stock dummynet, DN_RELEASE_NS) behind now and never ahead of it. COBALT keeps the real time, as a packet may have arrived
 + * after its slot on the link. link_clock=0 goes back to dummynet's time.
 + */
 +static u_int cake_link_clock = 1;
@@ -2592,13 +2601,13 @@ index 0000000..fdcc3ab
 +static __inline uint64_t
 +cake_link_now(struct cake_si *si, uint64_t now, int decide)
 +{
-+	uint64_t tick_ns = 1000000000ULL / hz, t = si->link_time, lo;
++	uint64_t window = DN_RELEASE_NS, t = si->link_time, lo;
 +
 +	if (!cake_link_clock)
 +		return (now);
 +	if (si->cfg.flags & CAKE_INGRESS)
 +		t = MIN(t, si->failsafe_time);
-+	lo = now - MIN(now, tick_ns);
++	lo = now - MIN(now, window);
 +	if (decide)
 +		CAKE_LINK_STAT(t, lo, now);
 +	return (MIN(MAX(t, lo), now));
@@ -2810,7 +2819,7 @@ index 0000000..fdcc3ab
 +#ifndef DN_WIRE_LEN
 +		/* the pipe charges the packet length; charge it the rest */
 +		if (si->shaped)
-+			si->_si.credit -= (int64_t)hz * 8 *
++			si->_si.credit -= (int64_t)DN_CREDIT_HZ * 8 *
 +			    ((int64_t)len - m->m_pkthdr.len);
 +#endif
 +		if (si->shaped && (si->cfg.flags & CAKE_INGRESS))
