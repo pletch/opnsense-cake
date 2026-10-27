@@ -473,3 +473,63 @@ queue, and FQ-PIE, are not tested yet.
 **Gate:** passed. Bulk 3.93 Mbit/s in the harness at 1000 Hz and with
 stalls; tin shares as 1.4.2 or better; and the fine clock's gains reach
 every scheduler, most at `kern.hz=100`, where they are 15 ms of latency.
+
+### Phase 5: stress on the bench
+
+Measured 2026-10-27 on the bench at 1000 Hz, with the fork's patches
+0001–0004 (`net.inet.ip.dummynet.subtick` 2).
+
+**Many instances at once** (`test/subtick-pipes.sh`): 32 greedy TCP
+downloads through an FQ-CoDel scheduler masked by destination port, so
+that each flow has an instance of its own at 10 Mbit/s and its own events
+in the heap.
+
+| | per flow min / median / max | sum | router idle | releases between ticks |
+|---|---|---|---|---|
+| stock | 9.52 / 9.61 / 9.63; 9.41, 9.17 min in two more | 306–307 Mbit/s | 73% | – |
+| fork, tick | 4.81 / 9.61 / 9.63; 9.50, 9.53 min in two more | 298–308 | 71% | – |
+| fork, 100 µs | 9.51 / 9.61 / 9.62 | 307 | 29% | 6150/s, 6.1 packets each |
+
+The one slow flow at the tick did not come back in two more runs; stock
+has the same spread of its slowest flow. One release serves the events of
+several instances, as their keys fall on the same grid.
+
+**Contention** (`subtick-baseline.sh`, CAKE at 300 Mbit/s, a busy loop on
+host CPU 0):
+
+| VMs | release | throughput | bursts per s, mean packets | router idle / host qemu | releases: mean late, later than a slot |
+|---|---|---|---|---|---|
+| pinned (router on CPUs 0–1) | stock | 118 Mbit/s | 492, 21.0 | 58% / 100% | – (ticks 76% late) |
+| pinned | fork, 100 µs | 102 Mbit/s | 831, 11.1 | 50% / 104% | 970 µs, 54% |
+| not pinned | stock | 277 Mbit/s | 979, 24.7 | 83% / 80% | – (ticks 3% late) |
+| not pinned | fork, 100 µs | 282 Mbit/s | 5525, 4.5 | 33% / 165% | 98 µs, 37% |
+
+When the host can move the router's vCPUs away from the busy one, the
+fork works as on a quiet host. When it cannot, the router is short of CPU
+for either module, the fork's releases come about a millisecond late
+(nothing finer than the tick is left), and its extra work per release
+costs 13% of the throughput. On a router short of CPU, stay at the tick.
+
+**Swapping and changing `release_us` under load**: `test/subtick-stress.sh`
+(phases 3 and 4) passed.
+
+**The other AQMs with 0004** (rrul at 50 Mbit/s once each, CAKE_DEBUG
+build at `release_us` 100, against stock):
+
+| | stock: ICMP median / 99th, TCP down | fork, 100 µs |
+|---|---|---|
+| FQ-PIE | 1.98 / 26.6 ms, 47.3 Mbit/s | 0.74 / 28.5 ms, 47.2 |
+| FIFO + CoDel | 25.0 / 63.1 ms, 45.2 | 24.6 / 40.2 ms, 45.1 |
+| FIFO + PIE | 34.9 / 96.9 ms, 43.6 | 38.3 / 99.3 ms, 43.0 |
+
+FQ-PIE gains as FQ-CoDel does; with a single queue the pings wait behind
+the bulk flows, which the AQM's target sets (PIE's is 15 ms), so finer
+release does not show. No panics, lock warnings or CAKE check errors.
+
+**Still to do on real hardware:** the CPU cost per release (the bench's
+nested VM puts it at about 80 µs, which bare metal should not), a burst
+capture as in DESIGN.md (2.5 Gbit/s NICs shaping 1950 Mbit/s) at the tick
+and at 100 and 250 µs, and the latency gains with a NIC much faster than
+the shaped rate. The fork built on the bench VM loads on a firewall with
+the same kernel: the VM's `dummynet.ko` is the pinned kernel set's
+(26.7.8, `DUMMYNET_SHA256` in `plugin/build.conf`).
