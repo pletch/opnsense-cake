@@ -42,11 +42,13 @@ what has been measured along the way. Work happens on the
 6. **Output from the taskqueue first.** The callout enqueues `dn_task` on
    `dn_tq`, which adds jitter; measure it before sending directly from
    the callout.
-7. **CAKE's link clock from the fine clock.** `dn_sched_cake.c` takes the
-   pipe's credit unit and its release interval from `DN_CREDIT_HZ` and
-   `DN_RELEASE_NS`, by default `hz` and a tick; the fork defines them, so
-   the link clock's window becomes the slot. `link_clock=0` stays for
-   comparison.
+7. **CAKE on the fine clock.** `dn_sched_cake.c` takes the pipe's credit
+   unit, its release interval and the grain that widens its targets from
+   `DN_CREDIT_HZ`, `DN_RELEASE_NS` and `DN_RELEASE_GRAIN_NS`, by default
+   `hz` and a tick; the fork defines them, so the link clock's window and
+   the targets' floor become the slot. A late release's batch keeps the
+   link's time without the fork's help (phase 4). `link_clock=0` stays
+   for comparison.
 
 ## Packaging
 
@@ -368,3 +370,106 @@ In one boot, `contention.sh` and rrul (50 Mbit/s):
 **Gate:** passed for behaviour (no regression, bursts and latency as
 modelled or better); the CPU cost on this bench is high and is the open
 question for phase 5. `release_us` stays opt-in, the tick by default.
+
+### Phase 4: CAKE, and the other schedulers, on the fine clock
+
+**The link clock after a late release.** Phases 1 and 3 left tin shares
+under CPU stalls no better with the fine clock: the link clock may lag a
+window (a slot, or the tick) behind now, so a batch carrying more credit
+than that (a late release) falls back to the real time. CAKE now notes the
+real time of each release of the pipe (`serve_sched()` stamps the
+instance's `sched_time` once per call, in ticks on a stock dummynet and in
+µs in the fork, which tells a release from the next packet of the same
+one) and, while its queue has been backlogged since the previous release,
+lets the link clock lag back to that release. This is in CAKE itself, so
+it helps the released module on a stock dummynet as well
+([DESIGN.md](DESIGN.md), the link clock). In the harness
+(`sched-diff.sh release bulkvoice`, Bulk against greedy Voice, sch_cake
+3.93 Mbit/s):
+
+| stalls | stock 1000 Hz before / after | 100 µs before / after | 250 µs before / after |
+|---|---|---|---|
+| none | 3.93 / 3.93 | 3.93 / 3.93 | 3.93 / 3.93 |
+| 40/s up to 1 ms | 3.92 / 3.92 | 3.92 / 3.93 | 3.90 / 3.93 |
+| 60/s up to 8 ms | 3.75 / 3.92 | 3.75 / 3.93 | 3.75 / 3.93 |
+
+(A first version noted the time of the last packet sent instead; the
+first packet of a late batch moved it, and the rest of the batch fell back
+as before: 3.76.) The rest of the harness is unchanged: `sched-diff.sh`
+and `link`, 0 mismatches; `pace` 3.92 / 3.93; `fuzz.sh` and
+`cobalt-diff.sh` clean; `release fast` as in phase 1. In `pace-random`
+(150 scenarios each, mean of each scenario's worst tin's deviation from
+sch_cake) the shares are the same, and the clamps nearly go:
+
+| ticks | tin deviation egress / ingress, before → after | pulled back, before → after |
+|---|---|---|
+| 1000 Hz | 0.69 / 0.53% → the same | 0.74 / 2.87% → the same |
+| 1000 Hz, 10% late | 0.72 / 0.74% → the same | 10.2 / 11.7% → 0.67 / 2.29% |
+| 1000 Hz, 50% late | 1.18 / 2.29% → 1.19 / 2.32% | 46.6 / 47.9% → 0.37 / 1.81% |
+| 100 Hz | 4.30 / 6.95% → the same | 0.06 / 1.03% → the same |
+
+The random scenarios' deviations come from elsewhere (their small memory
+limits); without the link clock, Bulk against greedy Voice at slots of 25–
+100 µs gets 3.89–3.93 Mbit/s with light stalls but 3.75 with heavy ones,
+so the link clock stays needed in the fork too. On the bench, with a busy
+loop on one of the router's host CPUs (66–75% of ticks late), the Bulk
+flow against greedy Voice got all its 5.0 Mbit/s (0.1–0.9% loss, at the
+tick and at 100 µs) with the new rule and 4.8 (3–4% loss, at the tick)
+with the old; with Voice's TCP flow held back by the stalls (27–36 Mbit/s
+with either rule, three alternating runs each) that is no measure of
+sch_cake's shares (4.2 on a calm link), only that nothing got worse.
+
+**CAKE's targets** (`0003-cake-target-release-interval.patch`). CAKE
+raises a tin's target to 1.5 × `DN_RELEASE_GRAIN_NS`, the tick on a stock
+dummynet; the fork sets it to the release interval. At `kern.hz=100`, the
+default in a VM, with CAKE configured after `release_us`: tin targets 15
+ms on the stock dummynet and on the fork at the tick, 5 ms (5.8 for the
+slowest tin) at 100 µs.
+
+**The AQMs' clock** (`0004-aqm-clock-uptime.patch`). CoDel, PIE,
+FQ-CoDel and FQ-PIE measure sojourn with `AQM_UNOW`, `curr_time * tick`;
+it is now the uptime in µs (`sbinuptime()`), as CAKE's clock is.
+
+**FQ-CoDel and the rest gain as CAKE does.** The release is dummynet's,
+so every scheduler's pipe releases on the grid. FQ-CoDel, 1000 Hz, one
+boot (rrul at 50 Mbit/s twice each; bursts at 300 Mbit/s):
+
+| | stock | fork, 100 µs | fork with 0004, 100 µs | fork with 0004, tick |
+|---|---|---|---|---|
+| bursts per s, mean packets | 941, 26.6 | 7083, 3.5 | 6933, 3.6 | 893, 27.8 |
+| rrul ICMP median | 1.94, 2.12 ms | 0.71, 0.70 ms | 0.72, 0.69 ms | 1.79, 1.87 ms |
+| rrul UDP BE median | 2.33, 2.64 ms | 0.81, 0.77 ms | 0.80, 0.81 ms | 1.93, 2.23 ms |
+| TCP download sum | 47.3 Mbit/s | 47.0, 47.2 | 47.2, 47.1 | 47.3 |
+
+At `kern.hz=100` (rrul once each; CAKE in diffserv3):
+
+| | stock | fork with 0004, tick | fork with 0004, 100 µs |
+|---|---|---|---|
+| FQ-CoDel: ICMP median / 99th | 15.2 / 22.8 ms | 14.7 / 22.5 ms | 0.75 / 5.0 ms |
+| CAKE: ICMP median / 99th | 15.0 / 22.4 ms | 14.8 / 22.9 ms | 0.88 / 6.0 ms |
+| TCP download sum | 47.9 Mbit/s | 47.0–47.6 | 47.0–47.1 |
+
+rrul's pings ride FQ-CoDel's sparse queues, so they show the release, not
+the AQM: with and without 0004 at 100 µs and 100 Hz, ICMP medians are
+0.68–0.71 ms both. The AQM shows in a bulk flow's own RTT: one greedy TCP
+download through FQ-CoDel, the sender's smoothed RTT sampled every 0.5 s
+for 18 s (`ss -ti`, the data connection):
+
+| kern.hz | stock | fork, 100 µs | fork with 0004, 100 µs | fork with 0004, tick |
+|---|---|---|---|---|
+| 100 | median 17.1, p90 23.2 ms | 10.3, 10.7 / 11.9, 11.8 ms | 6.6, 7.0 / 8.5, 8.4 ms | |
+| 1000 | 7.1 / 8.5 ms | 6.7, 6.4 / 8.2, 8.1 ms | 6.7, 6.8 / 8.3, 8.0 ms | 7.6 / 9.5 ms |
+
+At 100 Hz, finer release takes 7 ms off the bulk flow's RTT and the AQM
+clock another 4: with ticks of 10 ms, FQ-CoDel saw each sojourn as 0 or
+10 ms against its 5 ms target. At 1000 Hz a tick is fine enough and it
+makes no difference. Throughput 47.9–48.3 Mbit/s in all.
+
+`robustness.sh` (CAKE_DEBUG, `release_us` 100, the link clock change
+included) and `test/subtick-stress.sh` passed on the fork with 0001–0003.
+0004 was run only in the FQ-CoDel tests above; CoDel and PIE on a plain
+queue, and FQ-PIE, are not tested yet.
+
+**Gate:** passed. Bulk 3.93 Mbit/s in the harness at 1000 Hz and with
+stalls; tin shares as 1.4.2 or better; and the fine clock's gains reach
+every scheduler, most at `kern.hz=100`, where they are 15 ms of latency.

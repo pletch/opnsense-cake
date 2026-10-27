@@ -1,2 +1,4 @@
 0001-dummynet_st-module.patch
 0002-release-between-ticks.patch
+0003-cake-target-release-interval.patch
+0004-aqm-clock-uptime.patch

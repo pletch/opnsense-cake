@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 17:36:14 -0400
+Subject: [PATCH] dummynet_st: CAKE's targets from the release interval
+
+The third of the sub-tick release series (opnsense-cake SUBTICK.md).
+CAKE raises a tin's target to at least 1.5 times DN_RELEASE_GRAIN_NS,
+the tick on a stock dummynet (15 ms at kern.hz=100), because packets
+leave in batches that far apart. Here they are release_us apart, so
+the target need not grow beyond 1.5 times that. The targets are set when
+a pipe is configured, so release_us should be set before.
+---
+ sys/netpfil/ipfw/ip_dn_private.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 13ddfe05115..dd156df7c9e 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -101,6 +101,9 @@ set_oid(struct dn_id *o, int type, int len)
+  */
+ #define DN_CREDIT_HZ	1000000
+ #define DN_RELEASE_NS	((uint64_t)dn_release() * 1000)
++/* CAKE widens its targets to 1.5 release intervals rather than ticks;
++ * they are set when a pipe is configured, so set release_us first */
++#define DN_RELEASE_GRAIN_NS	DN_RELEASE_NS
+ extern int dn_release_us;	/* net.inet.ip.dummynet.release_us, 0: the tick */
+ 
+ /* the longest a due packet waits for release, in us */

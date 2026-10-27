@@ -1,7 +1,7 @@
 #!/bin/sh
 # What dummynet's tick costs and how it releases packets, at the router's
 # current kern.hz (SUBTICK.md, phase 0), on the lul-setup.sh bench with
-# CAKE on both pipes at RATE:
+# SCHED (cake, or fq_codel or fifo) on both pipes at RATE:
 #
 #   idle    the router's CPU use and the host CPU of its qemu process with
 #           no traffic (dummynet's callout runs every tick even then)
@@ -13,7 +13,7 @@
 # instead, which keeps it backlogged (TCP may let it run empty, and then
 # the gaps are those of the arrivals), at some CPU cost on the router.
 #
-#   RATE=300Mbit/s LEN=30 COUNT=60000 LOAD=tcp test/subtick-baseline.sh
+#   RATE=300Mbit/s LEN=30 COUNT=60000 LOAD=tcp SCHED=cake test/subtick-baseline.sh
 #
 # The router fetches subtick-burst.sh from a web server on this machine
 # (port 8765), as sercmd mangles quotes and backslashes. Contention and
@@ -29,6 +29,7 @@ LEN=${LEN:-30}
 COUNT=${COUNT:-60000}
 SECS=8
 LOAD=${LOAD:-tcp}
+SCHED=${SCHED:-cake}
 
 cli() {
 	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
@@ -65,7 +66,7 @@ sleep 1
 "$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "fetch -qo /root/work/subtick-burst.sh http://10.0.2.2:8765/subtick-burst.sh" >/dev/null
 opn "cd /root/work && DOWN=$RATE UP=$RATE ./lul-setup.sh" 60 | grep lul-setup
-opn "/root/work/lul-sched.sh cake" >/dev/null
+opn "/root/work/lul-sched.sh $SCHED" >/dev/null
 
 cpu idle
 

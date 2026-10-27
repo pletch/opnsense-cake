@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 17:54:33 -0400
+Subject: [PATCH] dummynet_st: the AQMs' clock from uptime, not ticks
+
+The fourth of the sub-tick release series (opnsense-cake SUBTICK.md).
+CoDel, PIE, FQ-CoDel and FQ-PIE stamp packets and measure their sojourn
+with AQM_UNOW, which was curr_time * tick: the delay in steps of a tick,
+1 ms at kern.hz=1000 and 10 ms at 100, against a 5 ms target. With
+releases between ticks the packets leave much sooner than that, so the
+AQMs now read the uptime in us (sbinuptime()), as CAKE does; it is
+truncated to aqm_time_t and wraps as before. The unused NOW (ms) stays.
+---
+ sys/netpfil/ipfw/dn_aqm.h | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/sys/netpfil/ipfw/dn_aqm.h b/sys/netpfil/ipfw/dn_aqm.h
+index 50a6ed7799a..50ea245c872 100644
+--- a/sys/netpfil/ipfw/dn_aqm.h
++++ b/sys/netpfil/ipfw/dn_aqm.h
+@@ -39,7 +39,13 @@
+ /* NOW is the current time in millisecond*/
+ #define NOW ((V_dn_cfg.curr_time * tick) / 1000)
+ 
+-#define AQM_UNOW (V_dn_cfg.curr_time * tick)
++/*
++ * The AQMs' clock, us (SUBTICK.md): uptime, not dummynet's ticks, so that
++ * CoDel, PIE, FQ-CoDel and FQ-PIE see a packet's sojourn as it is rather
++ * than in steps of a tick. Truncated to aqm_time_t, which wraps as the
++ * tick-based value did.
++ */
++#define AQM_UNOW ((aqm_time_t)sbttous(sbinuptime()))
+ #define AQM_TIME_1US ((aqm_time_t)(1))
+ #define AQM_TIME_1MS ((aqm_time_t)(1000))
+ #define AQM_TIME_1S ((aqm_time_t)(AQM_TIME_1MS * 1000))
