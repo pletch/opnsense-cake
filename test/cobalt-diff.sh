@@ -15,7 +15,7 @@ trap 'rm -rf "$WRK"' EXIT
 
 if [ -z "${SCH_CAKE:-}" ]; then
 	SCH_CAKE=$WRK/sch_cake.c
-	curl -fsSL -o "$SCH_CAKE" \
+	curl -fsSL --retry 5 --retry-delay 10 -o "$SCH_CAKE" \
 	    "https://raw.githubusercontent.com/torvalds/linux/$LINUX_COMMIT/net/sched/sch_cake.c"
 fi
 

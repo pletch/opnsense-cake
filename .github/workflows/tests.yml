@@ -27,6 +27,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # the Linux sources once, for all three comparisons: raw.githubusercontent.com
+      # rate-limits repeated downloads. The commit is LINUX_COMMIT of the scripts
+      - name: Linux sch_cake.c and pkt_sched.h
+        run: |
+          raw=https://raw.githubusercontent.com/torvalds/linux/700b4c6c70d6a36e6878c5ea092c4877da3f10d8
+          mkdir -p "$RUNNER_TEMP/linux"
+          curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/linux/sch_cake.c" "$raw/net/sched/sch_cake.c"
+          curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/linux/pkt_sched.h" "$raw/include/uapi/linux/pkt_sched.h"
+          echo "SCH_CAKE=$RUNNER_TEMP/linux/sch_cake.c" >> "$GITHUB_ENV"
+          echo "PKT_SCHED=$RUNNER_TEMP/linux/pkt_sched.h" >> "$GITHUB_ENV"
       - name: sched-diff.sh, lockstep
         run: test/sched-diff.sh
       - name: sched-diff.sh, link clock

@@ -21,11 +21,11 @@ RAW=https://raw.githubusercontent.com/torvalds/linux/$LINUX_COMMIT
 
 if [ -z "${SCH_CAKE:-}" ]; then
 	SCH_CAKE=$WRK/sch_cake.c
-	curl -fsSL -o "$SCH_CAKE" "$RAW/net/sched/sch_cake.c"
+	curl -fsSL --retry 5 --retry-delay 10 -o "$SCH_CAKE" "$RAW/net/sched/sch_cake.c"
 fi
 if [ -z "${PKT_SCHED:-}" ]; then
 	PKT_SCHED=$WRK/pkt_sched.h
-	curl -fsSL -o "$PKT_SCHED" "$RAW/include/uapi/linux/pkt_sched.h"
+	curl -fsSL --retry 5 --retry-delay 10 -o "$PKT_SCHED" "$RAW/include/uapi/linux/pkt_sched.h"
 fi
 
 "$TOP/test/sched-diff/extract-linux.sh" "$SCH_CAKE" "$PKT_SCHED" >"$WRK/linux-cake.inc"
