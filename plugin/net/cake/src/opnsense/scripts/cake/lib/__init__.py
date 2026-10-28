@@ -53,8 +53,10 @@ ST_LOADED = '/var/run/dummynet-st.loaded'
 ST_TRYING = '/conf/dummynet-st.loading'
 # there while dummynet_st.ko is in use, kept across a reboot, and removed by a clean
 # shutdown (rc.syshook.d/stop/90-cake) or when the stock dummynet comes back. Its twin in
-# /var/run, which a boot clears, tells this boot's marker from one a crash left behind:
-# then the stock dummynet is used until Apply on the CAKE page
+# /var/run, which a boot clears, tells this boot's marker from one an earlier boot left
+# behind; unless the kernel's message buffer shows that boot ended in an orderly reboot
+# (reboot(8) skips the shutdown scripts), the stock dummynet is used until Apply on the
+# CAKE page
 ST_ACTIVE = '/conf/dummynet-st.active'
 ST_ACTIVE_BOOT = '/var/run/dummynet-st.active'
 # net.inet.ip.dummynet.release_us when the setting is missing or invalid
@@ -395,7 +397,7 @@ def st_status():
                            'Apply on the CAKE page tries it again'
     if result['reason'] == '' and st_crashed() and not result['loaded']:
         result['reason'] = 'the last boot ended without a clean shutdown while dummynet-st was in use ' \
-                           '(a crash or a power cut); Apply on the CAKE page tries it again'
+                           '(a panic, a power cut or a reset); Apply on the CAKE page tries it again'
     result['usable'] = result['reason'] == ''
     # an upgrade replaced the file since the wrapper loaded it
     result['current'] = None
@@ -474,9 +476,38 @@ def st_active(active):
         pass
 
 
+def previous_boot_end():
+    """ how the boot before this one ended, from the kernel's message buffer, which a warm
+    reboot keeps: every reboot logs its uptime, a panic its message first
+    :return: 'panic', 'reboot', or None when the buffer does not tell (a power cut or a
+             reset, or this boot's messages overwrote it)
+    """
+    out = subprocess.run(['/sbin/sysctl', '-n', 'kern.msgbuf'], capture_output=True, text=True,
+                         errors='replace')
+    boots = out.stdout.split('---<<BOOT>>---') if out.returncode == 0 else []
+    if len(boots) < 2:
+        return None
+    if 'panic:' in boots[-2]:
+        return 'panic'
+    if 'Uptime:' in boots[-2]:
+        return 'reboot'
+    return None
+
+
 def st_crashed():
-    """ whether a boot ended without a clean shutdown while dummynet_st.ko was in use """
-    return os.path.exists(ST_ACTIVE) and not os.path.exists(ST_ACTIVE_BOOT)
+    """ whether a boot ended without a clean shutdown while dummynet_st.ko was in use: its
+    marker is left, and the message buffer does not show an orderly reboot. Decided once
+    a boot, as this boot's messages may overwrite the last one's.
+    """
+    if not os.path.exists(ST_ACTIVE) or os.path.exists(ST_ACTIVE_BOOT):
+        return False
+    if previous_boot_end() == 'reboot':
+        try:
+            os.unlink(ST_ACTIVE)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def set_release(release_us):

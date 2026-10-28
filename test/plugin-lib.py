@@ -222,6 +222,8 @@ class Subtick(unittest.TestCase):
         lib.ST_ACTIVE_BOOT = os.path.join(d, 'run-dummynet-st.active')
         lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
         self.loaded = False
+        # the kernel's message buffer: a power cut's, which keeps no earlier boot
+        self.msgbuf = '[1] FreeBSD 15.1-RELEASE\n'
         lib.subprocess.run = self.run_cmd
 
     def tearDown(self):
@@ -230,6 +232,8 @@ class Subtick(unittest.TestCase):
         self.dir.cleanup()
 
     def run_cmd(self, args, **kwargs):
+        if args[:3] == ['/sbin/sysctl', '-n', 'kern.msgbuf']:
+            return lib.subprocess.CompletedProcess(args, 0, self.msgbuf, '')
         # kldstat -q -n dummynet_st.ko
         return lib.subprocess.CompletedProcess(args, 0 if self.loaded else 1, '', '')
 
@@ -335,6 +339,27 @@ class Subtick(unittest.TestCase):
         # Apply (the retry action) removes the marker
         os.unlink(lib.ST_ACTIVE)
         self.assertTrue(lib.st_status()['usable'])
+
+    def test_active_after_reboot(self):
+        # reboot(8) skips the shutdown scripts, but the kernel logged an orderly reboot
+        self.install()
+        lib.st_active(True)
+        os.unlink(lib.ST_ACTIVE_BOOT)
+        self.msgbuf = '[5] dummynet_st loaded\n[130] Uptime: 2m10s\n---<<BOOT>>---\n[1] FreeBSD\n'
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertFalse(os.path.exists(lib.ST_ACTIVE))
+
+    def test_active_after_panic(self):
+        # a panic logs its uptime too, after the panic
+        self.install()
+        lib.st_active(True)
+        os.unlink(lib.ST_ACTIVE_BOOT)
+        self.msgbuf = '[90] panic: page fault\n[90] Uptime: 1m30s\n---<<BOOT>>---\n[1] FreeBSD\n'
+        self.assertEqual(lib.previous_boot_end(), 'panic')
+        self.assertFalse(lib.st_status()['usable'])
+        # only the boot before this one counts
+        self.msgbuf = '[90] panic: x\n---<<BOOT>>---\n[60] Uptime: 1m\n---<<BOOT>>---\n[1] FreeBSD\n'
+        self.assertEqual(lib.previous_boot_end(), 'reboot')
 
     def test_active_after_clean_shutdown(self):
         # the stop hook removed the marker; the boot cleared its twin
