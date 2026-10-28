@@ -1162,7 +1162,10 @@ cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 {
 	struct ip *ip;
 	struct ip6_hdr *ip6;
-	uint8_t tuple[41];
+	/* 41 bytes hashed, rounded up to whole words: on an aligned key
+	 * jenkins_hash() reads the last word whole and masks off the bytes
+	 * past the end, which KASAN reports */
+	uint8_t tuple[44];
 	int off, len, portoff, ports, alen;
 	uint8_t proto;
 	uint32_t h;

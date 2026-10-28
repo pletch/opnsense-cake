@@ -725,3 +725,41 @@ merged, 47 Mbit/s with the hold on). WITNESS reported no lock order
 reversal, sleep with a spin lock held or panic beyond the three reversals
 the base system logs at boot (callout and sched lock, the terminal lock
 and callout, `vtnet` with `in6_multi_sx`), none in dummynet.
+
+### KASAN (2026-10-28)
+
+WITNESS and INVARIANTS see locking and asserted state, not stray memory
+accesses. The bench booted (once, by `nextboot -k`) a second kernel of
+OPNsense's own configuration with `KASAN`, `INVARIANTS`,
+`INVARIANT_SUPPORT` and `DDB` (WITNESS left out, already covered), and the
+CAKE_DEBUG fork built against it (`KERNBUILDDIR`, so the module is
+instrumented too: it calls the `__asan` checks, the WITNESS build had
+none). The os-cake entries were off, so that the boot did not load the
+packaged, uninstrumented fork.
+
+The first boot panicked in OPNsense's pf before any dummynet code ran:
+`ip6_set_fwdtag()` (`sys/netinet6/ip6_output.c`, from "shared IP
+forwarding") allocates the forwarding tag with `sizeof(*dst)`, a
+`sockaddr_in6`, and then writes `if_index`, which `struct ip6_fwdtag` has
+after it: a 2-byte write past the allocation on every IPv6 `route-to`. The
+IPv4 version allocates `sizeof(*fwd_info)`. Without KASAN the tag comes
+from malloc's 64-byte zone, so the write lands in slack. The bench kernel
+was built with `sizeof(*fwd_info)`, for this test; still in stable/26.7.
+
+On that kernel, `robustness.sh` then panicked in CAKE, in its `ipv6` test:
+`cake_hash_flow()` hashes its 41-byte IPv6 tuple with `jenkins_hash()`,
+which, on an aligned key, reads the last word whole and masks off the
+bytes past the end, so it read 3 bytes past the stack array (IPv4's 17
+bytes stay inside it). Harmless on a normal kernel, as the read cannot
+leave the word, but out of bounds; the userland fuzz and differential
+harnesses have their own `jenkins_hash()` and could not see it. The tuple
+is now 44 bytes, in `dn_sched_cake.c` and `opnsense-src-cake.patch` (so
+in `dn_cake.ko`, the built-in CAKE and the fork alike); the extra bytes
+are zero and masked off, so every hash is unchanged.
+
+With that fix, at `release_us` 100: `robustness.sh` all tests passed
+(`ipv6` 0% ping loss and 47 Mbit/s; `unload` skipped, CAKE being built
+in), and `subtick-stress.sh` all of toggle, swap, cycles (8 of 8), bounds,
+pause and coalesce (6401 wakeups merged, `release_late_max` 10504 µs, 47
+Mbit/s with the hold on), with `check_errors` 0 and no KASAN report or
+panic in dmesg.

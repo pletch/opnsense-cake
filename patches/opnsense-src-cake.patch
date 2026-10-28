@@ -707,10 +707,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..22b2cd4
+index 0000000..2d8b73d
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,2874 @@
+@@ -0,0 +1,2877 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -1875,7 +1875,10 @@ index 0000000..22b2cd4
 +{
 +	struct ip *ip;
 +	struct ip6_hdr *ip6;
-+	uint8_t tuple[41];
++	/* 41 bytes hashed, rounded up to whole words: on an aligned key
++	 * jenkins_hash() reads the last word whole and masks off the bytes
++	 * past the end, which KASAN reports */
++	uint8_t tuple[44];
 +	int off, len, portoff, ports, alen;
 +	uint8_t proto;
 +	uint32_t h;
