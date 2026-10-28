@@ -231,7 +231,8 @@ with their results (`test/ticks.sh`).
   removes it; a boot that finds it left after a panic (from the kernel's
   message buffer), or after the second boot in a row that ended without a
   clean shutdown or an orderly `reboot` (power cuts, resets, hangs;
-  `/conf/dummynet-st.unclean` counts them), does not load the fork either.
+  `/conf/dummynet-st.unclean` counts them), does not load the fork either,
+  and keeps it out across later boots (`/conf/dummynet-st.held`).
   The wrapper then uses the stock dummynet, and the CAKE page says why,
   until Apply there tries it again.
 

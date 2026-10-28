@@ -210,8 +210,8 @@ class Subtick(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED,
-                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_CHECKED, lib.DUMMYNET,
-                      lib.subprocess.run)
+                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
+                      lib.DUMMYNET, lib.subprocess.run)
         d = self.dir.name
         lib.CONFIG = os.path.join(d, 'config.xml')
         lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
@@ -222,6 +222,7 @@ class Subtick(unittest.TestCase):
         lib.ST_ACTIVE = os.path.join(d, 'dummynet-st.active')
         lib.ST_ACTIVE_BOOT = os.path.join(d, 'run-dummynet-st.active')
         lib.ST_UNCLEAN = os.path.join(d, 'dummynet-st.unclean')
+        lib.ST_HELD = os.path.join(d, 'dummynet-st.held')
         lib.ST_CHECKED = os.path.join(d, 'run-dummynet-st.checked')
         lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
         self.loaded = False
@@ -231,8 +232,8 @@ class Subtick(unittest.TestCase):
 
     def tearDown(self):
         (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED, lib.ST_TRYING,
-         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_CHECKED, lib.DUMMYNET,
-         lib.subprocess.run) = self.saved
+         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
+         lib.DUMMYNET, lib.subprocess.run) = self.saved
         self.dir.cleanup()
 
     def run_cmd(self, args, **kwargs):
@@ -352,8 +353,24 @@ class Subtick(unittest.TestCase):
         lib.st_active(False)
         self.assertFalse(lib.st_status()['usable'])
         # Apply (the retry action)
-        for path in [lib.ST_ACTIVE, lib.ST_UNCLEAN, lib.ST_CHECKED]:
+        for path in [lib.ST_ACTIVE, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED]:
             os.unlink(path)
+        self.assertTrue(lib.st_status()['usable'])
+
+    def test_held_across_boots(self):
+        # kept out after a panic: still out after the next boot ends unexplained, or cleanly
+        self.install()
+        lib.st_active(True)
+        self.boot('[66] panic: x\n[66] Uptime: 1m6s\n---<<BOOT>>---\n[1] FreeBSD\n')
+        self.assertIn('ended in a panic', lib.st_status()['reason'])
+        lib.st_active(False)
+        self.boot('[1] FreeBSD\n')
+        self.assertIn('ended in a panic', lib.st_status()['reason'])
+        self.boot('[60] Uptime: 1m\n---<<BOOT>>---\n[1] FreeBSD\n')
+        self.assertFalse(lib.st_status()['usable'])
+        for path in [lib.ST_ACTIVE, lib.ST_HELD, lib.ST_CHECKED]:
+            if os.path.exists(path):
+                os.unlink(path)
         self.assertTrue(lib.st_status()['usable'])
 
     def test_unclean_count_cleared(self):

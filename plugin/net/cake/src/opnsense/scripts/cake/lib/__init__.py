@@ -58,11 +58,13 @@ ST_TRYING = '/conf/dummynet-st.loading'
 # (reboot(8) skips the shutdown scripts) is clean, a panic keeps the stock dummynet until
 # Apply on the CAKE page, and an end it does not explain (a power cut, a reset, a hang)
 # does so only the ST_UNCLEAN_MAX'th time in a row (ST_UNCLEAN counts them; a clean
-# shutdown or Apply clears it). ST_CHECKED holds this boot's verdict.
+# shutdown or Apply clears it). ST_HELD keeps a verdict to stay out until Apply, across
+# boots, and ST_CHECKED holds this boot's.
 ST_ACTIVE = '/conf/dummynet-st.active'
 ST_ACTIVE_BOOT = '/var/run/dummynet-st.active'
 ST_UNCLEAN = '/conf/dummynet-st.unclean'
 ST_UNCLEAN_MAX = 2
+ST_HELD = '/conf/dummynet-st.held'
 ST_CHECKED = '/var/run/dummynet-st.checked'
 # net.inet.ip.dummynet.release_us when the setting is missing or invalid
 RELEASE_DEFAULT = 250
@@ -557,6 +559,13 @@ def st_crashed():
         pass
     verdict = ''
     try:
+        if os.path.exists(ST_HELD):
+            # decided at an earlier boot: until Apply, whatever this one follows
+            with open(ST_HELD) as f_in:
+                verdict = f_in.read().strip() or 'unclean'
+            with open(ST_CHECKED, 'w') as f_out:
+                f_out.write(verdict + '\n')
+            return verdict
         end = previous_boot_end()
         if end == 'reboot':
             remove_file(ST_UNCLEAN)
@@ -571,6 +580,8 @@ def st_crashed():
             if verdict == '':
                 # this time it may load again, and mark itself in use for this boot
                 remove_file(ST_ACTIVE)
+            else:
+                write_file(ST_HELD, verdict + '\n')
         with open(ST_CHECKED, 'w') as f_out:
             f_out.write(verdict + '\n')
     except OSError:
