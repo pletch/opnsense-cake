@@ -210,7 +210,8 @@ class Subtick(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED,
-                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.DUMMYNET, lib.subprocess.run)
+                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_CHECKED, lib.DUMMYNET,
+                      lib.subprocess.run)
         d = self.dir.name
         lib.CONFIG = os.path.join(d, 'config.xml')
         lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
@@ -220,6 +221,8 @@ class Subtick(unittest.TestCase):
         lib.ST_TRYING = os.path.join(d, 'dummynet-st.loading')
         lib.ST_ACTIVE = os.path.join(d, 'dummynet-st.active')
         lib.ST_ACTIVE_BOOT = os.path.join(d, 'run-dummynet-st.active')
+        lib.ST_UNCLEAN = os.path.join(d, 'dummynet-st.unclean')
+        lib.ST_CHECKED = os.path.join(d, 'run-dummynet-st.checked')
         lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
         self.loaded = False
         # the kernel's message buffer: a power cut's, which keeps no earlier boot
@@ -228,7 +231,8 @@ class Subtick(unittest.TestCase):
 
     def tearDown(self):
         (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED, lib.ST_TRYING,
-         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.DUMMYNET, lib.subprocess.run) = self.saved
+         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_CHECKED, lib.DUMMYNET,
+         lib.subprocess.run) = self.saved
         self.dir.cleanup()
 
     def run_cmd(self, args, **kwargs):
@@ -324,20 +328,46 @@ class Subtick(unittest.TestCase):
         lib.st_active(False)
         self.assertFalse(os.path.exists(lib.ST_ACTIVE) or os.path.exists(lib.ST_ACTIVE_BOOT))
 
-    def test_active_after_crash(self):
-        # in use when the last boot ended without a clean shutdown (this boot's twin is
-        # gone): the stock dummynet until Apply, even after the wrapper ran on it
+    def boot(self, msgbuf):
+        # a new boot, after one that ended as msgbuf says: /var/run is cleared
+        for path in [lib.ST_ACTIVE_BOOT, lib.ST_CHECKED]:
+            if os.path.exists(path):
+                os.unlink(path)
+        self.msgbuf = msgbuf
+
+    def test_active_after_unclean(self):
+        # a power cut, a reset or a hang (no orderly end in the message buffer): once is
+        # let through, the second time in a row keeps the stock dummynet until Apply
         self.install()
         lib.st_active(True)
-        os.unlink(lib.ST_ACTIVE_BOOT)
-        self.assertTrue(lib.st_crashed())
+        self.boot('[1] FreeBSD\n')
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertTrue(lib.st_status()['usable'])  # decided once a boot
+        self.assertEqual(lib.read_count(lib.ST_UNCLEAN), 1)
+        lib.st_active(True)
+        self.boot('[1] FreeBSD\n')
         st = lib.st_status()
         self.assertFalse(st['usable'])
-        self.assertIn('without a clean shutdown', st['reason'])
+        self.assertIn('the last 2 boots ended without a clean shutdown', st['reason'])
         lib.st_active(False)
         self.assertFalse(lib.st_status()['usable'])
-        # Apply (the retry action) removes the marker
-        os.unlink(lib.ST_ACTIVE)
+        # Apply (the retry action)
+        for path in [lib.ST_ACTIVE, lib.ST_UNCLEAN, lib.ST_CHECKED]:
+            os.unlink(path)
+        self.assertTrue(lib.st_status()['usable'])
+
+    def test_unclean_count_cleared(self):
+        # a clean shutdown (the stop hook) or an orderly reboot starts the count again
+        self.install()
+        lib.st_active(True)
+        self.boot('[1] FreeBSD\n')
+        self.assertTrue(lib.st_status()['usable'])
+        lib.st_active(True)
+        self.boot('[60] Uptime: 1m\n---<<BOOT>>---\n[1] FreeBSD\n')
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertEqual(lib.read_count(lib.ST_UNCLEAN), 0)
+        lib.st_active(True)
+        self.boot('[1] FreeBSD\n')
         self.assertTrue(lib.st_status()['usable'])
 
     def test_active_after_reboot(self):
@@ -356,7 +386,9 @@ class Subtick(unittest.TestCase):
         os.unlink(lib.ST_ACTIVE_BOOT)
         self.msgbuf = '[90] panic: page fault\n[90] Uptime: 1m30s\n---<<BOOT>>---\n[1] FreeBSD\n'
         self.assertEqual(lib.previous_boot_end(), 'panic')
-        self.assertFalse(lib.st_status()['usable'])
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertIn('ended in a panic', st['reason'])
         # only the boot before this one counts
         self.msgbuf = '[90] panic: x\n---<<BOOT>>---\n[60] Uptime: 1m\n---<<BOOT>>---\n[1] FreeBSD\n'
         self.assertEqual(lib.previous_boot_end(), 'reboot')

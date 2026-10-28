@@ -3,7 +3,7 @@
         <id>cake.general.subtick</id>
         <label>Sub-tick release (beta)</label>
         <type>checkbox</type>
-        <help>Shape with dummynet-st: dummynet with CAKE built in, which releases packets between clock ticks rather than a tick's worth at a time, so they wait less and leave in smaller bursts. Off: the stock dummynet and dn_cake.ko. The stock dummynet is used anyway when dummynet-st does not match the kernel, and after a boot that ended without a clean shutdown while it was in use, until Apply. Beta, on by default: to stay on the stock dummynet, untick this and Apply.</help>
+        <help>Shape with dummynet-st: dummynet with CAKE built in, which releases packets between clock ticks rather than a tick's worth at a time, so they wait less and leave in smaller bursts. Off: the stock dummynet and dn_cake.ko. The stock dummynet is used anyway when dummynet-st does not match the kernel, and, until Apply, after a panic while it was in use, or two boots in a row that ended without a clean shutdown (power cuts, resets or hangs). Beta, on by default: to stay on the stock dummynet, untick this and Apply.</help>
     </field>
     <field>
         <id>cake.general.subtick_scope</id>

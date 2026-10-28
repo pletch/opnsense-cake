@@ -54,11 +54,16 @@ ST_TRYING = '/conf/dummynet-st.loading'
 # there while dummynet_st.ko is in use, kept across a reboot, and removed by a clean
 # shutdown (rc.syshook.d/stop/90-cake) or when the stock dummynet comes back. Its twin in
 # /var/run, which a boot clears, tells this boot's marker from one an earlier boot left
-# behind; unless the kernel's message buffer shows that boot ended in an orderly reboot
-# (reboot(8) skips the shutdown scripts), the stock dummynet is used until Apply on the
-# CAKE page
+# behind. Then the kernel's message buffer says how that boot ended: an orderly reboot
+# (reboot(8) skips the shutdown scripts) is clean, a panic keeps the stock dummynet until
+# Apply on the CAKE page, and an end it does not explain (a power cut, a reset, a hang)
+# does so only the ST_UNCLEAN_MAX'th time in a row (ST_UNCLEAN counts them; a clean
+# shutdown or Apply clears it). ST_CHECKED holds this boot's verdict.
 ST_ACTIVE = '/conf/dummynet-st.active'
 ST_ACTIVE_BOOT = '/var/run/dummynet-st.active'
+ST_UNCLEAN = '/conf/dummynet-st.unclean'
+ST_UNCLEAN_MAX = 2
+ST_CHECKED = '/var/run/dummynet-st.checked'
 # net.inet.ip.dummynet.release_us when the setting is missing or invalid
 RELEASE_DEFAULT = 250
 
@@ -395,9 +400,13 @@ def st_status():
     if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:
         result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' \
                            'Apply on the CAKE page tries it again'
-    if result['reason'] == '' and st_crashed() and not result['loaded']:
-        result['reason'] = 'the last boot ended without a clean shutdown while dummynet-st was in use ' \
-                           '(a panic, a power cut or a reset); Apply on the CAKE page tries it again'
+    crashed = st_crashed()
+    if result['reason'] == '' and crashed == 'panic' and not result['loaded']:
+        result['reason'] = 'the last boot ended in a panic while dummynet-st was in use; ' \
+                           'Apply on the CAKE page tries it again'
+    elif result['reason'] == '' and crashed == 'unclean' and not result['loaded']:
+        result['reason'] = 'the last %d boots ended without a clean shutdown while dummynet-st was in use ' \
+                           '(power cuts, resets or hangs); Apply on the CAKE page tries it again' % ST_UNCLEAN_MAX
     result['usable'] = result['reason'] == ''
     # an upgrade replaced the file since the wrapper loaded it
     result['current'] = None
@@ -441,6 +450,19 @@ def load_dummynet(fork):
     return not fork and not st_loaded()
 
 
+def sync_dir(path):
+    """ write a directory's entries to disk: a marker made or removed just before a power
+    cut or a reset is otherwise lost, or left behind """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def st_trying(trying):
     """ mark dummynet_st.ko being loaded and set up (ST_TRYING), or done with """
     try:
@@ -449,8 +471,10 @@ def st_trying(trying):
                 f_out.write('%d\n' % os.getpid())
                 f_out.flush()
                 os.fsync(f_out.fileno())
+            sync_dir(os.path.dirname(ST_TRYING))
         elif os.path.exists(ST_TRYING):
             os.unlink(ST_TRYING)
+            sync_dir(os.path.dirname(ST_TRYING))
     except OSError:
         pass
 
@@ -467,11 +491,13 @@ def st_active(active):
                     f_out.write('%d\n' % os.getpid())
                     f_out.flush()
                     os.fsync(f_out.fileno())
+                sync_dir(os.path.dirname(ST_ACTIVE))
         elif os.path.exists(ST_ACTIVE_BOOT):
             # this boot's only: one a crash left stays until Apply (the retry action)
             for path in [ST_ACTIVE, ST_ACTIVE_BOOT]:
                 if os.path.exists(path):
                     os.unlink(path)
+            sync_dir(os.path.dirname(ST_ACTIVE))
     except OSError:
         pass
 
@@ -494,21 +520,62 @@ def previous_boot_end():
     return None
 
 
-def st_crashed():
-    """ whether a boot ended without a clean shutdown while dummynet_st.ko was in use: its
-    marker is left, and the message buffer does not show an orderly reboot. Decided once
-    a boot, as this boot's messages may overwrite the last one's.
-    """
-    if not os.path.exists(ST_ACTIVE) or os.path.exists(ST_ACTIVE_BOOT):
-        return False
-    if previous_boot_end() == 'reboot':
-        try:
-            os.unlink(ST_ACTIVE)
-        except OSError:
-            pass
-        return False
-    return True
+def read_count(path):
+    """ a count kept in a file, 0 when there is none """
+    try:
+        with open(path) as f_in:
+            return int(f_in.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
 
+
+def write_file(path, text):
+    """ a small marker file, on disk at once (see sync_dir) """
+    with open(path, 'w') as f_out:
+        f_out.write(text)
+        f_out.flush()
+        os.fsync(f_out.fileno())
+    sync_dir(os.path.dirname(path))
+
+
+def remove_file(path):
+    """ remove a marker file, on disk at once """
+    if os.path.exists(path):
+        os.unlink(path)
+        sync_dir(os.path.dirname(path))
+
+
+def st_crashed():
+    """ whether dummynet_st.ko is to stay out after how the last boot ended while it was in
+    use, decided once a boot (this boot's messages may overwrite the last one's)
+    :return: 'panic' or 'unclean' when it is to stay out until Apply, else None
+    """
+    try:
+        with open(ST_CHECKED) as f_in:
+            return f_in.read().strip() or None
+    except OSError:
+        pass
+    verdict = ''
+    try:
+        end = previous_boot_end()
+        if end == 'reboot':
+            remove_file(ST_UNCLEAN)
+        if os.path.exists(ST_ACTIVE) and not os.path.exists(ST_ACTIVE_BOOT):
+            if end == 'panic':
+                verdict = 'panic'
+            elif end is None:
+                count = read_count(ST_UNCLEAN) + 1
+                write_file(ST_UNCLEAN, '%d\n' % count)
+                if count >= ST_UNCLEAN_MAX:
+                    verdict = 'unclean'
+            if verdict == '':
+                # this time it may load again, and mark itself in use for this boot
+                remove_file(ST_ACTIVE)
+        with open(ST_CHECKED, 'w') as f_out:
+            f_out.write(verdict + '\n')
+    except OSError:
+        pass
+    return verdict or None
 
 def set_release(release_us):
     """ net.inet.ip.dummynet.release_us of the loaded dummynet_st.ko """

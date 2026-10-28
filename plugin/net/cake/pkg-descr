@@ -17,8 +17,10 @@ Plugin Changelog
 
 * Crash-loop guard: while dummynet-st is in use, a marker in /conf says
   so, and a clean shutdown removes it. A boot that finds it left behind
-  (a panic or a power cut while the fork was in use) uses the stock
-  dummynet, and the CAKE page says why, until Apply there
+  after a panic (from the kernel's message buffer), or after two boots in
+  a row that ended without a clean shutdown (power cuts, resets, hangs),
+  uses the stock dummynet, and the CAKE page says why, until Apply there.
+  A plain reboot from a shell counts as clean
 * The shaper wrapper runs one at a time: boot, configd reloads and Apply
   starting it at once no longer interleave unloads and loads (a run waits
   up to two minutes for the one before)

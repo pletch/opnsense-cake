@@ -1,5 +1,6 @@
 #!/bin/sh
 
 # a clean shutdown: the CAKE wrapper may load dummynet-st again at the next
-# boot (ST_ACTIVE in /usr/local/opnsense/scripts/cake/lib/__init__.py)
-rm -f /conf/dummynet-st.active
+# boot, and the count of unclean ends starts again (ST_ACTIVE and ST_UNCLEAN
+# in /usr/local/opnsense/scripts/cake/lib/__init__.py)
+rm -f /conf/dummynet-st.active /conf/dummynet-st.unclean

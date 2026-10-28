@@ -226,12 +226,14 @@ with their results (`test/ticks.sh`).
 - **If the firewall doesn't come up** after enabling CAKE, run
   `pkg delete -y os-cake dummynet-st cake-kmod` from the console, or
   restore a VM snapshot. A crash while the forked dummynet is loaded or
-  its rules go in leaves `/conf/dummynet-st.loading` behind, and a boot
-  that ends without a clean shutdown while it is in use (a panic, a power
-  cut) leaves `/conf/dummynet-st.active` (os-cake 1.4.5 on); either way the
-  wrapper then uses the stock dummynet, and the CAKE page says why, until
-  Apply there (or `rm /conf/dummynet-st.loading /conf/dummynet-st.active`
-  and a shaper reload) tries it again.
+  its rules go in leaves `/conf/dummynet-st.loading` behind. From os-cake
+  1.4.5, `/conf/dummynet-st.active` marks it in use, and a clean shutdown
+  removes it; a boot that finds it left after a panic (from the kernel's
+  message buffer), or after the second boot in a row that ended without a
+  clean shutdown or an orderly `reboot` (power cuts, resets, hangs;
+  `/conf/dummynet-st.unclean` counts them), does not load the fork either.
+  The wrapper then uses the stock dummynet, and the CAKE page says why,
+  until Apply there tries it again.
 
 Details, and building the packages yourself, are in
 [`plugin/README.md`](plugin/README.md).

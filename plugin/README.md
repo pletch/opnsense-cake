@@ -124,9 +124,10 @@ in a VM*.
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used. With `dummynet-st` in use it says
   so, with the release interval; if *Sub-tick release* is on but the fork is
-  not in use, a warning below it says why. After a boot that ended without
-  a clean shutdown while the fork was in use (`/conf/dummynet-st.active`
-  left behind; a clean shutdown removes it), that is the reason, until
+  not in use, a warning below it says why. After a panic while the fork
+  was in use, or two boots in a row that ended without a clean shutdown
+  (`/conf/dummynet-st.active` left behind, which a clean shutdown removes;
+  `/conf/dummynet-st.unclean` counts them), that is the reason, until
   Apply.
 - `kldstat | grep dummynet` shows `dummynet_st.ko` while the fork is in use,
   `dummynet.ko` otherwise; `sysctl net.inet.ip.dummynet.release_us` gives

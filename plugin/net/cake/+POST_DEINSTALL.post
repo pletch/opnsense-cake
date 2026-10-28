@@ -2,4 +2,4 @@ if [ -f /usr/local/sbin/configctl ]; then echo "Reloading traffic shaper"; /usr/
 # the CAKE service placeholder (see plugins.inc.d/cake.inc), which the wrapper no longer stops
 if [ -f /var/run/cake.pid ]; then /bin/pkill -F /var/run/cake.pid; fi
 # dummynet-st's markers (see lib/__init__.py), which only os-cake reads
-rm -f /conf/dummynet-st.active /conf/dummynet-st.loading
+rm -f /conf/dummynet-st.active /conf/dummynet-st.loading /conf/dummynet-st.unclean
