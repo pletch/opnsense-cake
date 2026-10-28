@@ -40,6 +40,9 @@ VERSION=1.0.5
 WWW=${WWW:-https://github.com/pletch/opnsense-cake}
 SRCDIR=${SRCDIR:-/usr/src}
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
+# the kernel the packages are for: the pinned kernel set's, from ci-build.sh,
+# else the running one's (kern.version's first line)
+KERNEL_VERSION=${KERNEL_VERSION:-$(sysctl -n kern.version | head -1)}
 OUT=$(mkdir -p "${1:-.}" && cd "${1:-.}" && pwd)
 WRK=$(mktemp -d -t dummynet-st)
 STAGE=${WRK}/stage
@@ -52,7 +55,10 @@ install -m 555 "${WRK}/dummynet_st.ko" "${STAGE}/boot/modules/dummynet_st.ko"
 # as cake-kmod (kmod/build.sh): the FreeBSD release and the stock
 # dummynet.ko the module replaces, checked before it is loaded. One SHA256
 # per line.
-uname -r | cut -d- -f1 > "${STAGE}/usr/local/libexec/dummynet-st/kernel"
+echo "${KERNEL_VERSION}" | awk '{ print $2 }' | cut -d- -f1 \
+    > "${STAGE}/usr/local/libexec/dummynet-st/kernel"
+# and that kernel in full (its version string), for the CAKE page to name
+echo "${KERNEL_VERSION}" > "${STAGE}/usr/local/libexec/dummynet-st/kernel.version"
 sha256 -q "${DUMMYNET:-/boot/kernel/dummynet.ko}" \
     > "${STAGE}/usr/local/libexec/dummynet-st/dummynet.sha256"
 # dummynet's licence (its sources' first header) and CAKE's

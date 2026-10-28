@@ -53,7 +53,7 @@ trap 'rm -rf "${WRK}"' EXIT
 echo ">>> dummynet.ko from ${SETS}/${KSET}"
 fetch -qo "${WRK}/${KSET}" "${SETS}/${KSET}"
 mkdir "${WRK}/kernel"
-tar -xf "${WRK}/${KSET}" -C "${WRK}/kernel" ./boot/kernel/dummynet.ko
+tar -xf "${WRK}/${KSET}" -C "${WRK}/kernel" ./boot/kernel/dummynet.ko ./boot/kernel/kernel
 # the package records this dummynet.ko as the one the module matches, so it
 # has to be the one the pinned sources are known to match
 DIGEST=$(sha256 -q "${WRK}/kernel/boot/kernel/dummynet.ko")
@@ -62,6 +62,27 @@ if [ "${DIGEST}" != "${DUMMYNET_SHA256}" ]; then
 	exit 1
 fi
 
+# the kernel the packages are built for, as its version string: "FreeBSD
+# 15.1-RELEASE-p6 stable/26.7-n284176-c962f76493b6 SMP". The packages
+# record it, and the commit it names must be SRC_COMMIT
+KERNEL_VERSION=$(strings "${WRK}/kernel/boot/kernel/kernel" | grep -m 1 -E '^FreeBSD [0-9]+\.[0-9]+-[A-Z]+')
+KCOMMIT=$(echo "${KERNEL_VERSION}" | sed -n 's/.*-n[0-9]*-\([0-9a-f]\{7,\}\) .*/\1/p')
+echo ">>> ${KSET}: ${KERNEL_VERSION}"
+case "${KCOMMIT:-none}" in
+none)
+	echo ">>> no source commit in ${KSET}'s kernel version" >&2
+	exit 1
+	;;
+esac
+case "${SRC_COMMIT}" in
+"${KCOMMIT}"*)
+	;;
+*)
+	echo ">>> ${KSET} is built from opnsense/src ${KCOMMIT}, build.conf pins ${SRC_COMMIT}" >&2
+	exit 1
+	;;
+esac
+
 echo ">>> opnsense/src ${SRC_COMMIT}"
 git clone -q --filter=blob:none --no-checkout --sparse -b "stable/${SERIES}" \
     https://github.com/opnsense/src.git "${WRK}/src"
@@ -69,6 +90,7 @@ git -C "${WRK}/src" sparse-checkout set sys sbin/ipfw share/mk
 git -C "${WRK}/src" checkout -q "${SRC_COMMIT}"
 
 SRCDIR="${WRK}/src" DUMMYNET="${WRK}/kernel/boot/kernel/dummynet.ko" \
+    KERNEL_VERSION="${KERNEL_VERSION}" \
     SERIES="${SERIES}" PLUGINS_COMMIT="${PLUGINS_COMMIT}" \
     PLUGINS_TREE="${WRK}/plugins" sh "${HERE}/build.sh" "${OUT}"
 

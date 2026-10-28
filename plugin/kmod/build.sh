@@ -37,6 +37,9 @@ VERSION=1.5.5
 WWW=${WWW:-https://github.com/pletch/opnsense-cake}
 SRCDIR=${SRCDIR:-/usr/src}
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
+# the kernel the packages are for: the pinned kernel set's, from ci-build.sh,
+# else the running one's (kern.version's first line)
+KERNEL_VERSION=${KERNEL_VERSION:-$(sysctl -n kern.version | head -1)}
 OUT=$(mkdir -p "${1:-.}" && cd "${1:-.}" && pwd)
 WRK=$(mktemp -d -t cake-kmod)
 STAGE=${WRK}/stage
@@ -75,7 +78,10 @@ install -m 555 "${WRK}/kmod/modules/dn_sched_cake/dn_cake.ko" \
 strip -o "${STAGE}/usr/local/libexec/cake/dnctl" "$(${IPFW_MAKE} -V .OBJDIR)/ipfw"
 chmod 555 "${STAGE}/usr/local/libexec/cake/dnctl"
 # the FreeBSD release the module is built for, checked before it is loaded
-uname -r | cut -d- -f1 > "${STAGE}/usr/local/libexec/cake/kernel"
+echo "${KERNEL_VERSION}" | awk '{ print $2 }' | cut -d- -f1 \
+    > "${STAGE}/usr/local/libexec/cake/kernel"
+# and that kernel in full (its version string), for the CAKE page to name
+echo "${KERNEL_VERSION}" > "${STAGE}/usr/local/libexec/cake/kernel.version"
 # and the dummynet.ko it is built against: the module depends on dummynet's
 # internal structures, which only show in that file (OPNsense builds its
 # kernels reproducibly, so it changes only when dummynet or a header it uses

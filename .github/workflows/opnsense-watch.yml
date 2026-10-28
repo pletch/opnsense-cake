@@ -1,12 +1,13 @@
-# Weekly: does OPNsense's newest kernel set for the series still ship the
-# dummynet.ko the latest cake-kmod release is built against? If an update
-# changed it, the plugin falls back to each pipe's own scheduler on
-# firewalls that install it, until cake-kmod is rebuilt: open an issue.
+# Daily: does OPNsense's newest kernel set for the series still ship the
+# dummynet.ko the latest release's cake-kmod and dummynet-st are built
+# against? If an update changed it, the plugin falls back to the stock
+# dummynet and each pipe's own scheduler on firewalls that install it,
+# until both are rebuilt: open an issue.
 name: opnsense-watch
 
 on:
   schedule:
-    - cron: '17 6 * * 1'
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -38,13 +39,17 @@ jobs:
 
           tag=$(gh release view --json tagName -q .tagName) || fail "no published release found"
           gh release download "$tag" --pattern 'cake-kmod-*.pkg' --dir rel || fail "release $tag has no cake-kmod package"
+          gh release download "$tag" --pattern 'dummynet-st-*.pkg' --dir rel || fail "release $tag has no dummynet-st package"
           known=$(tar --zstd -xOf rel/cake-kmod-*.pkg /usr/local/libexec/cake/dummynet.sha256 2>/dev/null) && [ -n "$known" ] ||
             fail "the cake-kmod of $tag records no dummynet.ko (no /usr/local/libexec/cake/dummynet.sha256)"
+          known_st=$(tar --zstd -xOf rel/dummynet-st-*.pkg /usr/local/libexec/dummynet-st/dummynet.sha256 2>/dev/null) && [ -n "$known_st" ] ||
+            fail "the dummynet-st of $tag records no dummynet.ko (no /usr/local/libexec/dummynet-st/dummynet.sha256)"
 
           echo "$kset: dummynet.ko $now" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "cake-kmod of $tag is built against: $known" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "dummynet-st of $tag is built against: $known_st" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "plugin/build.conf pins $KSET, dummynet.ko $DUMMYNET_SHA256" | tee -a "$GITHUB_STEP_SUMMARY"
-          if printf '%s\n' "$known" | grep -qx "$now"; then
+          if printf '%s\n' "$known" | grep -qx "$now" && printf '%s\n' "$known_st" | grep -qx "$now"; then
             echo "Unchanged: CAKE keeps working on $kset." | tee -a "$GITHUB_STEP_SUMMARY"
             if [ "$now" != "$DUMMYNET_SHA256" ]; then
               echo "::warning::plugin/build.conf pins a dummynet.ko other than $kset's, which the release matches: update KSET and DUMMYNET_SHA256"
@@ -52,10 +57,10 @@ jobs:
             exit 0
           fi
 
-          title="OPNsense $kset changes dummynet.ko: cake-kmod needs a rebuild"
+          title="OPNsense $kset changes dummynet.ko: cake-kmod and dummynet-st need a rebuild"
           if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[].number' | grep -q .; then
             echo "Issue already open."
           else
-            gh issue create --title "$title" --body "The newest OPNsense kernel set for $SERIES, \`$kset\`, ships a \`dummynet.ko\` with SHA256 \`$now\`. The latest release, $tag, is built against \`$known\`. On firewalls updated to it, the plugin leaves each pipe on its own scheduler until \`cake-kmod\` is rebuilt against the new kernel: in \`plugin/build.conf\`, move \`SRC_COMMIT\` to that kernel's source and set \`KSET\` and \`DUMMYNET_SHA256\` to \`$kset\` and \`$now\`, then release."
+            gh issue create --title "$title" --body "The newest OPNsense kernel set for $SERIES, \`$kset\`, ships a \`dummynet.ko\` with SHA256 \`$now\`. The latest release, $tag, has \`cake-kmod\` built against \`$known\` and \`dummynet-st\` against \`$known_st\`. On firewalls updated to it, the plugin uses the stock dummynet and leaves each pipe on its own scheduler until both are rebuilt against the new kernel: in \`plugin/build.conf\`, move \`SRC_COMMIT\` to that kernel's source and set \`KSET\` and \`DUMMYNET_SHA256\` to \`$kset\` and \`$now\`, then release."
           fi
           exit 1

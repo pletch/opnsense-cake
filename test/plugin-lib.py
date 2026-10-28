@@ -209,13 +209,14 @@ class Subtick(unittest.TestCase):
     """ dummynet-st: the setting, and whether the package can be used """
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
-        self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED,
-                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
-                      lib.DUMMYNET, lib.subprocess.run)
+        self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_KERNEL_VERSION, lib.ST_DUMMYNET,
+                      lib.ST_LOADED, lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN,
+                      lib.ST_HELD, lib.ST_CHECKED, lib.DUMMYNET, lib.subprocess.run)
         d = self.dir.name
         lib.CONFIG = os.path.join(d, 'config.xml')
         lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
         lib.ST_KERNEL = os.path.join(d, 'kernel')
+        lib.ST_KERNEL_VERSION = os.path.join(d, 'kernel.version')
         lib.ST_DUMMYNET = os.path.join(d, 'dummynet.sha256')
         lib.ST_LOADED = os.path.join(d, 'dummynet-st.loaded')
         lib.ST_TRYING = os.path.join(d, 'dummynet-st.loading')
@@ -231,8 +232,8 @@ class Subtick(unittest.TestCase):
         lib.subprocess.run = self.run_cmd
 
     def tearDown(self):
-        (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED, lib.ST_TRYING,
-         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
+        (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_KERNEL_VERSION, lib.ST_DUMMYNET, lib.ST_LOADED,
+         lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
          lib.DUMMYNET, lib.subprocess.run) = self.saved
         self.dir.cleanup()
 
@@ -301,7 +302,24 @@ class Subtick(unittest.TestCase):
         self.install(known='0' * 64)
         st = lib.st_status()
         self.assertFalse(st['usable'])
-        self.assertIn('is not the one dummynet-st replaces', st['reason'])
+        self.assertIn('is not the one dummynet-st is built for (an earlier kernel)', st['reason'])
+        self.assertIn('the stock dummynet is used until dummynet-st is updated', st['reason'])
+
+    def test_other_dummynet_named(self):
+        # a dummynet-st that records its kernel names it, and this one
+        self.install(known='0' * 64)
+        with open(lib.ST_KERNEL_VERSION, 'w') as f:
+            f.write('FreeBSD 15.1-RELEASE-p6 stable/26.7-n284176-c962f76493b6 SMP\n')
+        reason = lib.st_status()['reason']
+        self.assertIn('(15.1-RELEASE-p6 stable/26.7-n284176-c962f76493b6)', reason)
+        self.assertIn('this kernel (%s)' % lib.running_version(), reason)
+
+    def test_short_version(self):
+        self.assertEqual(lib.short_version('FreeBSD 15.1-RELEASE-p6 stable/26.7-n284176-c962f76493b6 SMP\n'),
+                         '15.1-RELEASE-p6 stable/26.7-n284176-c962f76493b6')
+        self.assertEqual(lib.short_version('15.1-RELEASE'), '15.1-RELEASE')
+        self.assertIsNone(lib.short_version(''))
+        self.assertIsNone(lib.built_version(os.path.join(self.dir.name, 'missing')))
 
     def test_usable(self):
         self.install()

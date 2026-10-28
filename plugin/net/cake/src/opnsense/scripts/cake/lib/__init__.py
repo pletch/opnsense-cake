@@ -35,6 +35,8 @@ CONFIG = '/conf/config.xml'
 KMOD = '/boot/modules/dn_cake.ko'
 KMOD_KERNEL = '/usr/local/libexec/cake/kernel'
 KMOD_DUMMYNET = '/usr/local/libexec/cake/dummynet.sha256'
+# the kernel cake-kmod is built for, as its version string (cake-kmod 1.6 on)
+KMOD_KERNEL_VERSION = '/usr/local/libexec/cake/kernel.version'
 DUMMYNET = '/boot/kernel/dummynet.ko'
 DNCTL = '/usr/local/libexec/cake/dnctl'
 # which dn_cake.ko the wrapper loaded: kld id, boot time, file and its SHA256
@@ -46,6 +48,7 @@ ACTIVE = '/var/run/cake.pid'
 ST_KMOD = '/boot/modules/dummynet_st.ko'
 ST_KERNEL = '/usr/local/libexec/dummynet-st/kernel'
 ST_DUMMYNET = '/usr/local/libexec/dummynet-st/dummynet.sha256'
+ST_KERNEL_VERSION = '/usr/local/libexec/dummynet-st/kernel.version'
 # the SHA256 of the dummynet_st.ko the wrapper loaded
 ST_LOADED = '/var/run/dummynet-st.loaded'
 # there from loading dummynet_st.ko until its rules are in, kept across a reboot: left
@@ -203,6 +206,40 @@ def set_active(active):
         subprocess.run(['/bin/pkill', '-F', ACTIVE], capture_output=True)
 
 
+def short_version(text):
+    """ a kernel version string without "FreeBSD" and the kernel's name: "15.1-RELEASE-p6
+    stable/26.7-n284176-c962f76493b6", which names the release and the source it was built from
+    :return: string, None for an empty one
+    """
+    parts = text.split()
+    if parts and parts[0] == 'FreeBSD':
+        parts = parts[1:]
+    return ' '.join(parts[:2]) or None
+
+
+def running_version():
+    """ the running kernel, as short_version() """
+    return short_version(os.uname().version)
+
+
+def built_version(path):
+    """ the kernel a package is built for, as short_version(), None when it does not say """
+    try:
+        with open(path) as f_in:
+            return short_version(f_in.readline())
+    except OSError:
+        return None
+
+
+def kernel_reason(package, version_file, fallback):
+    """ why a package does not match this kernel, when the FreeBSD release does: it is
+    built for another kernel's dummynet.ko, until a release built for this kernel """
+    built = built_version(version_file)
+    return 'this kernel (%s) is not the one %s is built for (%s): its dummynet.ko differs, so %s ' \
+           'until %s is updated for it' % (running_version(), package, built or 'an earlier kernel',
+                                           fallback, package)
+
+
 def dummynet_file():
     """ the dummynet.ko in use: the loaded one, else the one kldload picks
     :return: path, or None if dummynet is built into the kernel
@@ -236,7 +273,7 @@ def dummynet_check():
     except OSError:
         return 'mismatch', 'cannot read %s' % path
     if digest not in known:
-        return 'mismatch', '%s is not the one cake-kmod is built against (kernel updated?)' % path
+        return 'mismatch', kernel_reason('cake-kmod', KMOD_KERNEL_VERSION, 'each pipe keeps its own scheduler')
     return 'match', ''
 
 
@@ -319,9 +356,10 @@ def kmod_status(load=False):
         result['reason'] = 'cake-kmod is not installed'
     elif result['kernel_built'] != result['kernel_running'].split('-')[0]:
         # dummynet internals are only known to match within one FreeBSD release
-        result['reason'] = 'cake-kmod is built for FreeBSD %s, this is %s' % (
-            result['kernel_built'], result['kernel_running']
-        )
+        result['reason'] = 'cake-kmod is built for FreeBSD %s, this is %s: each pipe keeps its own ' \
+                           'scheduler until a cake-kmod for this release is installed' % (
+                               built_version(KMOD_KERNEL_VERSION) or result['kernel_built'],
+                               result['kernel_running'])
     else:
         # the release alone misses a dummynet changed by an update within it
         result['dummynet'], result['reason'] = dummynet_check()
@@ -396,9 +434,11 @@ def st_status():
         except OSError:
             built, known = None, []
         if built != running:
-            result['reason'] = 'dummynet-st is built for FreeBSD %s, this is %s' % (built, running)
+            result['reason'] = 'dummynet-st is built for FreeBSD %s, this is %s: the stock dummynet is ' \
+                               'used until a dummynet-st for this release is installed' % (
+                                   built_version(ST_KERNEL_VERSION) or built, os.uname().release)
         elif file_digest(DUMMYNET) not in known:
-            result['reason'] = '%s is not the one dummynet-st replaces (kernel updated?)' % DUMMYNET
+            result['reason'] = kernel_reason('dummynet-st', ST_KERNEL_VERSION, 'the stock dummynet is used')
     if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:
         result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' \
                            'Apply on the CAKE page tries it again'
