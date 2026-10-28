@@ -15,7 +15,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "${HERE}/../.." && pwd)
 SRCDIR=${SRCDIR:-/usr/src}
 OUT=$(mkdir -p "${1:-.}" && cd "${1:-.}" && pwd)
-WRK=$(mktemp -d -t dummynet-st)
+# a fixed directory, not mktemp's: dummynet's lock calls record their
+# source file's path (__FILE__), so the module is the same from build to
+# build only if the sources are always in the same place
+WRK=/tmp/dummynet-st.build
+rm -rf "${WRK}" && mkdir -p "${WRK}"
 trap 'rm -rf "${WRK}"' EXIT
 
 if grep -q DN_WIRE_LEN "${SRCDIR}/sys/netpfil/ipfw/dn_sched.h"; then
