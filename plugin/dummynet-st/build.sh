@@ -35,7 +35,7 @@
 
 set -e
 
-VERSION=1.0.2
+VERSION=1.0.3
 # where the sources of the package are published
 WWW=${WWW:-https://github.com/pletch/opnsense-cake}
 SRCDIR=${SRCDIR:-/usr/src}

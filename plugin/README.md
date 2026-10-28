@@ -71,8 +71,8 @@ versions of that release):
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.2
-fetch $R/cake-kmod-1.5.2.pkg $R/dummynet-st-1.0.2.pkg $R/os-cake-1.4.2.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.3
+fetch $R/cake-kmod-1.5.3.pkg $R/dummynet-st-1.0.3.pkg $R/os-cake-1.4.3.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 

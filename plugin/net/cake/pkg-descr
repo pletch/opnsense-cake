@@ -13,6 +13,16 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.3
+
+* dummynet-st 1.0.3, from a review of its release timer: unloading
+  dummynet_st.ko (switching to the stock dummynet, or removing the
+  package) now waits for packets still being processed before it stops
+  the timer, which could otherwise be re-armed or used after it was
+  freed; a pipe left unserved for over half an hour (a suspended VM)
+  no longer overflows its credit and stalls; very large bursts and
+  delays are bounded before the fork's finer units overflow them
+
 1.4.2
 
 * Sub-tick release for all pipes: a new choice on the CAKE page,
