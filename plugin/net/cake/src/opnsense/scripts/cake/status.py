@@ -31,8 +31,11 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import cake_enabled, cake_pipes, kmod_status, st_status, subtick_settings, CONFIG, DNCTL, \
-    RELEASE_DEFAULT
+from lib import cake_enabled, cake_pipes, kmod_status, shaper_pipes, st_status, subtick_settings, \
+    CONFIG, DNCTL, RELEASE_DEFAULT
+
+# the shaper rules rc.d/dnctl hands the wrapper
+SHAPER_RULES = '/usr/local/etc/dnctl.conf'
 
 # tin names by diffserv mode, in the kernel's tin order, and the order
 # tc(8) shows them in (by priority)
@@ -102,9 +105,9 @@ def subtick_status():
     """
     result = st_status()
     try:
-        result['enabled'], result['release_us'] = subtick_settings()
+        result['enabled'], result['release_us'], result['scope'] = subtick_settings()
     except (OSError, ET.ParseError):
-        result['enabled'], result['release_us'] = True, RELEASE_DEFAULT
+        result['enabled'], result['release_us'], result['scope'] = True, RELEASE_DEFAULT, 'cake'
     if result['loaded']:
         for name in ['release_us', 'release_wakeups', 'release_pkts', 'release_late_us',
                      'release_late_max', 'release_catchups']:
@@ -137,7 +140,9 @@ if __name__ == '__main__':
         cake_on = cake_enabled() > 0
     except (OSError, ET.ParseError):
         cake_on = False
-    if cake_on and st['enabled'] and not st['loaded']:
+    # the fork is wanted for the CAKE pipes, or for all pipes if the shaper has any
+    st_needed = cake_on or (st['scope'] == 'all' and shaper_pipes(SHAPER_RULES))
+    if st_needed and st['enabled'] and not st['loaded']:
         result['warnings'].append('dummynet-st is not in use: %s; the stock dummynet and dn_cake.ko are used '
                                   'instead (see the system log)' % (st['reason'] or 'it did not load'))
     if st['loaded'] and st['current'] is False:

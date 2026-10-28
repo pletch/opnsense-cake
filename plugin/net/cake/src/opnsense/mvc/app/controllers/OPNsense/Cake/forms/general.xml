@@ -6,6 +6,12 @@
         <help>Shape with dummynet-st: dummynet with CAKE built in, which releases packets between clock ticks rather than a tick's worth at a time, so they wait less and leave in smaller bursts. Off: the stock dummynet and dn_cake.ko. The stock dummynet is used anyway when dummynet-st does not match the kernel.</help>
     </field>
     <field>
+        <id>cake.general.subtick_scope</id>
+        <label>Sub-tick release for</label>
+        <type>dropdown</type>
+        <help>Pipes with CAKE: dummynet-st is loaded while a CAKE entry is enabled. All pipes: also when the shaper has pipes but no CAKE entry, so that pipes with FQ-CoDel, FQ-PIE or another scheduler release between ticks too, and their CoDel or PIE measures delay with the precise clock. Either way, once it is loaded every pipe releases this way.</help>
+    </field>
+    <field>
         <id>cake.general.release_us</id>
         <label>Release interval (us)</label>
         <type>text</type>

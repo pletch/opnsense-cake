@@ -45,7 +45,8 @@ import sys
 import syslog
 import tempfile
 from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
-    load_dummynet, set_release, st_loaded, st_status, st_trying, subtick_settings, ST_KMOD
+    load_dummynet, set_release, shaper_pipes, st_loaded, st_status, st_trying, subtick_settings, \
+    ST_KMOD
 
 
 def cake_rule(line, args):
@@ -108,13 +109,23 @@ if __name__ == '__main__':
         # dummynet-st, unless switched off: dummynet with CAKE built in, releasing
         # packets between ticks. Otherwise, or when it does not match the kernel or
         # does not load, the stock dummynet with dn_cake.ko.
-        st_wanted, release_us = subtick_settings()
+        st_wanted, release_us, scope = subtick_settings()
         st = st_status()
-        if pipes and st_wanted and not st['usable']:
+        # for CAKE pipes, or for all: also for a shaper without CAKE entries
+        st_needed = bool(pipes) or (scope == 'all' and shaper_pipes(rules_file))
+        if st_needed and st_wanted and not st['usable']:
             syslog.syslog(syslog.LOG_WARNING, '%s, using the stock dummynet' % st['reason'])
-        fork = bool(pipes) and st_wanted and st['usable']
+        fork = st_needed and st_wanted and st['usable']
         if not load_dummynet(fork) and fork:
             syslog.syslog(syslog.LOG_WARNING, 'loading %s failed, using the stock dummynet' % ST_KMOD)
+        if not pipes and st_loaded():
+            # all pipes, none with CAKE: the rules as they are, on the fork
+            st_trying(True)
+            set_release(release_us)
+            result = load_stock(rules_file)
+            st_trying(False)
+            set_active(False)
+            sys.exit(result)
         if pipes and st_loaded():
             # before the rules: CAKE sets its targets by it when a pipe is configured
             st_trying(True)

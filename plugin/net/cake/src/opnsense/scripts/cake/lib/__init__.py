@@ -323,15 +323,28 @@ def kmod_status(load=False):
 
 
 def subtick_settings():
-    """ whether to use dummynet-st, and the longest a due packet waits for release.
-    On unless switched off, also with a config.xml from before the setting.
-    :return: (bool, us)
+    """ whether to use dummynet-st, the longest a due packet waits for release, and for
+    which pipes: 'cake' (while a CAKE entry is enabled) or 'all' (while the shaper has a
+    pipe). On, for CAKE pipes, unless set otherwise, also with a config.xml from before
+    the settings.
+    :return: (bool, us, scope)
     """
     general = ET.parse(CONFIG).getroot().find('./OPNsense/Cake/general')
     if general is None:
-        return True, RELEASE_DEFAULT
+        return True, RELEASE_DEFAULT, 'cake'
     release = int_value(general.findtext('release_us'), 10, 10000)
-    return (general.findtext('subtick') or '1') == '1', release or RELEASE_DEFAULT
+    scope = 'all' if general.findtext('subtick_scope') == 'all' else 'cake'
+    return (general.findtext('subtick') or '1') == '1', release or RELEASE_DEFAULT, scope
+
+
+def shaper_pipes(rules_file):
+    """ whether the shaper rules define a pipe """
+    try:
+        with open(rules_file) as f_in:
+            return any(len(parts) > 2 and parts[0] == 'pipe' and parts[2] == 'config'
+                       for parts in (line.split() for line in f_in))
+    except OSError:
+        return False
 
 
 def file_digest(path):

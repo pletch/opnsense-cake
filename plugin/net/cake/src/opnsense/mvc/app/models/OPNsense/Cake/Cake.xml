@@ -1,6 +1,6 @@
 <model>
     <mount>//OPNsense/Cake</mount>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <description>CAKE scheduler settings for traffic shaper pipes</description>
     <items>
         <general>
@@ -15,6 +15,14 @@
                 <MaximumValue>10000</MaximumValue>
                 <ValidationMessage>The release interval must be between 10 and 10000 us.</ValidationMessage>
             </release_us>
+            <subtick_scope type="OptionField">
+                <Default>cake</Default>
+                <Required>Y</Required>
+                <OptionValues>
+                    <cake>Pipes with CAKE</cake>
+                    <all>All pipes</all>
+                </OptionValues>
+            </subtick_scope>
         </general>
         <pipes>
             <pipe type="ArrayField">

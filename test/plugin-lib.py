@@ -249,16 +249,31 @@ class Subtick(unittest.TestCase):
     def test_settings_default_on(self):
         # a config.xml from before the setting: on, the default interval
         self.general(None)
-        self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT))
+        self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT, 'cake'))
 
     def test_settings(self):
         self.general({'subtick': '0', 'release_us': '100'})
-        self.assertEqual(lib.subtick_settings(), (False, 100))
+        self.assertEqual(lib.subtick_settings(), (False, 100, 'cake'))
+        self.general({'subtick': '1', 'release_us': '250', 'subtick_scope': 'all'})
+        self.assertEqual(lib.subtick_settings(), (True, 250, 'all'))
+        # anything else is the default, CAKE pipes
+        self.general({'subtick': '1', 'release_us': '250', 'subtick_scope': 'every'})
+        self.assertEqual(lib.subtick_settings()[2], 'cake')
 
     def test_settings_invalid_interval(self):
         for value in ['5', '20000', 'x', '']:
             self.general({'subtick': '1', 'release_us': value})
-            self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT), value)
+            self.assertEqual(lib.subtick_settings()[:2], (True, lib.RELEASE_DEFAULT), value)
+
+    def test_shaper_pipes(self):
+        rules = os.path.join(self.dir.name, 'dnctl.conf')
+        for text, expected in [('pipe 10000 config bw 50Mbit/s type fq_codel\n', True),
+                               ('# define dummynet pipes\nqueue 1 config pipe 1\n', False),
+                               ('', False)]:
+            with open(rules, 'w') as f:
+                f.write(text)
+            self.assertEqual(lib.shaper_pipes(rules), expected, text)
+        self.assertFalse(lib.shaper_pipes(os.path.join(self.dir.name, 'missing')))
 
     def test_not_installed(self):
         st = lib.st_status()

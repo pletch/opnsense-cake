@@ -13,6 +13,15 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.2
+
+* Sub-tick release for all pipes: a new choice on the CAKE page,
+  "Sub-tick release for", loads dummynet-st whenever the shaper has
+  pipes, not only while a CAKE entry is enabled, so that a shaper with
+  FQ-CoDel or another scheduler only releases between ticks too, and its
+  CoDel or PIE measures delay with the precise clock. The default stays
+  "Pipes with CAKE"
+
 1.4.1
 
 (1.4.0 was not released.)

@@ -66,9 +66,11 @@ updates. There are three packages:
   built in that releases packets between clock ticks
   ([SUBTICK.md](SUBTICK.md)), built and checked like `cake-kmod`. Nothing
   loads it at boot: the wrapper swaps it in for the stock `dummynet.ko`
-  while CAKE entries are enabled, unless *Sub-tick release* is switched
-  off on the CAKE page, and uses the stock dummynet and `dn_cake.ko` when
-  it does not match the kernel or does not load.
+  while CAKE entries are enabled (or, with *Sub-tick release for* set to
+  *All pipes*, whenever the shaper has pipes, so FQ-CoDel and the other
+  schedulers release between ticks too), unless *Sub-tick release* is
+  switched off on the CAKE page, and uses the stock dummynet and
+  `dn_cake.ko` when it does not match the kernel or does not load.
 - **`os-cake`**: a **Firewall → Shaper → CAKE** page and a dnctl wrapper.
   It depends on `cake-kmod` and `dummynet-st`.
 
@@ -124,12 +126,12 @@ over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-ca
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.1
-fetch $R/cake-kmod-1.5.1.pkg $R/dummynet-st-1.0.1.pkg $R/os-cake-1.4.1.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.2
+fetch $R/cake-kmod-1.5.2.pkg $R/dummynet-st-1.0.2.pkg $R/os-cake-1.4.2.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.5.1.pkg
-pkg add dummynet-st-1.0.1.pkg
-pkg add os-cake-1.4.1.pkg
+pkg add cake-kmod-1.5.2.pkg
+pkg add dummynet-st-1.0.2.pkg
+pkg add os-cake-1.4.2.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 

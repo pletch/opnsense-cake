@@ -619,6 +619,11 @@ the pipes; the release interval there, 250 µs by default, 10–10000):
   not.
 - **Status:** the page says whether the fork is in use and its interval;
   `status.py` reports its counters.
+- **All pipes** (os-cake 1.4.2): *Sub-tick release for* *All pipes* loads
+  the fork whenever the shaper rules define a pipe, CAKE entries or not;
+  without CAKE entries the rules go in unchanged on it, so FQ-CoDel and the
+  other schedulers get the release and the AQM clock (patch 0004). The
+  default stays *Pipes with CAKE*.
 
 Checked 2026-10-27 on the bench VM with the three packages built there by
 `plugin/build.sh` and installed over the released ones: installing os-cake
