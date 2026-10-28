@@ -129,12 +129,12 @@ over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-ca
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.6
-fetch $R/cake-kmod-1.5.6.pkg $R/dummynet-st-1.0.6.pkg $R/os-cake-1.4.6.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.7
+fetch $R/cake-kmod-1.5.7.pkg $R/dummynet-st-1.0.7.pkg $R/os-cake-1.4.7.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.5.6.pkg
-pkg add dummynet-st-1.0.6.pkg
-pkg add os-cake-1.4.6.pkg
+pkg add cake-kmod-1.5.7.pkg
+pkg add dummynet-st-1.0.7.pkg
+pkg add os-cake-1.4.7.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 

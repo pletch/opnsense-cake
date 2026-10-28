@@ -13,6 +13,13 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.7
+
+* cake-kmod 1.5.7 and dummynet-st 1.0.7: the flow hash no longer reads
+  past its buffer for IPv6 packets (jenkins_hash() reads the last word
+  whole; harmless on release kernels, but a KASAN kernel panics on it).
+  Hashes are unchanged
+
 1.4.6
 
 * When cake-kmod or dummynet-st does not match the running kernel, the
