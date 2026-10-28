@@ -56,14 +56,17 @@ More documentation:
 
 ## Install on OPNsense
 
-The plugin route needs no changes to OPNsense's own files and survives its
-updates. There are three packages:
+The plugin route changes none of OPNsense's own files and survives its
+updates, but by default it replaces part of the kernel at runtime: the
+wrapper swaps a forked dummynet (`dummynet_st.ko`, in beta) in for the
+stock `dummynet.ko`. To stay on the stock dummynet, untick *Sub-tick
+release* on the CAKE page and Apply. There are three packages:
 
 - **`cake-kmod`**: `/boot/modules/dn_cake.ko`, and a dnctl that can set CAKE
   parameters, in `/usr/local/libexec/cake/`. It is built for one OPNsense
   series (26.7 is FreeBSD 15.1) and records that release.
-- **`dummynet-st`**: `/boot/modules/dummynet_st.ko`, dummynet with CAKE
-  built in that releases packets between clock ticks
+- **`dummynet-st`** (beta, used by default): `/boot/modules/dummynet_st.ko`,
+  dummynet with CAKE built in that releases packets between clock ticks
   ([SUBTICK.md](SUBTICK.md)), built and checked like `cake-kmod`. Nothing
   loads it at boot: the wrapper swaps it in for the stock `dummynet.ko`
   while CAKE entries are enabled (or, with *Sub-tick release for* set to
@@ -126,12 +129,12 @@ over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-ca
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.4
-fetch $R/cake-kmod-1.5.4.pkg $R/dummynet-st-1.0.4.pkg $R/os-cake-1.4.4.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.5
+fetch $R/cake-kmod-1.5.5.pkg $R/dummynet-st-1.0.5.pkg $R/os-cake-1.4.5.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.5.4.pkg
-pkg add dummynet-st-1.0.4.pkg
-pkg add os-cake-1.4.4.pkg
+pkg add cake-kmod-1.5.5.pkg
+pkg add dummynet-st-1.0.5.pkg
+pkg add os-cake-1.4.5.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
@@ -223,9 +226,12 @@ with their results (`test/ticks.sh`).
 - **If the firewall doesn't come up** after enabling CAKE, run
   `pkg delete -y os-cake dummynet-st cake-kmod` from the console, or
   restore a VM snapshot. A crash while the forked dummynet is loaded or
-  its rules go in leaves `/conf/dummynet-st.loading` behind, and the
-  wrapper then uses the stock dummynet until Apply on the CAKE page (or
-  `rm /conf/dummynet-st.loading` and a shaper reload) tries it again.
+  its rules go in leaves `/conf/dummynet-st.loading` behind, and a boot
+  that ends without a clean shutdown while it is in use (a panic, a power
+  cut) leaves `/conf/dummynet-st.active` (os-cake 1.4.5 on); either way the
+  wrapper then uses the stock dummynet, and the CAKE page says why, until
+  Apply there (or `rm /conf/dummynet-st.loading /conf/dummynet-st.active`
+  and a shaper reload) tries it again.
 
 Details, and building the packages yourself, are in
 [`plugin/README.md`](plugin/README.md).

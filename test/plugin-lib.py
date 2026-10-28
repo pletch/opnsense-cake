@@ -210,7 +210,7 @@ class Subtick(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED,
-                      lib.ST_TRYING, lib.DUMMYNET, lib.subprocess.run)
+                      lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.DUMMYNET, lib.subprocess.run)
         d = self.dir.name
         lib.CONFIG = os.path.join(d, 'config.xml')
         lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
@@ -218,13 +218,15 @@ class Subtick(unittest.TestCase):
         lib.ST_DUMMYNET = os.path.join(d, 'dummynet.sha256')
         lib.ST_LOADED = os.path.join(d, 'dummynet-st.loaded')
         lib.ST_TRYING = os.path.join(d, 'dummynet-st.loading')
+        lib.ST_ACTIVE = os.path.join(d, 'dummynet-st.active')
+        lib.ST_ACTIVE_BOOT = os.path.join(d, 'run-dummynet-st.active')
         lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
         self.loaded = False
         lib.subprocess.run = self.run_cmd
 
     def tearDown(self):
         (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_DUMMYNET, lib.ST_LOADED, lib.ST_TRYING,
-         lib.DUMMYNET, lib.subprocess.run) = self.saved
+         lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.DUMMYNET, lib.subprocess.run) = self.saved
         self.dir.cleanup()
 
     def run_cmd(self, args, **kwargs):
@@ -308,6 +310,48 @@ class Subtick(unittest.TestCase):
         lib.st_trying(False)
         self.assertTrue(lib.st_status()['usable'])
 
+    def test_active_this_boot(self):
+        # in use this boot: still usable, and gone once the stock dummynet is back
+        self.install()
+        lib.st_active(True)
+        self.assertTrue(os.path.exists(lib.ST_ACTIVE))
+        self.assertFalse(lib.st_crashed())
+        self.assertTrue(lib.st_status()['usable'])
+        lib.st_active(False)
+        self.assertFalse(os.path.exists(lib.ST_ACTIVE) or os.path.exists(lib.ST_ACTIVE_BOOT))
+
+    def test_active_after_crash(self):
+        # in use when the last boot ended without a clean shutdown (this boot's twin is
+        # gone): the stock dummynet until Apply, even after the wrapper ran on it
+        self.install()
+        lib.st_active(True)
+        os.unlink(lib.ST_ACTIVE_BOOT)
+        self.assertTrue(lib.st_crashed())
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertIn('without a clean shutdown', st['reason'])
+        lib.st_active(False)
+        self.assertFalse(lib.st_status()['usable'])
+        # Apply (the retry action) removes the marker
+        os.unlink(lib.ST_ACTIVE)
+        self.assertTrue(lib.st_status()['usable'])
+
+    def test_active_after_clean_shutdown(self):
+        # the stop hook removed the marker; the boot cleared its twin
+        self.install()
+        lib.st_active(True)
+        os.unlink(lib.ST_ACTIVE)
+        os.unlink(lib.ST_ACTIVE_BOOT)
+        self.assertTrue(lib.st_status()['usable'])
+
+    def test_active_loaded(self):
+        # a stale marker does not make a loaded fork unusable
+        self.install()
+        lib.st_active(True)
+        os.unlink(lib.ST_ACTIVE_BOOT)
+        self.loaded = True
+        self.assertTrue(lib.st_status()['usable'])
+
     def test_loaded_current_and_upgraded(self):
         self.install()
         self.loaded = True
@@ -319,6 +363,58 @@ class Subtick(unittest.TestCase):
         self.assertFalse(lib.st_status()['current'])
         os.unlink(lib.ST_LOADED)
         self.assertFalse(lib.st_status()['current'])
+
+
+class WrapperLock(unittest.TestCase):
+    """ one run of dnctl.py at a time, without waiting for good on a hung one """
+    def setUp(self):
+        import dnctl
+        self.dnctl = dnctl
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = (dnctl.LOCK, dnctl.LOCK_WAIT)
+        dnctl.LOCK = os.path.join(self.dir.name, 'cake-dnctl.lock')
+        dnctl.LOCK_WAIT = 0.5
+
+    def tearDown(self):
+        self.dnctl.LOCK, self.dnctl.LOCK_WAIT = self.saved
+        self.dir.cleanup()
+
+    def held(self, f_lock):
+        import fcntl
+        with open(self.dnctl.LOCK, 'a') as f_other:
+            try:
+                fcntl.flock(f_other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return False
+            except BlockingIOError:
+                return True
+
+    def test_free(self):
+        f_lock = self.dnctl.lock_run()
+        self.assertTrue(self.held(f_lock))
+        f_lock.close()
+        self.assertFalse(self.held(None))
+
+    def test_waits_then_goes_ahead(self):
+        import time
+        first = self.dnctl.lock_run()
+        start = time.monotonic()
+        second = self.dnctl.lock_run()
+        self.assertGreaterEqual(time.monotonic() - start, 0.5)
+        self.assertIsNotNone(second)
+        first.close()
+        second.close()
+
+    def test_waits_for_release(self):
+        import threading
+        import time
+        self.dnctl.LOCK_WAIT = 10
+        first = self.dnctl.lock_run()
+        threading.Timer(0.3, first.close).start()
+        start = time.monotonic()
+        second = self.dnctl.lock_run()
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertTrue(self.held(second))
+        second.close()
 
 
 if __name__ == '__main__':

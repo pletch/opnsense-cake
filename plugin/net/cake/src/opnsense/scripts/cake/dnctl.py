@@ -39,14 +39,21 @@
     of dummynet.ko and dn_cake.ko; without CAKE entries, or when it does not match the
     kernel or load, the stock dummynet comes back.
 """
+import fcntl
 import os
 import subprocess
 import sys
 import syslog
 import tempfile
+import time
 from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
-    load_dummynet, set_release, shaper_pipes, st_loaded, st_status, st_trying, subtick_settings, \
-    ST_KMOD
+    load_dummynet, set_release, shaper_pipes, st_active, st_loaded, st_status, st_trying, \
+    subtick_settings, ST_KMOD
+
+# held for the whole run: boot, configd reloads and Apply may start the wrapper at once,
+# and two runs would interleave flushes, unloads and loads
+LOCK = '/var/run/cake-dnctl.lock'
+LOCK_WAIT = 120
 
 
 def cake_rule(line, args):
@@ -61,6 +68,30 @@ def cake_rule(line, args):
     # quantum, limit and flows parameters do
     params = [x for x in parts[idx + 2:] if x not in ['codel', 'pie']]
     return ' '.join(parts[:idx] + ['type', 'cake'] + params + args) + '\n'
+
+
+def lock_run():
+    """ wait for any other run of the wrapper to finish, LOCK_WAIT seconds at most: a
+    run that hangs must not keep the shaper down for good
+    :return: the lock file, open while this run lasts (None if it could not be opened)
+    """
+    try:
+        f_lock = open(LOCK, 'a')
+    except OSError:
+        return None
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(f_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f_lock
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                syslog.syslog(syslog.LOG_WARNING, 'another run still holds %s after %d s, going ahead'
+                              % (LOCK, LOCK_WAIT))
+                return f_lock
+            time.sleep(0.2)
+        except OSError:
+            return f_lock
 
 
 def load_stock(rules_file):
@@ -97,6 +128,7 @@ def load_cake(rules_file, pipes):
 if __name__ == '__main__':
     rules_file = sys.argv[1] if len(sys.argv) > 1 else '/usr/local/etc/dnctl.conf'
     syslog.openlog('cake', facility=syslog.LOG_LOCAL4)
+    lock = lock_run()
     # any failure on the CAKE path falls back to the rules as they are, so the
     # shaper always comes up
     try:
@@ -118,6 +150,8 @@ if __name__ == '__main__':
         fork = st_needed and st_wanted and st['usable']
         if not load_dummynet(fork) and fork:
             syslog.syslog(syslog.LOG_WARNING, 'loading %s failed, using the stock dummynet' % ST_KMOD)
+        # a crash from here on with the fork in keeps it out at the next boot
+        st_active(st_loaded())
         if not pipes and st_loaded():
             # all pipes, none with CAKE: the rules as they are, on the fork
             st_trying(True)

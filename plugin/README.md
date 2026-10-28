@@ -71,8 +71,8 @@ versions of that release):
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.4
-fetch $R/cake-kmod-1.5.4.pkg $R/dummynet-st-1.0.4.pkg $R/os-cake-1.4.4.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.5
+fetch $R/cake-kmod-1.5.5.pkg $R/dummynet-st-1.0.5.pkg $R/os-cake-1.4.5.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
@@ -124,7 +124,10 @@ in a VM*.
 - The status line on the CAKE page says whether the module is in use and by
   how many pipes, or why it can't be used. With `dummynet-st` in use it says
   so, with the release interval; if *Sub-tick release* is on but the fork is
-  not in use, a warning below it says why.
+  not in use, a warning below it says why. After a boot that ended without
+  a clean shutdown while the fork was in use (`/conf/dummynet-st.active`
+  left behind; a clean shutdown removes it), that is the reason, until
+  Apply.
 - `kldstat | grep dummynet` shows `dummynet_st.ko` while the fork is in use,
   `dummynet.ko` otherwise; `sysctl net.inet.ip.dummynet.release_us` gives
   its interval, and `release_wakeups`, `release_late_us` and

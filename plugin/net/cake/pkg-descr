@@ -13,6 +13,18 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.5
+
+* Crash-loop guard: while dummynet-st is in use, a marker in /conf says
+  so, and a clean shutdown removes it. A boot that finds it left behind
+  (a panic or a power cut while the fork was in use) uses the stock
+  dummynet, and the CAKE page says why, until Apply there
+* The shaper wrapper runs one at a time: boot, configd reloads and Apply
+  starting it at once no longer interleave unloads and loads (a run waits
+  up to two minutes for the one before)
+* "Sub-tick release" is labelled beta on the page, with how to turn it
+  off; the README says the wrapper swaps a forked dummynet in at runtime
+
 1.4.4
 
 * dummynet-st 1.0.4, from a second review: unloading dummynet_st.ko can

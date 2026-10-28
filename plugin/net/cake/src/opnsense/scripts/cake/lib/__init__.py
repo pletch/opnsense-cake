@@ -51,6 +51,12 @@ ST_LOADED = '/var/run/dummynet-st.loaded'
 # there from loading dummynet_st.ko until its rules are in, kept across a reboot: left
 # behind, a crash on the way stops the wrapper trying it again at every boot
 ST_TRYING = '/conf/dummynet-st.loading'
+# there while dummynet_st.ko is in use, kept across a reboot, and removed by a clean
+# shutdown (rc.syshook.d/stop/90-cake) or when the stock dummynet comes back. Its twin in
+# /var/run, which a boot clears, tells this boot's marker from one a crash left behind:
+# then the stock dummynet is used until Apply on the CAKE page
+ST_ACTIVE = '/conf/dummynet-st.active'
+ST_ACTIVE_BOOT = '/var/run/dummynet-st.active'
 # net.inet.ip.dummynet.release_us when the setting is missing or invalid
 RELEASE_DEFAULT = 250
 
@@ -387,6 +393,9 @@ def st_status():
     if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:
         result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' \
                            'Apply on the CAKE page tries it again'
+    if result['reason'] == '' and st_crashed() and not result['loaded']:
+        result['reason'] = 'the last boot ended without a clean shutdown while dummynet-st was in use ' \
+                           '(a crash or a power cut); Apply on the CAKE page tries it again'
     result['usable'] = result['reason'] == ''
     # an upgrade replaced the file since the wrapper loaded it
     result['current'] = None
@@ -442,6 +451,32 @@ def st_trying(trying):
             os.unlink(ST_TRYING)
     except OSError:
         pass
+
+
+def st_active(active):
+    """ mark dummynet_st.ko in use (ST_ACTIVE and its twin for this boot), or no longer """
+    try:
+        if active:
+            if not os.path.exists(ST_ACTIVE_BOOT):
+                with open(ST_ACTIVE_BOOT, 'w') as f_out:
+                    f_out.write('%d\n' % os.getpid())
+            if not os.path.exists(ST_ACTIVE):
+                with open(ST_ACTIVE, 'w') as f_out:
+                    f_out.write('%d\n' % os.getpid())
+                    f_out.flush()
+                    os.fsync(f_out.fileno())
+        elif os.path.exists(ST_ACTIVE_BOOT):
+            # this boot's only: one a crash left stays until Apply (the retry action)
+            for path in [ST_ACTIVE, ST_ACTIVE_BOOT]:
+                if os.path.exists(path):
+                    os.unlink(path)
+    except OSError:
+        pass
+
+
+def st_crashed():
+    """ whether a boot ended without a clean shutdown while dummynet_st.ko was in use """
+    return os.path.exists(ST_ACTIVE) and not os.path.exists(ST_ACTIVE_BOOT)
 
 
 def set_release(release_us):

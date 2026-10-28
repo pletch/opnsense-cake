@@ -1,8 +1,11 @@
-# Sub-tick release timing (experimental)
+# Sub-tick release timing (beta)
 
-A plan for a forked `dummynet.ko` that releases packets between ticks, and
-what has been measured along the way. Work happens on the
-`experimental/subtick-release` branch; nothing here is in a release.
+A forked `dummynet.ko` that releases packets between ticks: the plan, what
+was measured along the way, and the reviews since. It ships as the
+`dummynet-st` package (from opnsense-cake 1.5.1, `dummynet-st` 1.0.1), and
+os-cake uses it by default, swapping `dummynet_st.ko` in for the stock
+`dummynet.ko` at runtime; *Sub-tick release* on the CAKE page turns it off.
+It is beta: tested on the bench and one live firewall.
 
 ## Why the pipe is tick-bound
 
@@ -694,3 +697,31 @@ Mbit/s after) and coalesce (a 2 ms hold under 20 s of RRUL: 3486 wakeups
 merged, `release_late_max` 26620 µs, from the earliest; 40 Mbit/s down
 with the hold still on, check_errors 0); and `robustness.sh`, all tests
 (`vnet` included; `unload` skipped, CAKE being built in).
+
+### WITNESS and INVARIANTS (2026-10-28)
+
+CAKE_DEBUG checks only CAKE's own invariants. The fork also takes a spin
+lock (`dn_fine_mtx`) under `DN_BH_WLOCK()`, resets callouts under it,
+queues its task from a direct callout and waits for the network epoch at
+unload, which only the kernel's lock checker sees. The bench booted (once,
+by `nextboot -k`) a kernel of OPNsense's own configuration
+(`kern.conftxt`) with `WITNESS`, `INVARIANTS`, `INVARIANT_SUPPORT` and
+`DDB`, built with the modules the bench loads, and the CAKE_DEBUG fork
+built against its options (`KERNBUILDDIR`, so its own `KASSERT()`s and
+lock assertions were in too; the earlier CAKE_DEBUG builds had neither).
+
+The first boot panicked before any dummynet code ran:
+`netisr_getqlimit(9): protocol not registered for ip_direct`. OPNsense's
+runtime RSS switch registers the `ip_direct` and `ip6_direct` netisr
+protocols only with RSS enabled, but their sysctls stay, and reading them
+with RSS off (the boot reads every sysctl) trips netisr's INVARIANTS
+assertion: an OPNsense bug on INVARIANTS kernels only. The bench kernel's
+three handlers were guarded to return ENOENT with RSS off, for this test.
+
+On that kernel, at `release_us` 100: `robustness.sh` all tests passed
+(`unload` skipped, CAKE being built in), and `subtick-stress.sh` all of
+toggle, swap, cycles (8 of 8), bounds, pause and coalesce (4202 wakeups
+merged, 47 Mbit/s with the hold on). WITNESS reported no lock order
+reversal, sleep with a spin lock held or panic beyond the three reversals
+the base system logs at boot (callout and sched lock, the terminal lock
+and callout, `vtnet` with `in6_multi_sx`), none in dummynet.
