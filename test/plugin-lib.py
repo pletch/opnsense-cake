@@ -349,7 +349,7 @@ class Subtick(unittest.TestCase):
         self.boot('[1] FreeBSD\n')
         st = lib.st_status()
         self.assertFalse(st['usable'])
-        self.assertIn('the last 2 boots ended without a clean shutdown', st['reason'])
+        self.assertIn('2 boots in a row ended without a clean shutdown', st['reason'])
         lib.st_active(False)
         self.assertFalse(lib.st_status()['usable'])
         # Apply (the retry action)

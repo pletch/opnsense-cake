@@ -404,10 +404,10 @@ def st_status():
                            'Apply on the CAKE page tries it again'
     crashed = st_crashed()
     if result['reason'] == '' and crashed == 'panic' and not result['loaded']:
-        result['reason'] = 'the last boot ended in a panic while dummynet-st was in use; ' \
+        result['reason'] = 'a boot ended in a panic while dummynet-st was in use; ' \
                            'Apply on the CAKE page tries it again'
     elif result['reason'] == '' and crashed == 'unclean' and not result['loaded']:
-        result['reason'] = 'the last %d boots ended without a clean shutdown while dummynet-st was in use ' \
+        result['reason'] = '%d boots in a row ended without a clean shutdown while dummynet-st was in use ' \
                            '(power cuts, resets or hangs); Apply on the CAKE page tries it again' % ST_UNCLEAN_MAX
     result['usable'] = result['reason'] == ''
     # an upgrade replaced the file since the wrapper loaded it
