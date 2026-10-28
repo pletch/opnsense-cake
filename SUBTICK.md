@@ -669,3 +669,28 @@ clamped to 1099512 MB and the pipe at 48 Mbit/s; ipfw's largest delay,
 9999 ms, kept) and `pause` (the router VM stopped for 5 s under RRUL,
 48 Mbit/s afterwards). Not done: a debug mode that delays the fine task
 on purpose to provoke coalescing.
+
+### Second review (2026-10-28)
+
+A follow-up review of 0005 left three questions, checked against the
+code and fixed in `0006-tick-callout-shutdown-and-burst-headroom.patch`:
+
+| question | assessment | fixed in 0006 |
+|---|---|---|
+| every packet-path caller under the network epoch | yes: ipfw's pfil hooks (IP and Ethernet), pf's dummynet path and `dummynet_send()` from the tasks run in it; configuration arms neither callout | – |
+| other producers at teardown | `dn_reschedule()` read `dn_gone` unlocked: a `dummynet_task()` past that check could re-arm `dn_timeout` after `callout_drain()`, and it then fired into the freed taskqueue. Inherited from stock (upstream too), but os-cake unloads the fork on shaper reloads | checked and re-armed under `dn_fine_mtx`, as `dn_fine_arm()` |
+| the credit addition | a pipe in the heap has credit below 0, by at most a packet, and one back from idle starts at most at its burst and gains nothing in that call; but a reconfiguration resets every instance to its burst (`si_reset_credit()`), those in the heap included, which then gain up to `DN_CREDIT_SPAN` on top: an overflow for a burst within 537 MB of the 0005 clamp | burst clamped to `(INT64_MAX - DN_CREDIT_SPAN · 2^32) / (8 · 10^6)` bytes |
+| `now >= sched_time` | `sched_time` is only ever set to a `now`, every `now` used to serve is read under `DN_BH_WLOCK()`, and the uptime clock does not go back; were it to, 0005's cap bounds the result to a second of credit | – |
+
+With CAKE_DEBUG, `net.inet.ip.dummynet.release_task_delay_us` makes
+`dummynet_fine_task()` sleep before it takes its wakeup, so that others
+fire behind it, and `release_merged` counts the wakeups merged into an
+earlier one not yet served. `subtick-stress.sh` uses them in `coalesce`.
+
+Tested on the bench with the CAKE_DEBUG build at `release_us` 100:
+`subtick-stress.sh` all pass: toggle, swap, cycles (8 of 8, 48 Mbit/s),
+bounds (the burst now clamped to 1099000 MB; 9999 ms kept), pause (47
+Mbit/s after) and coalesce (a 2 ms hold under 20 s of RRUL: 3486 wakeups
+merged, `release_late_max` 26620 µs, from the earliest; 40 Mbit/s down
+with the hold still on, check_errors 0); and `robustness.sh`, all tests
+(`vnet` included; `unload` skipped, CAKE being built in).

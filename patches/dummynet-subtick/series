@@ -3,3 +3,4 @@
 0003-cake-target-release-interval.patch
 0004-aqm-clock-uptime.patch
 0005-fine-callout-shutdown-and-bounds.patch
+0006-tick-callout-shutdown-and-burst-headroom.patch

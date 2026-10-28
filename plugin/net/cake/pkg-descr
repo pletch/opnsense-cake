@@ -13,6 +13,15 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.4
+
+* dummynet-st 1.0.4, from a second review: unloading dummynet_st.ko can
+  no longer leave dummynet's tick timer armed into freed memory (a race
+  inherited from the stock dummynet, which the fork meets more often as
+  it is swapped on shaper reloads); bursts near the largest accepted
+  are bounded so that reconfiguring a busy pipe cannot overflow its
+  credit
+
 1.4.3
 
 * dummynet-st 1.0.3, from a review of its release timer: unloading

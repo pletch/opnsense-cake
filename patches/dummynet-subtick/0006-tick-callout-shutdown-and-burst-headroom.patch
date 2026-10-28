@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:19:09 -0400
+Subject: [PATCH] dummynet_st: tick callout shutdown, burst headroom,
+ coalescing test hooks
+
+The sixth of the sub-tick release series (opnsense-cake SUBTICK.md),
+after a second source review.
+
+- dn_reschedule() checks dn_gone and re-arms dn_timeout under
+  dn_fine_mtx, as dn_fine_arm() does: a dummynet_task() that read
+  dn_gone unset could re-arm dn_timeout after ip_dn_destroy() drained
+  it, and the callout then fired into the freed taskqueue. Inherited
+  from the stock dummynet; the fork is unloaded far more often (os-cake
+  swaps it on shaper reloads).
+- Burst is clamped so that a full burst plus DN_CREDIT_SPAN of credit at
+  the highest rate fits in the credit: a reconfiguration resets every
+  instance's credit to the burst, including those still in the event
+  heap, which then gain up to DN_CREDIT_SPAN on top.
+- With CAKE_DEBUG: net.inet.ip.dummynet.release_task_delay_us makes
+  dummynet_fine_task() sleep first, so that wakeups queue behind it, and
+  release_merged counts the wakeups merged into an earlier one.
+---
+ sys/netpfil/ipfw/ip_dn_io.c      | 14 ++++++++++++
+ sys/netpfil/ipfw/ip_dn_private.h |  3 +++
+ sys/netpfil/ipfw/ip_dummynet.c   | 38 +++++++++++++++++++++++---------
+ 3 files changed, 44 insertions(+), 11 deletions(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index b16ffaed68c..76cdb855d96 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -217,6 +217,16 @@ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_late_max,
+     CTLFLAG_RW, &dn_rel_late_max, 0, "Latest release (us)");
+ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_catchups,
+     CTLFLAG_RD, &dn_rel_catchups, 0, "Releases later than release_us");
++#ifdef CAKE_DEBUG
++/* for tests: dummynet_fine_task() sleeps first, so that wakeups queue up */
++static int dn_fine_delay_us;
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_task_delay_us,
++    CTLFLAG_RW, &dn_fine_delay_us, 0,
++    "Sleep at the start of each release between ticks (us, debug)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_merged,
++    CTLFLAG_RD, &dn_fine_merged, 0,
++    "Wakeups merged into an earlier one not yet served (debug)");
++#endif
+ 
+ /* RED parameters */
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, red_lookup_depth,
+@@ -869,6 +879,10 @@ dummynet_fine_task(void *context, int pending)
+ 	uint64_t now, late, fired;
+ 
+ 	VNET_ITERATOR_DECL(vnet_iter);
++#ifdef CAKE_DEBUG
++	if (dn_fine_delay_us > 0)
++		pause_sbt("dnfine", ustosbt(dn_fine_delay_us), 0, 0);
++#endif
+ 	fired = dn_fine_take();
+ 	VNET_LIST_RLOCK();
+ 	NET_EPOCH_ENTER(et);
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 0661f34e0bd..1669b7dd361 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -439,6 +439,9 @@ void dummynet_fine_task(void *context, int pending);
+ void dn_reschedule(void);
+ void dn_fine_arm(uint64_t);
+ uint64_t dn_fine_take(void);
++#ifdef CAKE_DEBUG
++extern u_long dn_fine_merged;
++#endif
+ struct dn_pkt_tag * dn_tag_get(struct mbuf *m);
+ 
+ struct dn_queue *ipdn_q_find(struct dn_fsk *, struct dn_sch_inst *,
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 9761a001428..812c3182c8b 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -95,9 +95,9 @@ static struct taskqueue	*dn_tq = NULL;
+ /*
+  * Releases between ticks (SUBTICK.md): dn_fine fires at the first event
+  * due before the next tick, at dn_fine_at us of uptime, and queues
+- * dn_fine_task. dn_fine_mtx guards dn_fine_at, dn_fine_fired and, for the
+- * fine callout, dn_gone; it is a spin lock, as dn_fine runs directly from
+- * the timer interrupt.
++ * dn_fine_task. dn_fine_mtx guards dn_fine_at, dn_fine_fired and, for both
++ * callouts, dn_gone; it is a spin lock, as dn_fine runs directly from the
++ * timer interrupt.
+  */
+ static struct callout	dn_fine;
+ static struct mtx	dn_fine_mtx;
+@@ -106,6 +106,9 @@ static uint64_t		dn_fine_at;	/* 0: not armed */
+ /* the earliest wakeup since dn_fine_task last took it (dn_fine_take()), 0
+  * none: the task may run once for several, coalesced in the taskqueue */
+ static uint64_t		dn_fine_fired;
++#ifdef CAKE_DEBUG
++u_long			dn_fine_merged;	/* wakeups merged into an earlier one */
++#endif
+ 
+ /* global scheduler list */
+ struct mtx		sched_mtx;
+@@ -130,6 +133,10 @@ dummynet_fine(void *arg)
+ 	/* with dn_fine_mtx held */
+ 	if (dn_fine_fired == 0)
+ 		dn_fine_fired = dn_fine_at;
++#ifdef CAKE_DEBUG
++	else
++		dn_fine_merged++;
++#endif
+ 	dn_fine_at = 0;
+ 	taskqueue_enqueue(dn_tq, &dn_fine_task);
+ }
+@@ -180,14 +187,20 @@ dummynet_sched_unlock(void)
+ 	mtx_unlock(&sched_mtx);
+ }
+ 
++/*
++ * Under dn_fine_mtx, as dn_fine_arm(): a dummynet_task() that read dn_gone
++ * unset could otherwise arm dn_timeout after ip_dn_destroy() drained it,
++ * to fire into the freed taskqueue.
++ */
+ void
+ dn_reschedule(void)
+ {
+ 
+-	if (dn_gone != 0)
+-		return;
+-	callout_reset_sbt(&dn_timeout, tick_sbt, 0, dummynet, NULL,
+-	    C_HARDCLOCK | C_DIRECT_EXEC);
++	mtx_lock_spin(&dn_fine_mtx);
++	if (dn_gone == 0)
++		callout_reset_sbt(&dn_timeout, tick_sbt, 0, dummynet, NULL,
++		    C_HARDCLOCK | C_DIRECT_EXEC);
++	mtx_unlock_spin(&dn_fine_mtx);
+ }
+ /*----- end of callout hooks -----*/
+ 
+@@ -1633,9 +1646,12 @@ config_link(struct dn_link *p, struct dn_id *arg)
+ 	 * burst ???
+ 	 */
+ 	/* within what us and bits * DN_CREDIT_HZ hold (ipfw takes a burst
+-	 * up to 2^48 - 1 bytes, which would overflow) */
++	 * up to 2^48 - 1 bytes, which would overflow), with room for the
++	 * credit of DN_CREDIT_SPAN at the highest rate on top: a
++	 * reconfiguration gives a pipe still due its full burst */
+ 	p->delay = p->delay < 0 ? 0 : MIN(p->delay, INT_MAX / 1000);
+-	p->burst = MIN(p->burst, (uint64_t)INT64_MAX / (8 * DN_CREDIT_HZ));
++	p->burst = MIN(p->burst, (uint64_t)(INT64_MAX - DN_CREDIT_SPAN * UINT32_MAX) /
++	    (8 * DN_CREDIT_HZ));
+ 	p->delay *= 1000;
+ 	/* Scale burst size: bytes -> bits * DN_CREDIT_HZ */
+ 	p->burst *= 8 * DN_CREDIT_HZ;
+@@ -2665,8 +2681,8 @@ ip_dn_init(void)
+ static void
+ ip_dn_destroy(int last)
+ {
+-	/* ensure no more callouts are started; dn_fine_arm() checks it
+-	 * under dn_fine_mtx */
++	/* ensure no more callouts are started; dn_fine_arm() and
++	 * dn_reschedule() check it under dn_fine_mtx */
+ 	mtx_lock_spin(&dn_fine_mtx);
+ 	dn_gone = 1;
+ 	mtx_unlock_spin(&dn_fine_mtx);

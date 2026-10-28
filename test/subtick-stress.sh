@@ -12,6 +12,12 @@
 #           from other clients): the pipe keeps its rate, the delay its value
 #   pause   the router VM stopped for 5 s under RRUL (QEMU's monitor), as
 #           a suspended VM: the pipes pass traffic at their rate after
+#   coalesce  each release between ticks held 2 ms before it runs
+#           (release_task_delay_us, CAKE_DEBUG), at release_us 100 under
+#           RRUL, so that wakeups queue behind it: they must merge
+#           (release_merged), the lateness count from the earliest
+#           (release_late_max at least the hold), and the pipes keep their
+#           rate
 #
 # Each must keep RRUL running to its end (or, for swap, cycles and pause,
 # let it finish once the pipes are back), CAKE's check_errors at 0 and
@@ -24,7 +30,7 @@ set -u
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
 KO=${KO:?KO: the CAKE_DEBUG dummynet_st.ko on the router}
-TESTS=${TESTS:-toggle swap cycles bounds pause}
+TESTS=${TESTS:-toggle swap cycles bounds pause coalesce}
 fails=0
 
 want() { case " ${TESTS} " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -168,6 +174,21 @@ t=$(downrate)
 [ "$(opn 'echo alive')" = alive ] && [ "$t" -gt 30 ] && [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] &&
     ok=1 || ok=0
 result pause $ok "$r (the pause may fail it), then $t Mbit/s down, check_errors $(errs)"
+fi
+
+if want coalesce; then
+echo "== coalesce"
+opn 'sysctl -q net.inet.ip.dummynet.release_us=100 net.inet.ip.dummynet.release_late_max=0 &&
+    sysctl -q net.inet.ip.dummynet.release_task_delay_us=2000' >/dev/null
+m0=$(opn 'sysctl -n net.inet.ip.dummynet.release_merged')
+r=$(rrul 20)
+t=$(downrate)
+m=$(($(opn 'sysctl -n net.inet.ip.dummynet.release_merged') - m0))
+lm=$(opn 'sysctl -n net.inet.ip.dummynet.release_late_max')
+opn 'sysctl -q net.inet.ip.dummynet.release_task_delay_us=0' >/dev/null
+[ "$r" = "flent-exit 0" ] && [ "$m" -gt 0 ] && [ "$lm" -ge 2000 ] && [ "$t" -gt 30 ] &&
+    [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] && ok=1 || ok=0
+result coalesce $ok "$r, $m wakeups merged, release_late_max $lm us, then $t Mbit/s down, check_errors $(errs)"
 fi
 
 echo
