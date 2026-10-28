@@ -642,3 +642,30 @@ released 1.4.5 / 1.3.4 from the `cake` repository.
 Before a release: version bumps (cake-kmod has the link clock change, os-cake
 the new dependency and setting) and the README's file-install commands, as
 in RELEASING.md, and a soak on a live firewall.
+
+### Review of the fine release (2026-10-28)
+
+A source review of patch 0002 found the event heap itself sound: the tick
+task and the fine task both serve it under `DN_BH_WLOCK()`. Around it,
+checked against the code:
+
+| finding | assessment | fixed in 0005 |
+|---|---|---|
+| shutdown against re-arming | `ip_dn_destroy()` set `dn_gone` unlocked and did not wait for `dummynet_io()` calls in flight before draining `dn_fine` and destroying `dn_fine_mtx`; such a call arms `dn_fine` (`dn_arm_top()`) | `dn_gone` set and checked under `dn_fine_mtx`, and `NET_EPOCH_WAIT()` after unhooking, before the drains |
+| unlocked `dn_fine_at` shortcut in `dn_fine_arm()` | a data race; at worst a wakeup missed until the tick | the comparison under the lock only |
+| `dn_fine_fired` | written under `dn_fine_mtx`, read without it, and the last of several coalesced wakeups: the lateness counters only | the earliest wakeup since the task last ran, taken under the lock (`dn_fine_take()`) |
+| credit `(now - sched_time) * bw` | `bandwidth` is 32 bits, so at most 4.29 Gbit/s; in µs the product overflows `int64_t` after 36 minutes without service (stock, in ticks, after 25 days at 1000 Hz), e.g. a VM suspended with a backlog, and the pipe would stall | at most a second of elapsed time credited at once (`DN_CREDIT_SPAN`) |
+| `burst` × 8·10^6 | ipfw takes up to 2^48 − 1 bytes, which overflows | clamped to `INT64_MAX / (8 · 10^6)` bytes, about 1.15 TB, first |
+| `delay` × 1000 | `int`; the same bound as stock at 1000 Hz, and ipfw refuses 10000 ms or more | clamped to 0 … `INT_MAX / 1000` ms first |
+| release grid rounding near `UINT64_MAX` | not reachable (584,000 years of uptime) | guarded |
+| one release clock, several VNETs | the fine task serves every VNET's heap and arms for each one's first event | – (the `vnet` robustness test covers it) |
+| release counters | one writer, the taskqueue thread | – |
+
+Tested on the bench with the CAKE_DEBUG build at `release_us` 100:
+`robustness.sh` (all tests, `vnet` included) and `test/subtick-stress.sh`,
+which now also runs `cycles` (eight swaps out and back under one RRUL
+run: 8 of 8, 48 Mbit/s afterwards), `bounds` (a burst of 2^48 − 1 bytes
+clamped to 1099512 MB and the pipe at 48 Mbit/s; ipfw's largest delay,
+9999 ms, kept) and `pause` (the router VM stopped for 5 s under RRUL,
+48 Mbit/s afterwards). Not done: a debug mode that delays the fine task
+on purpose to provoke coalescing.

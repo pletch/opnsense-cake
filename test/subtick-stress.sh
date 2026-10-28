@@ -6,18 +6,28 @@
 #           30 s under RRUL through CAKE
 #   swap    under RRUL, the fork swapped for the stock dummynet and back
 #           (subtick-swap.sh), with packets queued and a release armed
+#   cycles  the same eight times in a row under one RRUL run
+#   bounds  a burst of 2^48 - 1 bytes, which overflowed before patch 0005,
+#           and ipfw's largest delay (9999 ms; the kernel clamps larger ones
+#           from other clients): the pipe keeps its rate, the delay its value
+#   pause   the router VM stopped for 5 s under RRUL (QEMU's monitor), as
+#           a suspended VM: the pipes pass traffic at their rate after
 #
-# Each must keep RRUL running to its end (or, for swap, let it finish
-# once the pipes are back), CAKE's check_errors at 0 and dmesg free of
-# panics and cake_check lines; the router must answer afterwards.
+# Each must keep RRUL running to its end (or, for swap, cycles and pause,
+# let it finish once the pipes are back), CAKE's check_errors at 0 and
+# dmesg free of panics and cake_check lines; the router must answer
+# afterwards. bounds, cycles and pause also need 30 of the 50 Mbit/s down.
 #
-#   KO=/root/work/subtick/debug/dummynet_st.ko test/subtick-stress.sh
+#   KO=/root/work/subtick/debug/dummynet_st.ko [TESTS='swap pause'] test/subtick-stress.sh
 set -u
 
 OPN=${OPN:-$HOME/VMs/opnsense-cake}
 CLI=${CLI:-$HOME/VMs/lul-client}
 KO=${KO:?KO: the CAKE_DEBUG dummynet_st.ko on the router}
+TESTS=${TESTS:-toggle swap cycles bounds pause}
 fails=0
+
+want() { case " ${TESTS} " in *" $1 "*) return 0 ;; esac; return 1; }
 
 opn() {
 	tag=R$(date +%N)
@@ -44,6 +54,11 @@ setup() {
 # (no double quotes or backslashes: sercmd mangles them)
 bad() { opn 'dmesg | grep -ci -e panic -e cake_check -e witness -e lock.order'; }
 errs() { opn 'sysctl -n net.inet.ip.dummynet.cake.check_errors'; }
+# a 5 s greedy download through pipe 1, in whole Mbit/s
+downrate() {
+	cli "sudo ip netns exec cli netperf -H 10.10.2.2 -t TCP_MAERTS -l 5 -P 0 -- -o THROUGHPUT" |
+	    awk '{ printf "%d", $1 }'
+}
 
 result() { # name ok detail
 	if [ "$2" = 1 ]; then
@@ -59,6 +74,7 @@ opn "sh /root/work/subtick-swap.sh fork $KO" 120
 setup
 base=$(bad)
 
+if want toggle; then
 echo "== toggle"
 opn '( i=0; while [ $i -lt 30 ]; do for v in 0 50 100 250 1000; do
 	sysctl -q net.inet.ip.dummynet.release_us=$v; sleep 0.2; done;
@@ -70,6 +86,9 @@ w=$(opn 'sysctl -n net.inet.ip.dummynet.release_wakeups')
     ok=1 || ok=0
 result toggle $ok "$r, release_wakeups $w, check_errors $(errs)"
 
+fi
+
+if want swap; then
 echo "== swap"
 opn 'sysctl -q net.inet.ip.dummynet.release_us=100' >/dev/null
 rrul 40 >/tmp/subtick-stress.$$ &
@@ -90,6 +109,66 @@ alive=$(opn 'echo alive')
 [ "$alive" = alive ] && [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] &&
     [ -n "$s1" ] && [ -n "$s2" ] && ok=1 || ok=0
 result swap $ok "$s1; $s2; $r (a gap in the pipes may fail it), check_errors $(errs)"
+
+fi
+
+if want cycles; then
+echo "== cycles"
+# eight swaps out and back while RRUL runs: dummynet_io() still in the old
+# module, with a release armed, as it goes away
+rrul 80 >/tmp/subtick-stress.$$ &
+rpid=$!
+sleep 5
+n=0
+for i in 1 2 3 4 5 6 7 8; do
+	opn "sh /root/work/subtick-swap.sh stock" 120 | grep -q subtick-swap && setup >/dev/null &&
+	    opn "sh /root/work/subtick-swap.sh fork $KO && sysctl -q net.inet.ip.dummynet.release_us=100" 120 |
+	    grep -q subtick-swap && setup >/dev/null && n=$((n + 1))
+done
+wait $rpid
+rm -f /tmp/subtick-stress.$$
+[ "$(opn 'echo alive')" = alive ] && [ $n = 8 ] && [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] &&
+    [ "$(downrate)" -gt 30 ] && ok=1 || ok=0
+result cycles $ok "$n of 8 swaps out and back under RRUL, then $(downrate) Mbit/s down, check_errors $(errs)"
+
+fi
+
+if want bounds; then
+echo "== bounds"
+# values that overflowed the fork's units before patch 0005: the pipe must
+# keep its rate with them
+opn 'ipfw -q pipe 1 config bw 50Mbit/s burst 281474976710655' >/dev/null
+b=$(opn 'ipfw pipe 1 show | head -1')
+t1=$(downrate)
+opn 'ipfw -q pipe 1 config bw 50Mbit/s delay 9999' >/dev/null
+d=$(opn 'ipfw pipe 1 show | head -1')
+setup >/dev/null
+t2=$(downrate)
+[ "$t1" -gt 30 ] && [ "$t2" -gt 30 ] && echo "$d" | grep -q ' 9999 ms' && [ "$(bad)" = "$base" ] &&
+    ok=1 || ok=0
+result bounds $ok "burst 2^48-1: '$b', $t1 Mbit/s; delay 9999 ms: '$d'; after: $t2 Mbit/s"
+
+fi
+
+if want pause; then
+echo "== pause"
+# the router stopped for 5 s under load (a suspended VM): its pipes gain at
+# most a second of credit, and pass traffic at their rate afterwards
+opn 'sysctl -q net.inet.ip.dummynet.release_us=100' >/dev/null
+rrul 25 >/tmp/subtick-stress.$$ &
+rpid=$!
+sleep 8
+echo stop | socat - "UNIX-CONNECT:$OPN/monitor.sock" >/dev/null
+sleep 5
+echo cont | socat - "UNIX-CONNECT:$OPN/monitor.sock" >/dev/null
+wait $rpid
+r=$(cat /tmp/subtick-stress.$$)
+rm -f /tmp/subtick-stress.$$
+t=$(downrate)
+[ "$(opn 'echo alive')" = alive ] && [ "$t" -gt 30 ] && [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] &&
+    ok=1 || ok=0
+result pause $ok "$r (the pause may fail it), then $t Mbit/s down, check_errors $(errs)"
+fi
 
 echo
 [ $fails = 0 ] && echo "all tests passed" || echo "$fails test(s) failed"

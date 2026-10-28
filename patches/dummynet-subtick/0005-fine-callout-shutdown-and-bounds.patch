@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 23:48:33 -0400
+Subject: [PATCH] dummynet_st: fine callout shutdown, its locking, and
+ arithmetic bounds
+
+The fifth of the sub-tick release series (opnsense-cake SUBTICK.md),
+after a source review.
+
+- Shutdown: dn_gone is set under dn_fine_mtx, which dn_fine_arm() now
+  checks it under, and ip_dn_destroy() waits for the network epoch after
+  unhooking dummynet_io(), before draining the callouts and the tasks and
+  destroying dn_fine_mtx: a packet still in dummynet_io() could otherwise
+  arm dn_fine after it was drained, or take the mutex after it was gone.
+- dn_fine_arm() compares with dn_fine_at under the lock only; the
+  unlocked shortcut raced with the callout clearing it.
+- The lateness counters take the earliest wakeup since the task last ran
+  (dn_fine_take(), under the lock), not the last one: the taskqueue
+  coalesces wakeups, and dn_fine_fired was read without its lock.
+- A pipe gains credit for at most a second of elapsed time at once: in
+  us, (now - sched_time) * bw overflows int64 after 36 minutes at 2^32
+  bit/s, e.g. a VM suspended with a backlog, and the pipe would stall.
+- burst and delay are clamped before scaling (ipfw takes a burst up to
+  2^48 - 1 bytes, which overflows at bits * 10^6), and the release grid's
+  rounding cannot wrap.
+---
+ sys/netpfil/ipfw/ip_dn_io.c      | 14 ++++++---
+ sys/netpfil/ipfw/ip_dn_private.h |  4 ++-
+ sys/netpfil/ipfw/ip_dummynet.c   | 49 ++++++++++++++++++++++++--------
+ 3 files changed, 50 insertions(+), 17 deletions(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index d0afc9e2e46..b16ffaed68c 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -615,7 +615,9 @@ dn_key(uint64_t t)
+ {
+ 	uint64_t r = (uint64_t)dn_release();
+ 
+-	return (r < (uint64_t)tick ? (t + r - 1) / r * r : t);
++	if (r >= (uint64_t)tick || t > UINT64_MAX - r)
++		return (t);
++	return ((t + r - 1) / r * r);
+ }
+ 
+ /* wake for the first event, if it comes before the tick */
+@@ -704,7 +706,10 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
+ 	si->kflags &= ~DN_ACTIVE;
+ 
+ 	if (bw > 0) {
+-		si->credit += (now - si->sched_time) * bw;
++		/* credit for at most DN_CREDIT_SPAN: after a long stall (a
++		 * suspended VM), the product could overflow, at us and up to
++		 * 2^32 bit/s after 36 minutes */
++		si->credit += (int64_t)(MIN(now - si->sched_time, DN_CREDIT_SPAN) * bw);
+ 		if (dn_catchup_us > 0 &&
+ 		    si->credit > (int64_t)dn_catchup_us * bw)
+ 			si->credit = (int64_t)dn_catchup_us * bw;
+@@ -861,9 +866,10 @@ dummynet_fine_task(void *context, int pending)
+ {
+ 	struct mq q;
+ 	struct epoch_tracker et;
+-	uint64_t now, late;
++	uint64_t now, late, fired;
+ 
+ 	VNET_ITERATOR_DECL(vnet_iter);
++	fired = dn_fine_take();
+ 	VNET_LIST_RLOCK();
+ 	NET_EPOCH_ENTER(et);
+ 
+@@ -878,7 +884,7 @@ dummynet_fine_task(void *context, int pending)
+ 		now = dn_now_us();
+ 		dn_serve_heap(&q, now);
+ 		if (q.count > 0) {
+-			late = now > dn_fine_fired ? now - dn_fine_fired : 0;
++			late = fired != 0 && now > fired ? now - fired : 0;
+ 			dn_rel_wakeups++;
+ 			dn_rel_pkts += q.count;
+ 			dn_rel_late_sum += late;
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index dd156df7c9e..0661f34e0bd 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -100,6 +100,8 @@ set_oid(struct dn_id *o, int type, int len)
+  * of dn_release() us, besides the tick.
+  */
+ #define DN_CREDIT_HZ	1000000
++/* the most elapsed time a pipe gains credit for at once, us */
++#define DN_CREDIT_SPAN	1000000ULL
+ #define DN_RELEASE_NS	((uint64_t)dn_release() * 1000)
+ /* CAKE widens its targets to 1.5 release intervals rather than ticks;
+  * they are set when a pipe is configured, so set release_us first */
+@@ -436,7 +438,7 @@ void dummynet_task(void *context, int pending);
+ void dummynet_fine_task(void *context, int pending);
+ void dn_reschedule(void);
+ void dn_fine_arm(uint64_t);
+-extern uint64_t dn_fine_fired;
++uint64_t dn_fine_take(void);
+ struct dn_pkt_tag * dn_tag_get(struct mbuf *m);
+ 
+ struct dn_queue *ipdn_q_find(struct dn_fsk *, struct dn_sch_inst *,
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 9d303876ac0..9761a001428 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -95,14 +95,17 @@ static struct taskqueue	*dn_tq = NULL;
+ /*
+  * Releases between ticks (SUBTICK.md): dn_fine fires at the first event
+  * due before the next tick, at dn_fine_at us of uptime, and queues
+- * dn_fine_task. dn_fine_mtx guards dn_fine_at; it is a spin lock, as
+- * dn_fine runs directly from the timer interrupt.
++ * dn_fine_task. dn_fine_mtx guards dn_fine_at, dn_fine_fired and, for the
++ * fine callout, dn_gone; it is a spin lock, as dn_fine runs directly from
++ * the timer interrupt.
+  */
+ static struct callout	dn_fine;
+ static struct mtx	dn_fine_mtx;
+ static struct task	dn_fine_task;
+ static uint64_t		dn_fine_at;	/* 0: not armed */
+-uint64_t		dn_fine_fired;	/* what the last wakeup was for */
++/* the earliest wakeup since dn_fine_task last took it (dn_fine_take()), 0
++ * none: the task may run once for several, coalesced in the taskqueue */
++static uint64_t		dn_fine_fired;
+ 
+ /* global scheduler list */
+ struct mtx		sched_mtx;
+@@ -125,26 +128,26 @@ dummynet_fine(void *arg)
+ 
+ 	(void)arg;	/* UNUSED */
+ 	/* with dn_fine_mtx held */
+-	dn_fine_fired = dn_fine_at;
++	if (dn_fine_fired == 0)
++		dn_fine_fired = dn_fine_at;
+ 	dn_fine_at = 0;
+ 	taskqueue_enqueue(dn_tq, &dn_fine_task);
+ }
+ 
+ /*
+- * Wake dummynet at key (us of uptime), unless it is already woken by then
+- * or releases go by the tick. The unlocked look is only a shortcut: a
+- * wakeup it misses waits for the tick, which serves the heap as well.
++ * Wake dummynet at key (us of uptime), unless it is already woken by then,
++ * releases go by the tick, or dummynet is going away: dn_gone is checked
++ * under dn_fine_mtx, which ip_dn_destroy() sets it under, so nothing arms
++ * dn_fine once it has been drained.
+  */
+ void
+ dn_fine_arm(uint64_t key)
+ {
+ 
+-	if (dn_gone != 0 || dn_release() >= tick)
+-		return;
+-	if (dn_fine_at != 0 && dn_fine_at <= key)
++	if (dn_release() >= tick)
+ 		return;
+ 	mtx_lock_spin(&dn_fine_mtx);
+-	if (dn_fine_at == 0 || key < dn_fine_at) {
++	if (dn_gone == 0 && (dn_fine_at == 0 || key < dn_fine_at)) {
+ 		dn_fine_at = key;
+ 		callout_reset_sbt(&dn_fine, ustosbt(key), 0, dummynet_fine,
+ 		    NULL, C_ABSOLUTE | C_DIRECT_EXEC);
+@@ -152,6 +155,19 @@ dn_fine_arm(uint64_t key)
+ 	mtx_unlock_spin(&dn_fine_mtx);
+ }
+ 
++/* the earliest wakeup since the last call (0: none), for its lateness */
++uint64_t
++dn_fine_take(void)
++{
++	uint64_t fired;
++
++	mtx_lock_spin(&dn_fine_mtx);
++	fired = dn_fine_fired;
++	dn_fine_fired = 0;
++	mtx_unlock_spin(&dn_fine_mtx);
++	return (fired);
++}
++
+ void
+ dummynet_sched_lock(void)
+ {
+@@ -1616,6 +1632,10 @@ config_link(struct dn_link *p, struct dn_id *arg)
+ 	 * qsize = slots/bytes
+ 	 * burst ???
+ 	 */
++	/* within what us and bits * DN_CREDIT_HZ hold (ipfw takes a burst
++	 * up to 2^48 - 1 bytes, which would overflow) */
++	p->delay = p->delay < 0 ? 0 : MIN(p->delay, INT_MAX / 1000);
++	p->burst = MIN(p->burst, (uint64_t)INT64_MAX / (8 * DN_CREDIT_HZ));
+ 	p->delay *= 1000;
+ 	/* Scale burst size: bytes -> bits * DN_CREDIT_HZ */
+ 	p->burst *= 8 * DN_CREDIT_HZ;
+@@ -2645,8 +2665,11 @@ ip_dn_init(void)
+ static void
+ ip_dn_destroy(int last)
+ {
+-	/* ensure no more callouts are started */
++	/* ensure no more callouts are started; dn_fine_arm() checks it
++	 * under dn_fine_mtx */
++	mtx_lock_spin(&dn_fine_mtx);
+ 	dn_gone = 1;
++	mtx_unlock_spin(&dn_fine_mtx);
+ 
+ 	/* check for last */
+ 	if (last) {
+@@ -2654,6 +2677,8 @@ ip_dn_destroy(int last)
+ 		ip_dn_ctl_ptr = NULL;
+ 		ip_dn_io_ptr = NULL;
+ 	}
++	/* packets already in dummynet_io(), which arms dn_fine, are through */
++	NET_EPOCH_WAIT();
+ 
+ 	callout_drain(&dn_timeout);
+ 	callout_drain(&dn_fine);
