@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 08:33:52 -0400
+Subject: [PATCH] dummynet_st: copy_obj() writes only the scheduler's user part
+
+The seventh of the sub-tick release series (opnsense-cake SUBTICK.md),
+from the KASAN run with exactly sized mbufs (test/kfuzz.sh).
+
+For a scheduler, copy_obj() checks the space left against the oid's
+length, the 92-byte struct dn_sch, and advances by it, but writes the
+whole 192-byte struct dn_schk it was copied into since FreeBSD
+0ac43d9728a7 (2017). The 100 bytes past the dn_sch are normally
+overwritten by the next object; after the last one they run past the
+reply buffer when compute_space() left less spare: with a single pipe
+that has no instance yet, "ipfw pipe show" or "dnctl sched show"
+writes 32 bytes past a 336-byte allocation. Inherited from the stock
+dummynet and still in FreeBSD main; KASAN panics on it, a normal kernel
+writes into the 384-byte malloc zone's slack.
+---
+ sys/netpfil/ipfw/ip_dummynet.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 812c318..3296cbf 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -1054,7 +1054,12 @@ copy_obj(char **start, char *end, void *_o, const char *msg, int i)
+ 		memcpy(&dn.s, _o, sizeof(dn.s));
+ 		dn.s.sch.oid.id = (dn.s.sch.flags & DN_HAVE_MASK) ?
+ 		    dn_ht_entries(dn.s.siht) : (dn.s.siht ? 1 : 0);
+-		memcpy(*start, &dn.s, sizeof(dn.s));
++		/*
++		 * Only the struct dn_sch the oid describes, which is what
++		 * was checked against the space left and what
++		 * compute_space() counts, not the rest of the struct dn_schk
++		 */
++		memcpy(*start, &dn.s.sch, MIN(o.len, sizeof(dn.s.sch)));
+ 	} else
+ 		memcpy(*start, _o, o.len);
+ 	*start += o.len;
