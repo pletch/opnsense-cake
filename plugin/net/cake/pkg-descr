@@ -13,6 +13,20 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.8
+
+* After a crash kept dummynet-st out, Apply no longer loads it again:
+  "Try dummynet-st again" on the CAKE page does, and shows only then.
+  On a machine that clears its memory at boot, a UFS root unmounted
+  clean tells an orderly reboot, and a crash dump saved at boot a panic.
+  Boot-end lines in the message buffer count only from the kernel
+* cake-kmod 1.5.8 and dummynet-st 1.0.8: with the ACK filter, CAKE read
+  a queued packet's IP header offset from past the end of its own
+  timestamp tag (a garbage offset on release kernels, kept inside the
+  packet; INVARIANTS panics); the tag now goes after dummynet's
+* dummynet-st 1.0.8: "pipe show" with a single idle pipe no longer
+  writes past its reply buffer (a stock dummynet bug)
+
 1.4.7
 
 * cake-kmod 1.5.7 and dummynet-st 1.0.7: the flow hash no longer reads
