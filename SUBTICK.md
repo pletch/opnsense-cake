@@ -743,8 +743,10 @@ forwarding") allocates the forwarding tag with `sizeof(*dst)`, a
 `sockaddr_in6`, and then writes `if_index`, which `struct ip6_fwdtag` has
 after it: a 2-byte write past the allocation on every IPv6 `route-to`. The
 IPv4 version allocates `sizeof(*fwd_info)`. Without KASAN the tag comes
-from malloc's 64-byte zone, so the write lands in slack. The bench kernel
-was built with `sizeof(*fwd_info)`, for this test; still in stable/26.7.
+from malloc's 64-byte zone, so the write lands in slack (in every release
+since 17.1). The bench kernel was built with `sizeof(*fwd_info)`, for this
+test; reported as opnsense/src#342 and fixed upstream in `da052d1dd3cb`
+(stable/26.7, 2026-10-29).
 
 On that kernel, `robustness.sh` then panicked in CAKE, in its `ipv6` test:
 `cake_hash_flow()` hashes its 41-byte IPv6 tuple with `jenkins_hash()`,
