@@ -200,6 +200,10 @@ scripts are in [`test/`](test/); the design they test is in
   the drop and mark decisions differed in 135 of the 2000 runs. With
   sch_cake's zeroed start, it signals a fresh flow earlier in 71% of runs,
   by 66 events on average (the deliberate difference above).
+- Fuzzing in the kernel (`test/kfuzz.sh`, on the bench's KASAN kernel): the
+  same packets through the real dummynet, mbufs and `jenkins_hash()`, in
+  chains of exactly sized external buffers (SUBTICK.md, KASAN with exactly
+  sized mbufs).
 - Fuzzing (`test/fuzz.sh [packets [seed]]`, from 1.4.4): the scheduling
   core is extracted from the source as for `sched-diff.sh`, with its own
   flow hashing, and built in userland with AddressSanitizer,

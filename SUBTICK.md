@@ -613,8 +613,9 @@ the pipes; the release interval there, 250 µs by default, 10–10000):
   `dummynet.ko`, or one that does not load, leaves the stock dummynet in
   place, logged and shown as a warning on the page. A crash while the fork
   loads or its rules go in leaves `/conf/dummynet-st.loading` (kept across
-  reboots); the wrapper then stays on the stock dummynet, and Apply on the
-  CAKE page (configd `cake retry`) clears it and tries again. An upgraded
+  reboots); the wrapper then stays on the stock dummynet, and *Try
+  dummynet-st again* on the CAKE page (configd `cake retry`; Apply before
+  os-cake 1.4.8) clears it and tries again. An upgraded
   `dummynet_st.ko` replaces the loaded one at the next reload, as for
   `dn_cake.ko`.
 - **Removing** `dummynet-st` swaps the stock dummynet back before the file
@@ -765,3 +766,44 @@ in), and `subtick-stress.sh` all of toggle, swap, cycles (8 of 8), bounds,
 pause and coalesce (6401 wakeups merged, `release_late_max` 10504 µs, 47
 Mbit/s with the hold on), with `check_errors` 0 and no KASAN report or
 panic in dmesg.
+
+### KASAN with exactly sized mbufs (2026-10-29)
+
+With real traffic, packet data sits in mbufs and clusters larger than the
+packet, so KASAN cannot see a parser read a few bytes past `m_len`.
+`test/kfuzz.sh` closes that: `test/kfuzz/cake_kfuzz.ko` sends the packets
+of `fuzz.sh` (`test/fuzz/gen.h`, shared) into a dummynet queue on a CAKE
+pipe, as layer 2 output with no interface (released packets are dropped),
+each as a chain cut at random points, often inside or at the ends of the
+IP and TCP headers, every piece in an external buffer `malloc()`ed to its
+exact length (`m_extadd()`), an eighth read-only. Rounds of random CAKE
+settings, rates and masks, reconfigured while packets are queued; some end
+by deleting the pipe; every piece must be freed and `check_errors` stay 0.
+It found two bugs:
+
+- CAKE's enqueue timestamp tag was prepended, so on a queued packet
+  `dn_tag_get()` (which takes the first tag to be dummynet's) returned it:
+  the ACK filter's TCP parsing and, in ingress mode with overhead, the
+  wire length of a filtered ACK or the fattest flow's head read the IP
+  header offset 28 bytes past the 8-byte tag, from the next malloc chunk.
+  INVARIANTS panics on the first ACK into a non-empty flow with the ACK
+  filter on; a normal kernel reads a garbage offset, which the bounds
+  checks in `cake_hdr()` keep inside the packet. In `dn_cake.ko` and the
+  fork alike since the ACK filter. The tag now goes after dummynet's; the
+  userland shims model dummynet's tag as the first, so `fuzz.sh` and
+  `sched-diff.sh` abort on the old code (sched-diff's results are
+  unchanged by the fix).
+- The stock dummynet's `copy_obj()` writes the whole 192-byte `struct
+  dn_schk` for a scheduler while reserving and checking the 92-byte
+  `struct dn_sch`; with one pipe that has no instance yet, `ipfw pipe
+  show` writes 32 bytes past its reply buffer (in the malloc zone's slack
+  on a normal kernel). Reproduced with the stock `dummynet.ko` and those
+  two commands; in FreeBSD since 0ac43d9728a7 (2017) and still in main.
+  Fixed in the fork by `0007-copy-obj-sched-length.patch`; `dn_cake.ko`
+  users keep the stock module.
+
+With both fixes: seeds 1-3 at a million packets and seed 4 at five
+million, about 19 million pieces, passed with no KASAN report. A control
+build with `cake_hdr()` off by one (a direct pointer to a header one byte
+past `m_len`) panicked in `cake_get_tcp()` in the first round with the
+ACK filter on.
