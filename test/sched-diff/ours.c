@@ -59,6 +59,7 @@ o_enqueue(struct trace_pkt *p)
 	m->m_len = sizeof(m->buf);
 	m->m_pkthdr.len = p->len;
 	m->trace = p;
+	dn_tag_add(m, 0);
 	cake_enqueue(&si->_si, NULL, m);
 }
 

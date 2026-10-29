@@ -707,10 +707,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..2d8b73d
+index 0000000..0beb72c
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,2877 @@
+@@ -0,0 +1,2880 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -1797,7 +1797,10 @@ index 0000000..2d8b73d
 +	len = m->m_pkthdr.len;
 +
 +	/* Add timestamp to mbuf as MTAG. Reuse one the packet still carries
-+	 * (prepending it again would corrupt the tag list).
++	 * (prepending it again would corrupt the tag list). It goes after
++	 * dummynet's tag, which dn_tag_get() takes to be the first: in
++	 * front, the ACK filter and the wire length of a queued packet
++	 * would read the IP header offset past this tag's end.
 +	 */
 +	mtag = m_tag_locate(m, MTAG_ABI_COMPAT, DN_CAKE_MTAG_TS, NULL);
 +	if (mtag == NULL) {
@@ -1805,7 +1808,7 @@ index 0000000..2d8b73d
 +		    sizeof(uint64_t), M_NOWAIT);
 +		if (mtag == NULL)
 +			goto drop;
-+		m_tag_prepend(m, mtag);
++		SLIST_INSERT_AFTER(m_tag_first(m), mtag, m_tag_link);
 +	}
 +	*(uint64_t *)(mtag + 1) = cake_now_ns();
 +

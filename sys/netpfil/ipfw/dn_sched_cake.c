@@ -1084,7 +1084,10 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 	len = m->m_pkthdr.len;
 
 	/* Add timestamp to mbuf as MTAG. Reuse one the packet still carries
-	 * (prepending it again would corrupt the tag list).
+	 * (prepending it again would corrupt the tag list). It goes after
+	 * dummynet's tag, which dn_tag_get() takes to be the first: in
+	 * front, the ACK filter and the wire length of a queued packet
+	 * would read the IP header offset past this tag's end.
 	 */
 	mtag = m_tag_locate(m, MTAG_ABI_COMPAT, DN_CAKE_MTAG_TS, NULL);
 	if (mtag == NULL) {
@@ -1092,7 +1095,7 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 		    sizeof(uint64_t), M_NOWAIT);
 		if (mtag == NULL)
 			goto drop;
-		m_tag_prepend(m, mtag);
+		SLIST_INSERT_AFTER(m_tag_first(m), mtag, m_tag_link);
 	}
 	*(uint64_t *)(mtag + 1) = cake_now_ns();
 

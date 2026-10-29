@@ -68,11 +68,12 @@ static int hz = 1000;
 static int tick = 1000;
 
 struct m_tag {
-	struct m_tag	*next;
+	SLIST_ENTRY(m_tag) m_tag_link;
 	uint32_t	cookie;
 	uint16_t	type, len;
 };
 #define MTAG_ABI_COMPAT	0
+#define PACKET_TAG_DUMMYNET	15
 struct dn_pkt_tag { int iphdr_off; };
 struct mbuf {
 	struct mbuf	*m_nextpkt;
@@ -83,12 +84,10 @@ struct mbuf {
 	int		writable;
 	struct { int len; void *rcvif; } m_pkthdr;
 	struct m_tag	*tags;
-	struct dn_pkt_tag dn_tag;
 };
 #define mtod(m, t)	((t)((m)->m_data))
 #define mtodo(m, o)	((void *)((m)->m_data + (o)))
 #define M_WRITABLE(m)	((m)->writable)
-#define dn_tag_get(m)	(&(m)->dn_tag)
 
 static void
 fuzz_fail(const char *what)
@@ -114,7 +113,7 @@ static inline struct m_tag *m_tag_locate(struct mbuf *m, uint32_t c,
 	struct m_tag *g;
 
 	(void)s;
-	for (g = m->tags; g != NULL; g = g->next)
+	for (g = m->tags; g != NULL; g = SLIST_NEXT(g, m_tag_link))
 		if (g->cookie == c && g->type == t)
 			return (g);
 	return (NULL);
@@ -130,17 +129,35 @@ static inline struct m_tag *m_tag_alloc(uint32_t c, int t, int l, int f)
 	return (g);
 }
 static inline void m_tag_prepend(struct mbuf *m, struct m_tag *g)
-{ g->next = m->tags; m->tags = g; }
+{ SLIST_NEXT(g, m_tag_link) = m->tags; m->tags = g; }
 static inline void m_tag_delete(struct mbuf *m, struct m_tag *g)
 {
 	struct m_tag **p;
 
-	for (p = &m->tags; *p != NULL; p = &(*p)->next)
+	for (p = &m->tags; *p != NULL; p = &SLIST_NEXT(*p, m_tag_link))
 		if (*p == g) {
-			*p = g->next;
+			*p = SLIST_NEXT(g, m_tag_link);
 			(free)(g);
 			return;
 		}
+}
+#define m_tag_first(m)	((m)->tags)
+/* dummynet's tag, which dummynet_io() puts first and dn_tag_get() wants first */
+static inline void dn_tag_add(struct mbuf *m, int iphdr_off)
+{
+	struct m_tag *g = m_tag_alloc(MTAG_ABI_COMPAT, PACKET_TAG_DUMMYNET,
+	    sizeof(struct dn_pkt_tag), 0);
+
+	((struct dn_pkt_tag *)(g + 1))->iphdr_off = iphdr_off;
+	m_tag_prepend(m, g);
+}
+static inline struct dn_pkt_tag *dn_tag_get(struct mbuf *m)
+{
+	if (m->tags == NULL || m->tags->type != PACKET_TAG_DUMMYNET) {
+		fprintf(stderr, "packet on dummynet queue w/o dummynet tag!\n");
+		abort();
+	}
+	return ((struct dn_pkt_tag *)(m->tags + 1));
 }
 
 /* mbufs alive, for the leak check */
