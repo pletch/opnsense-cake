@@ -26,8 +26,10 @@
     Shared code for the CAKE plugin: the CAKE settings of traffic shaper pipes and the
     state of the cake-kmod kernel module.
 """
+import glob
 import hashlib
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -59,15 +61,23 @@ ST_TRYING = '/conf/dummynet-st.loading'
 # /var/run, which a boot clears, tells this boot's marker from one an earlier boot left
 # behind. Then the kernel's message buffer says how that boot ended: an orderly reboot
 # (reboot(8) skips the shutdown scripts) is clean, a panic keeps the stock dummynet until
-# Apply on the CAKE page, and an end it does not explain (a power cut, a reset, a hang)
-# does so only the ST_UNCLEAN_MAX'th time in a row (ST_UNCLEAN counts them; a clean
-# shutdown or Apply clears it). ST_HELD keeps a verdict to stay out until Apply, across
-# boots, and ST_CHECKED holds this boot's.
+# the retry action ("Try dummynet-st again" on the CAKE page), and an end it does not
+# explain (a power cut, a reset, a hang) does so only the ST_UNCLEAN_MAX'th time in a row
+# (ST_UNCLEAN counts them; a clean shutdown or the retry action clears it). A machine that
+# clears its memory at boot keeps no message buffer: there a crash dump saved at this
+# boot (CRASH_DIR, with a swap device to dump to) still tells a panic, and a UFS root an
+# orderly reboot (see previous_boot_end); with neither, the end is unexplained. ST_HELD
+# keeps a verdict to stay out until the retry action, across boots, and ST_CHECKED holds
+# this boot's.
 ST_ACTIVE = '/conf/dummynet-st.active'
 ST_ACTIVE_BOOT = '/var/run/dummynet-st.active'
 ST_UNCLEAN = '/conf/dummynet-st.unclean'
 ST_UNCLEAN_MAX = 2
 ST_HELD = '/conf/dummynet-st.held'
+# where savecore(8) puts a crash dump at boot (/usr/local/etc/rc.subr.d/crashdump)
+CRASH_DIR = '/var/crash'
+# the end of the reason a crash keeps dummynet-st out for
+ST_RETRY = 'Try dummynet-st again on the CAKE page loads it again'
 ST_CHECKED = '/var/run/dummynet-st.checked'
 # net.inet.ip.dummynet.release_us when the setting is missing or invalid
 RELEASE_DEFAULT = 250
@@ -439,16 +449,19 @@ def st_status():
                                    built_version(ST_KERNEL_VERSION) or built, os.uname().release)
         elif file_digest(DUMMYNET) not in known:
             result['reason'] = kernel_reason('dummynet-st', ST_KERNEL_VERSION, 'the stock dummynet is used')
+    # kept out after a crash, until the retry action
+    result['held'] = False
     if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:
-        result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' \
-                           'Apply on the CAKE page tries it again'
+        result['reason'] = 'the system went down while dummynet-st was loading or its rules went in; ' + ST_RETRY
+        result['held'] = True
     crashed = st_crashed()
     if result['reason'] == '' and crashed == 'panic' and not result['loaded']:
-        result['reason'] = 'a boot ended in a panic while dummynet-st was in use; ' \
-                           'Apply on the CAKE page tries it again'
+        result['reason'] = 'a boot ended in a panic while dummynet-st was in use; ' + ST_RETRY
+        result['held'] = True
     elif result['reason'] == '' and crashed == 'unclean' and not result['loaded']:
         result['reason'] = '%d boots in a row ended without a clean shutdown while dummynet-st was in use ' \
-                           '(power cuts, resets or hangs); Apply on the CAKE page tries it again' % ST_UNCLEAN_MAX
+                           '(power cuts, resets or hangs); %s' % (ST_UNCLEAN_MAX, ST_RETRY)
+        result['held'] = True
     result['usable'] = result['reason'] == ''
     # an upgrade replaced the file since the wrapper loaded it
     result['current'] = None
@@ -535,7 +548,7 @@ def st_active(active):
                     os.fsync(f_out.fileno())
                 sync_dir(os.path.dirname(ST_ACTIVE))
         elif os.path.exists(ST_ACTIVE_BOOT):
-            # this boot's only: one a crash left stays until Apply (the retry action)
+            # this boot's only: one a crash left stays until the retry action
             for path in [ST_ACTIVE, ST_ACTIVE_BOOT]:
                 if os.path.exists(path):
                     os.unlink(path)
@@ -544,22 +557,46 @@ def st_active(active):
         pass
 
 
+def kernel_line(text, line):
+    """ whether the kernel printed a line starting with line, after the uptime
+    kern.msgbuf_show_timestamp puts first; a "<priority>" starts log(9)'s lines and what
+    userland writes to the console """
+    return re.search(r'^(\[[0-9.]+\] )?' + re.escape(line), text, re.M) is not None
+
+
 def previous_boot_end():
-    """ how the boot before this one ended, from the kernel's message buffer, which a warm
-    reboot keeps: every reboot logs its uptime, a panic its message first
-    :return: 'panic', 'reboot', or None when the buffer does not tell (a power cut or a
-             reset, or this boot's messages overwrote it)
+    """ how the boot before this one ended, from the kernel's message buffer. A warm reboot
+    keeps it: every reboot logs its uptime, a panic its message first. Where it is lost (a
+    machine that clears its memory at boot), a UFS root still tells, in this boot's
+    messages: an orderly reboot or shutdown unmounts it clean (OPNsense checks it at every
+    boot, so it is clean again after one that did not)
+    :return: 'panic', 'reboot', or None when neither tells (a power cut, a reset or a
+             panic without the buffer, a ZFS root, or this boot's messages overwrote it)
     """
     out = subprocess.run(['/sbin/sysctl', '-n', 'kern.msgbuf'], capture_output=True, text=True,
                          errors='replace')
     boots = out.stdout.split('---<<BOOT>>---') if out.returncode == 0 else []
     if len(boots) < 2:
         return None
-    if 'panic:' in boots[-2]:
+    if kernel_line(boots[-2], 'panic: '):
         return 'panic'
-    if 'Uptime:' in boots[-2]:
+    if kernel_line(boots[-2], 'Uptime: '):
+        return 'reboot'
+    if kernel_line(boots[-1], 'Trying to mount root from ufs:') and \
+            not kernel_line(boots[-1], 'WARNING: / was not properly dismounted'):
         return 'reboot'
     return None
+
+
+def crash_saved_since(path):
+    """ whether savecore(8) saved a crash dump after the file at path was last written:
+    the boot that wrote it then ended in a panic, as dumps are saved at the next boot """
+    try:
+        since = os.stat(path).st_mtime
+        return any(os.stat(info).st_mtime >= since
+                   for info in glob.glob(os.path.join(CRASH_DIR, 'info.[0-9]*')))
+    except OSError:
+        return False
 
 
 def read_count(path):
@@ -590,7 +627,7 @@ def remove_file(path):
 def st_crashed():
     """ whether dummynet_st.ko is to stay out after how the last boot ended while it was in
     use, decided once a boot (this boot's messages may overwrite the last one's)
-    :return: 'panic' or 'unclean' when it is to stay out until Apply, else None
+    :return: 'panic' or 'unclean' when it is to stay out until the retry action, else None
     """
     try:
         with open(ST_CHECKED) as f_in:
@@ -600,16 +637,20 @@ def st_crashed():
     verdict = ''
     try:
         if os.path.exists(ST_HELD):
-            # decided at an earlier boot: until Apply, whatever this one follows
+            # decided at an earlier boot: until the retry action, whatever this one follows
             with open(ST_HELD) as f_in:
                 verdict = f_in.read().strip() or 'unclean'
             with open(ST_CHECKED, 'w') as f_out:
                 f_out.write(verdict + '\n')
             return verdict
         end = previous_boot_end()
+        active = os.path.exists(ST_ACTIVE) and not os.path.exists(ST_ACTIVE_BOOT)
+        if active and end != 'panic' and crash_saved_since(ST_ACTIVE):
+            # a dump of a panic the message buffer did not keep
+            end = 'panic'
         if end == 'reboot':
             remove_file(ST_UNCLEAN)
-        if os.path.exists(ST_ACTIVE) and not os.path.exists(ST_ACTIVE_BOOT):
+        if active:
             if end == 'panic':
                 verdict = 'panic'
             elif end is None:

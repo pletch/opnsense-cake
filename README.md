@@ -229,12 +229,13 @@ with their results (`test/ticks.sh`).
   its rules go in leaves `/conf/dummynet-st.loading` behind. From os-cake
   1.4.5, `/conf/dummynet-st.active` marks it in use, and a clean shutdown
   removes it; a boot that finds it left after a panic (from the kernel's
-  message buffer), or after the second boot in a row that ended without a
+  message buffer, or a crash dump saved at boot on a machine that clears
+  its memory), or after the second boot in a row that ended without a
   clean shutdown or an orderly `reboot` (power cuts, resets, hangs;
   `/conf/dummynet-st.unclean` counts them), does not load the fork either,
   and keeps it out across later boots (`/conf/dummynet-st.held`).
   The wrapper then uses the stock dummynet, and the CAKE page says why,
-  until Apply there tries it again.
+  until *Try dummynet-st again* there (from os-cake 1.4.8; before, Apply).
 
 Details, and building the packages yourself, are in
 [`plugin/README.md`](plugin/README.md).

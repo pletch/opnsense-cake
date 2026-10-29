@@ -43,26 +43,43 @@ class ServiceController extends ApiControllerBase
     public function reconfigureAction()
     {
         if ($this->request->isPost()) {
-            $backend = new Backend();
-            /* Apply tries dummynet-st again after a crash left its marker behind */
-            $backend->configdRun('cake retry');
-            $backend->configdRun('template reload OPNsense/Shaper');
-            $backend->configdRun('template reload OPNsense/IPFW');
-
-            $result = trim($backend->configdRun("shaper reload"));
-            if ($result != "OK") {
-                return ["status" => "error reloading shaper (" . $result . ")"];
-            }
-
-            $result = trim($backend->configdRun("ipfw reload"));
-            if ($result != "OK") {
-                return ["status" => "error reloading ipfw (" . $result . ")"];
-            }
-
-            return ["status" => "ok"];
+            return $this->reload(new Backend());
         }
 
         return ["status" => "failed"];
+    }
+
+    /**
+     * let the wrapper load dummynet-st again after a crash kept it out, and reload the
+     * shaper; Apply alone leaves it out, so that it does not undo that by accident
+     */
+    public function retryAction()
+    {
+        if ($this->request->isPost()) {
+            $backend = new Backend();
+            $backend->configdRun('cake retry');
+            return $this->reload($backend);
+        }
+
+        return ["status" => "failed"];
+    }
+
+    private function reload($backend)
+    {
+        $backend->configdRun('template reload OPNsense/Shaper');
+        $backend->configdRun('template reload OPNsense/IPFW');
+
+        $result = trim($backend->configdRun("shaper reload"));
+        if ($result != "OK") {
+            return ["status" => "error reloading shaper (" . $result . ")"];
+        }
+
+        $result = trim($backend->configdRun("ipfw reload"));
+        if ($result != "OK") {
+            return ["status" => "error reloading ipfw (" . $result . ")"];
+        }
+
+        return ["status" => "ok"];
     }
 
     /**

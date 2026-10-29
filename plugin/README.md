@@ -127,8 +127,12 @@ in a VM*.
   not in use, a warning below it says why. After a panic while the fork
   was in use, or two boots in a row that ended without a clean shutdown
   (`/conf/dummynet-st.active` left behind, which a clean shutdown removes;
-  `/conf/dummynet-st.unclean` counts them), that is the reason, until
-  Apply.
+  `/conf/dummynet-st.unclean` counts them), that is the reason, and a
+  *Try dummynet-st again* button below it loads the fork again; Apply leaves
+  it out. A panic shows in the kernel's message buffer at the next boot, or,
+  on a machine that clears its memory at boot, in a crash dump savecore
+  saved (with a swap device); without either it counts as an unclean end,
+  as does a plain `reboot` from a shell there.
 - `kldstat | grep dummynet` shows `dummynet_st.ko` while the fork is in use,
   `dummynet.ko` otherwise; `sysctl net.inet.ip.dummynet.release_us` gives
   its interval, and `release_wakeups`, `release_late_us` and

@@ -142,6 +142,8 @@ if __name__ == '__main__':
         cake_on = False
     # the fork is wanted for the CAKE pipes, or for all pipes if the shaper has any
     st_needed = cake_on or (st['scope'] == 'all' and shaper_pipes(SHAPER_RULES))
+    # the page offers the retry action for a crash that keeps it out
+    st['retry'] = st_needed and st['enabled'] and st['held']
     if st_needed and st['enabled'] and not st['loaded']:
         result['warnings'].append('dummynet-st is not in use: %s; the stock dummynet and dn_cake.ko are used '
                                   'instead (see the system log)' % (st['reason'] or 'it did not load'))

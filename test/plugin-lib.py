@@ -211,7 +211,7 @@ class Subtick(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.saved = (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_KERNEL_VERSION, lib.ST_DUMMYNET,
                       lib.ST_LOADED, lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN,
-                      lib.ST_HELD, lib.ST_CHECKED, lib.DUMMYNET, lib.subprocess.run)
+                      lib.ST_HELD, lib.ST_CHECKED, lib.CRASH_DIR, lib.DUMMYNET, lib.subprocess.run)
         d = self.dir.name
         lib.CONFIG = os.path.join(d, 'config.xml')
         lib.ST_KMOD = os.path.join(d, 'dummynet_st.ko')
@@ -225,6 +225,8 @@ class Subtick(unittest.TestCase):
         lib.ST_UNCLEAN = os.path.join(d, 'dummynet-st.unclean')
         lib.ST_HELD = os.path.join(d, 'dummynet-st.held')
         lib.ST_CHECKED = os.path.join(d, 'run-dummynet-st.checked')
+        lib.CRASH_DIR = os.path.join(d, 'crash')
+        os.mkdir(lib.CRASH_DIR)
         lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
         self.loaded = False
         # the kernel's message buffer: a power cut's, which keeps no earlier boot
@@ -234,7 +236,7 @@ class Subtick(unittest.TestCase):
     def tearDown(self):
         (lib.CONFIG, lib.ST_KMOD, lib.ST_KERNEL, lib.ST_KERNEL_VERSION, lib.ST_DUMMYNET, lib.ST_LOADED,
          lib.ST_TRYING, lib.ST_ACTIVE, lib.ST_ACTIVE_BOOT, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED,
-         lib.DUMMYNET, lib.subprocess.run) = self.saved
+         lib.CRASH_DIR, lib.DUMMYNET, lib.subprocess.run) = self.saved
         self.dir.cleanup()
 
     def run_cmd(self, args, **kwargs):
@@ -325,15 +327,17 @@ class Subtick(unittest.TestCase):
         self.install()
         st = lib.st_status()
         self.assertTrue(st['usable'])
-        self.assertEqual((st['loaded'], st['current']), (False, None))
+        self.assertEqual((st['loaded'], st['current'], st['held']), (False, None, False))
 
     def test_crash_marker(self):
-        # left behind by a crash while loading: not used until Apply removes it
+        # left behind by a crash while loading: not used until the retry action removes it
         self.install()
         lib.st_trying(True)
         st = lib.st_status()
         self.assertFalse(st['usable'])
+        self.assertTrue(st['held'])
         self.assertIn('went down while dummynet-st was loading', st['reason'])
+        self.assertIn('Try dummynet-st again', st['reason'])
         lib.st_trying(False)
         self.assertTrue(lib.st_status()['usable'])
 
@@ -356,7 +360,7 @@ class Subtick(unittest.TestCase):
 
     def test_active_after_unclean(self):
         # a power cut, a reset or a hang (no orderly end in the message buffer): once is
-        # let through, the second time in a row keeps the stock dummynet until Apply
+        # let through, the second time in a row keeps the stock dummynet until the retry action
         self.install()
         lib.st_active(True)
         self.boot('[1] FreeBSD\n')
@@ -370,7 +374,7 @@ class Subtick(unittest.TestCase):
         self.assertIn('2 boots in a row ended without a clean shutdown', st['reason'])
         lib.st_active(False)
         self.assertFalse(lib.st_status()['usable'])
-        # Apply (the retry action)
+        # the retry action (configd cake retry)
         for path in [lib.ST_ACTIVE, lib.ST_UNCLEAN, lib.ST_HELD, lib.ST_CHECKED]:
             os.unlink(path)
         self.assertTrue(lib.st_status()['usable'])
@@ -427,6 +431,77 @@ class Subtick(unittest.TestCase):
         # only the boot before this one counts
         self.msgbuf = '[90] panic: x\n---<<BOOT>>---\n[60] Uptime: 1m\n---<<BOOT>>---\n[1] FreeBSD\n'
         self.assertEqual(lib.previous_boot_end(), 'reboot')
+
+    def test_boot_end_lines(self):
+        # only the kernel's own lines count, with or without their uptime first
+        for text, end in [('panic: x\nUptime: 1m\n', 'panic'), ('[90.123456] panic: x\n', 'panic'),
+                          ('[60] Uptime: 1m\n', 'reboot'), ('Uptime: 1m\n', 'reboot'),
+                          # in the middle of a line, or from log(9) or userland on the console
+                          ('[5] pf: no panic: here\n', None), ('<118>[5] panic: logger\n', None),
+                          ('<118>[5] Uptime: logger\n', None), ('[5] x Uptime: 1m\n', None),
+                          ('<118>[5] panic: logger\n[60] Uptime: 1m\n', 'reboot')]:
+            self.msgbuf = text + '---<<BOOT>>---\n[1] FreeBSD\n'
+            self.assertEqual(lib.previous_boot_end(), end, text)
+
+    def test_memory_cleared(self):
+        # no earlier boot in the buffer: this boot's mount of a UFS root tells
+        ufs = '[1] Trying to mount root from ufs:/dev/ufs/OPNsense_Nano [rw,noatime]...\n'
+        dirty = '[1] WARNING: / was not properly dismounted\n'
+        zfs = '[1] Trying to mount root from zfs:zroot/ROOT/default []...\n'
+        for this_boot, end in [(ufs, 'reboot'), (ufs + dirty, None), (zfs, None), ('', None),
+                               ('<118>[9] Trying to mount root from ufs:x\n', None)]:
+            self.msgbuf = '---<<BOOT>>---\n[1] FreeBSD\n' + this_boot
+            self.assertEqual(lib.previous_boot_end(), end, this_boot)
+        # an orderly halt -p, then a cold start: clean, the count starts again
+        self.install()
+        lib.st_active(True)
+        self.boot('[1] FreeBSD\n')
+        self.assertTrue(lib.st_status()['usable'])
+        lib.st_active(True)
+        self.boot('---<<BOOT>>---\n[1] FreeBSD\n' + ufs)
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertEqual(lib.read_count(lib.ST_UNCLEAN), 0)
+        # then a panic with no dump device, or a power cut: once is let through
+        lib.st_active(True)
+        self.boot('---<<BOOT>>---\n[1] FreeBSD\n' + ufs + dirty)
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertEqual(lib.read_count(lib.ST_UNCLEAN), 1)
+
+    def crash_dump(self, age):
+        # what savecore saved, age seconds after the marker was written
+        info = os.path.join(lib.CRASH_DIR, 'info.0')
+        with open(info, 'w') as f:
+            f.write('Dump header from device: /dev/gpt/swapfs\n')
+        when = os.stat(lib.ST_ACTIVE).st_mtime + age
+        os.utime(info, (when, when))
+
+    def test_panic_crash_dump(self):
+        # memory cleared at boot, so no message buffer: a dump saved since says panic
+        self.install()
+        lib.st_active(True)
+        self.crash_dump(60)
+        self.boot('[1] FreeBSD\n')
+        st = lib.st_status()
+        self.assertFalse(st['usable'])
+        self.assertTrue(st['held'])
+        self.assertIn('ended in a panic', st['reason'])
+
+    def test_crash_dump_clean_root(self):
+        # a panic after the root went clean, late in a shutdown: the dump says so
+        self.install()
+        lib.st_active(True)
+        self.crash_dump(60)
+        self.boot('---<<BOOT>>---\n[1] Trying to mount root from ufs:/dev/ada0p2 [rw]...\n')
+        self.assertIn('ended in a panic', lib.st_status()['reason'])
+
+    def test_old_crash_dump(self):
+        # one from before the marker is an earlier panic's: unexplained, as without one
+        self.install()
+        lib.st_active(True)
+        self.crash_dump(-60)
+        self.boot('[1] FreeBSD\n')
+        self.assertTrue(lib.st_status()['usable'])
+        self.assertEqual(lib.read_count(lib.ST_UNCLEAN), 1)
 
     def test_active_after_clean_shutdown(self):
         # the stop hook removed the marker; the boot cleared its twin

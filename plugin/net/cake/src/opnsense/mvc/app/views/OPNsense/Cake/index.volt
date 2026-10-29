@@ -180,6 +180,8 @@
                     $warnings.hide();
                 }
 
+                $("#cake_retry").toggle(!!st.retry);
+
                 showStats(data);
             });
         }
@@ -215,6 +217,13 @@
             }
         });
 
+        /* Apply leaves dummynet-st out after a crash; this loads it again */
+        $("#retryAct").SimpleActionButton({
+            onAction: function() {
+                updateStatus();
+            }
+        });
+
         updateStatus();
         /* keep the statistics current while the page is visible */
         setInterval(function() {
@@ -232,6 +241,12 @@
 <div class="alert alert-warning" role="alert" id="cake_hz" style="display: none;"></div>
 
 <div class="alert alert-warning" role="alert" id="cake_warnings" style="display: none;"></div>
+
+<div id="cake_retry" style="display: none; margin-bottom: 15px;">
+    <button class="btn btn-primary" id="retryAct" type="button" data-endpoint="/api/cake/service/retry"
+            data-label="{{ lang._('Try dummynet-st again') }}"
+            data-error-title="{{ lang._('Error reloading the shaper') }}"></button>
+</div>
 
 <div class="content-box">
     {{ partial("layout_partials/base_form", ['fields': formGeneral, 'id': 'frm_general']) }}
