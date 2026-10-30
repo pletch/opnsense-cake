@@ -5,3 +5,4 @@
 0005-fine-callout-shutdown-and-bounds.patch
 0006-tick-callout-shutdown-and-burst-headroom.patch
 0007-copy-obj-sched-length.patch
+0008-stage-packets-when-dn-uh-is-held.patch

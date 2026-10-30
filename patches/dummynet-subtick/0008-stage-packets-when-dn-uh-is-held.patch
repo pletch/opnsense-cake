@@ -1,0 +1,490 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 23:30:00 -0400
+Subject: [PATCH] dummynet_st: a packet that finds dn_uh held is left to the holder
+
+The eighth of the sub-tick release series (opnsense-cake SUBTICK.md),
+from the measurements on an Atom x5-Z8350 firewall (test/hw-subtick.sh).
+
+dummynet_io() takes dn_uh for every packet, on the thread that receives
+it; with releases between ticks, dummynet's task takes it thousands of
+times a second as well, briefly each time. On a small firewall the
+receiving thread is what saturates first, and it spun on dn_uh: at 200
+Mbit/s each way through CAKE on the Z8350 (one re(4) receive queue) the
+fork at 250 us left that thread at 100% of a CPU, a quarter of it in
+lock_delay, against 75% with the stock dummynet, and packets queued in
+the NIC's receive ring, ahead of CAKE (RTT 35-40 ms against 4 ms).
+
+Now a packet that finds dn_uh held (mtx_trylock()) is pushed on a
+lock-free list, V_dn_cfg.staged, and dummynet_io() returns at once;
+whoever holds dn_uh in dummynet_io() or the tasks enqueues the list,
+oldest first, before its own work and again before releasing the lock
+(dn_unlock()), and looks once more after releasing it, as a packet
+staged meanwhile may have failed its own trylock just before. A holder
+that does not release the lock that way (a configuration change)
+leaves the list to the next packet or the next tick. The packets from
+one thread stay in order: a holder empties the list before enqueuing
+its own packet. A staged packet that is dropped returns no ENOBUFS,
+which ipfw's callers do not look at.
+
+The tag is now attached before taking the lock, as the stock comment
+said it could be (m_tag_get() allocates), and the enqueue under the
+lock is dn_io_locked(), for dummynet_io()'s own packet and the staged
+ones. net.inet.ip.dummynet.stage=0 waits for the lock as before, and
+net.inet.ip.dummynet.staged counts the packets left to the holder.
+---
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index 76cdb85..ac05064 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -146,6 +146,12 @@ int dn_release_us;
+ static int dn_catchup_us;	/* cap on the credit after a late wakeup */
+ static u_long dn_rel_wakeups, dn_rel_pkts, dn_rel_late_sum, dn_rel_late_max;
+ static u_long dn_rel_catchups;
++/*
++ * A packet that finds dn_uh held is staged for the holder to enqueue
++ * (dummynet_io()), unless dn_stage is 0. dn_staged counts them.
++ */
++static int dn_stage = 1;
++static u_long dn_staged;
+ 
+ static int
+ sysctl_release_us(SYSCTL_HANDLER_ARGS)
+@@ -217,6 +223,11 @@ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_late_max,
+     CTLFLAG_RW, &dn_rel_late_max, 0, "Latest release (us)");
+ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, release_catchups,
+     CTLFLAG_RD, &dn_rel_catchups, 0, "Releases later than release_us");
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, stage,
++    CTLFLAG_RWTUN, &dn_stage, 0,
++    "Leave a packet that finds dummynet busy to its holder (0: wait)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, staged,
++    CTLFLAG_RD, &dn_staged, 0, "Packets left to dummynet's holder");
+ #ifdef CAKE_DEBUG
+ /* for tests: dummynet_fine_task() sleeps first, so that wakeups queue up */
+ static int dn_fine_delay_us;
+@@ -784,6 +795,165 @@ dn_serve_heap(struct mq *q, uint64_t now)
+ 	}
+ }
+ 
++/*
++ * Enqueue m, tagged, into flowset fs_id's scheduler, under dn_uh, as
++ * dummynet_io() does. The packets that can leave at once are added to
++ * send, except m itself if it alone can, when fast (a packet of
++ * dummynet_io()'s own, not a staged one): that one is left in *m0, its
++ * tag renamed, for ipfw to send on once send has gone. Otherwise *m0 is
++ * NULL after. Returns ENOBUFS (or 0, with DN_NOERROR) if m was dropped.
++ */
++static int
++dn_io_locked(struct mbuf **m0, int fs_id, int dir, struct ipfw_flow_id *f_id,
++    struct mq *send, int fast)
++{
++	struct mbuf *m = *m0, *n, *next;
++	struct dn_fsk *fs = NULL;
++	struct dn_sch_inst *si;
++	struct dn_queue *q = NULL;	/* default */
++	uint64_t now;
++
++	DN_BH_LOCK_ASSERT();
++	V_dn_cfg.io_pkt++;
++	/* XXX locate_flowset could be optimised with a direct ref. */
++	fs = dn_ht_find(V_dn_cfg.fshash, fs_id, 0, NULL);
++	if (fs == NULL)
++		goto dropit;	/* This queue/pipe does not exist! */
++	if (fs->sched == NULL)	/* should not happen */
++		goto dropit;
++	/* find scheduler instance, possibly applying sched_mask */
++	si = ipdn_si_find(fs->sched, f_id);
++	if (si == NULL)
++		goto dropit;
++	/*
++	 * If the scheduler supports multiple queues, find the right one
++	 * (otherwise it will be ignored by enqueue).
++	 */
++	if (fs->sched->fp->flags & DN_MULTIQUEUE) {
++		q = ipdn_q_find(fs, si, f_id);
++		if (q == NULL)
++			goto dropit;
++	}
++	if (fs->sched->fp->enqueue(si, q, m)) {
++		/* packet was dropped by enqueue() */
++		m = *m0 = NULL;
++
++		/* dn_enqueue already increases io_pkt_drop */
++		V_dn_cfg.io_pkt_drop--;
++
++		goto dropit;
++	}
++
++	*m0 = NULL;	/* consumed, unless it goes back to ipfw below */
++	if (si->kflags & DN_ACTIVE)
++		return (0); /* already active, nothing to do */
++
++	/* compute the initial allowance */
++	now = dn_now_us();
++	if (si->idle_time < now) {
++	    /* Do this only on the first packet on an idle pipe. No
++	     * io_fast credit: the first packet goes at once anyway
++	     * (serve_sched()), and a tick's worth would be a burst. */
++	    struct dn_link *p = &fs->sched->link;
++
++	    si->sched_time = now;
++	    si->credit = 0;
++	    if (p->burst && p->bandwidth > 0) {
++		uint64_t idle = now - si->idle_time;
++
++		si->credit = idle > p->burst / p->bandwidth ? p->burst :
++		    idle * p->bandwidth;
++	    }
++	}
++	/* pass through scheduler and delay line */
++	n = serve_sched(NULL, si, now);
++	dn_arm_top();
++
++	/* optimization -- pass it back to ipfw for immediate send */
++	/* XXX Don't call dummynet_send() if scheduler return the packet
++	 *     just enqueued. This avoid a lock order reversal.
++	 *     
++	 */
++	if (fast && n == m && (dir & PROTO_LAYER2) == 0) {
++		/* fast io, rename the tag * to carry reinject info. */
++		struct m_tag *tag = m_tag_first(m);
++
++		tag->m_tag_cookie = MTAG_IPFW_RULE;
++		tag->m_tag_id = 0;
++		V_dn_cfg.io_pkt_fast++;
++		if (m->m_nextpkt != NULL) {
++			printf("dummynet: fast io: pkt chain detected!\n");
++			m->m_nextpkt = NULL;
++		}
++		*m0 = m;
++		return (0);
++	}
++	for (; n != NULL; n = next) {
++		next = n->m_nextpkt;
++		n->m_nextpkt = NULL;
++		mq_append(send, n);
++	}
++	return (0);
++
++dropit:
++	V_dn_cfg.io_pkt_drop++;
++	if (m)
++		FREE_PKT(m);
++	*m0 = NULL;
++	return ((fs && (fs->fs.flags & DN_NOERROR)) ? 0 : ENOBUFS);
++}
++
++/*
++ * Enqueue the packets staged while dn_uh was held (dummynet_io()), in
++ * the order they came; those that can leave at once are added to send.
++ */
++static void
++dn_drain_staged(struct mq *send)
++{
++	struct mbuf *m, *next, *fifo = NULL;
++	struct dn_pkt_tag *dt;
++
++	DN_BH_LOCK_ASSERT();
++	m = (struct mbuf *)atomic_swap_ptr((volatile uintptr_t *)&V_dn_cfg.staged, 0);
++	if (m == NULL)
++		return;
++	atomic_thread_fence_acq();
++	for (; m != NULL; m = next) {	/* newest first: reverse */
++		next = m->m_nextpkt;
++		m->m_nextpkt = fifo;
++		fifo = m;
++	}
++	for (m = fifo; m != NULL; m = next) {
++		next = m->m_nextpkt;
++		m->m_nextpkt = NULL;
++		dt = dn_tag_get(m);
++		dn_staged++;
++		(void)dn_io_locked(&m, dt->fs_id, dt->dn_dir, &dt->f_id, send, 0);
++	}
++}
++
++/*
++ * Release dn_uh, first enqueuing what was staged meanwhile (into send,
++ * as dn_drain_staged()). A dummynet_io() that staged a packet as the
++ * lock was released may have failed its own trylock before the release,
++ * so look again after it, and take the lock back if there is more.
++ * Only holders that release dn_uh this way empty the list: one that does
++ * not (a configuration change) leaves it to the next packet or the next
++ * tick.
++ */
++static void
++dn_unlock(struct mq *send)
++{
++	for (;;) {
++		dn_drain_staged(send);
++		DN_BH_WUNLOCK();
++		/* against dummynet_io()'s push then trylock */
++		atomic_thread_fence_seq_cst();
++		if (V_dn_cfg.staged == NULL || !mtx_trylock(&V_dn_cfg.uh_mtx))
++			return;
++	}
++}
++
+ /*
+  * The timer handler for dummynet. Time is computed in ticks, but
+  * but the code is tolerant to the actual rate at which this is called.
+@@ -810,6 +980,7 @@ dummynet_task(void *context, int pending)
+ 		}
+ 
+ 		DN_BH_WLOCK();
++		dn_drain_staged(&q);
+ 
+ 		/* Update number of lost(coalesced) ticks. */
+ 		V_dn_cfg.tick_lost += pending - 1;
+@@ -854,7 +1025,7 @@ dummynet_task(void *context, int pending)
+ 			dn_drain_queue();
+ 		}
+ 		dn_arm_top();
+-		DN_BH_WUNLOCK();
++		dn_unlock(&q);
+ 		if (q.head != NULL)
+ 			dummynet_send(q.head);
+ 
+@@ -877,6 +1048,7 @@ dummynet_fine_task(void *context, int pending)
+ 	struct mq q;
+ 	struct epoch_tracker et;
+ 	uint64_t now, late, fired;
++	int staged;
+ 
+ 	VNET_ITERATOR_DECL(vnet_iter);
+ #ifdef CAKE_DEBUG
+@@ -895,12 +1067,14 @@ dummynet_fine_task(void *context, int pending)
+ 			continue;
+ 		}
+ 		DN_BH_WLOCK();
++		dn_drain_staged(&q);
++		staged = q.count;
+ 		now = dn_now_us();
+ 		dn_serve_heap(&q, now);
+-		if (q.count > 0) {
++		if (q.count > staged) {
+ 			late = fired != 0 && now > fired ? now - fired : 0;
+ 			dn_rel_wakeups++;
+-			dn_rel_pkts += q.count;
++			dn_rel_pkts += q.count - staged;
+ 			dn_rel_late_sum += late;
+ 			if (late > dn_rel_late_max)
+ 				dn_rel_late_max = late;
+@@ -908,7 +1082,7 @@ dummynet_fine_task(void *context, int pending)
+ 				dn_rel_catchups++;
+ 		}
+ 		dn_arm_top();
+-		DN_BH_WUNLOCK();
++		dn_unlock(&q);
+ 		if (q.head != NULL)
+ 			dummynet_send(q.head);
+ 		CURVNET_RESTORE();
+@@ -1055,16 +1229,21 @@ tag_mbuf(struct mbuf *m, int dir, struct ip_fw_args *fwa)
+  * We use the argument to locate the flowset fs and the sched_set sch
+  * associated to it. The we apply flow_mask and sched_mask to
+  * determine the queue and scheduler instances.
++ *
++ * A packet that finds dn_uh held is not made to wait for it (opnsense-
++ * cake): it is staged, and the holder enqueues it before releasing the
++ * lock (dn_unlock()). With releases between ticks, dummynet's task takes
++ * the lock thousands of times a second, and the thread receiving the
++ * packets, often what limits a small firewall, would spin on it.
+  */
+ int
+ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ {
+ 	struct mbuf *m = *m0;
+-	struct dn_fsk *fs = NULL;
+-	struct dn_sch_inst *si;
+-	struct dn_queue *q = NULL;	/* default */
+-	uint64_t now;
+-	int fs_id, dir;
++	struct mq send = { NULL, NULL, 0 };
++	struct dn_pkt_tag *dt;
++	struct mbuf *head;
++	int fs_id, dir, error;
+ 
+ 	fs_id = (fwa->rule.info & IPFW_INFO_MASK) +
+ 		((fwa->rule.info & IPFW_IS_PIPE) ? 2*DN_MAX_ID : 0);
+@@ -1077,97 +1256,45 @@ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ 		dir |= PROTO_LAYER2;
+ 	else if (fwa->flags & IPFW_ARGS_IP6)
+ 		dir |= PROTO_IPV6;
+-	DN_BH_WLOCK();
+-	V_dn_cfg.io_pkt++;
+-	/* we could actually tag outside the lock, but who cares... */
+-	if (tag_mbuf(m, dir, fwa))
+-		goto dropit;
+-	/* XXX locate_flowset could be optimised with a direct ref. */
+-	fs = dn_ht_find(V_dn_cfg.fshash, fs_id, 0, NULL);
+-	if (fs == NULL)
+-		goto dropit;	/* This queue/pipe does not exist! */
+-	if (fs->sched == NULL)	/* should not happen */
+-		goto dropit;
+-	/* find scheduler instance, possibly applying sched_mask */
+-	si = ipdn_si_find(fs->sched, &(fwa->f_id));
+-	if (si == NULL)
+-		goto dropit;
+-	/*
+-	 * If the scheduler supports multiple queues, find the right one
+-	 * (otherwise it will be ignored by enqueue).
+-	 */
+-	if (fs->sched->fp->flags & DN_MULTIQUEUE) {
+-		q = ipdn_q_find(fs, si, &(fwa->f_id));
+-		if (q == NULL)
+-			goto dropit;
+-	}
+-	if (fs->sched->fp->enqueue(si, q, m)) {
+-		/* packet was dropped by enqueue() */
+-		m = *m0 = NULL;
+-
+-		/* dn_enqueue already increases io_pkt_drop */
+-		V_dn_cfg.io_pkt_drop--;
+-
+-		goto dropit;
+-	}
+-
+-	if (si->kflags & DN_ACTIVE) {
+-		m = *m0 = NULL; /* consumed */
+-		goto done; /* already active, nothing to do */
+-	}
+-
+-	/* compute the initial allowance */
+-	now = dn_now_us();
+-	if (si->idle_time < now) {
+-	    /* Do this only on the first packet on an idle pipe. No
+-	     * io_fast credit: the first packet goes at once anyway
+-	     * (serve_sched()), and a tick's worth would be a burst. */
+-	    struct dn_link *p = &fs->sched->link;
+-
+-	    si->sched_time = now;
+-	    si->credit = 0;
+-	    if (p->burst && p->bandwidth > 0) {
+-		uint64_t idle = now - si->idle_time;
+-
+-		si->credit = idle > p->burst / p->bandwidth ? p->burst :
+-		    idle * p->bandwidth;
+-	    }
++	/* tag outside the lock: m_tag_get() allocates */
++	if (tag_mbuf(m, dir, fwa)) {
++		DN_BH_WLOCK();
++		V_dn_cfg.io_pkt++;
++		V_dn_cfg.io_pkt_drop++;
++		DN_BH_WUNLOCK();
++		FREE_PKT(m);
++		*m0 = NULL;
++		return (ENOBUFS);
+ 	}
+-	/* pass through scheduler and delay line */
+-	m = serve_sched(NULL, si, now);
+-	dn_arm_top();
+-
+-	/* optimization -- pass it back to ipfw for immediate send */
+-	/* XXX Don't call dummynet_send() if scheduler return the packet
+-	 *     just enqueued. This avoid a lock order reversal.
+-	 *     
+-	 */
+-	if (/*V_dn_cfg.io_fast &&*/ m == *m0 && (dir & PROTO_LAYER2) == 0 ) {
+-		/* fast io, rename the tag * to carry reinject info. */
+-		struct m_tag *tag = m_tag_first(m);
+-
+-		tag->m_tag_cookie = MTAG_IPFW_RULE;
+-		tag->m_tag_id = 0;
+-		V_dn_cfg.io_pkt_fast++;
+-		if (m->m_nextpkt != NULL) {
+-			printf("dummynet: fast io: pkt chain detected!\n");
+-			m->m_nextpkt = NULL;
++	if (!mtx_trylock(&V_dn_cfg.uh_mtx)) {
++		if (dn_stage == 0) {
++			DN_BH_WLOCK();
++		} else {
++			dt = dn_tag_get(m);
++			dt->fs_id = fs_id;
++			dt->f_id = fwa->f_id;
++			*m0 = NULL;
++			do {
++				head = V_dn_cfg.staged;
++				m->m_nextpkt = head;
++			} while (!atomic_cmpset_rel_ptr(
++			    (volatile uintptr_t *)&V_dn_cfg.staged,
++			    (uintptr_t)head, (uintptr_t)m));
++			/* against dn_unlock()'s release then look */
++			atomic_thread_fence_seq_cst();
++			if (!mtx_trylock(&V_dn_cfg.uh_mtx))
++				return (0);	/* the holder will see it */
++			dn_unlock(&send);
++			if (send.head != NULL)
++				dummynet_send(send.head);
++			return (0);
+ 		}
+-		m = NULL;
+-	} else {
+-		*m0 = NULL;
+ 	}
+-done:
+-	DN_BH_WUNLOCK();
+-	if (m)
+-		dummynet_send(m);
+-	return 0;
+-
+-dropit:
+-	V_dn_cfg.io_pkt_drop++;
+-	DN_BH_WUNLOCK();
+-	if (m)
+-		FREE_PKT(m);
+-	*m0 = NULL;
+-	return (fs && (fs->fs.flags & DN_NOERROR)) ? 0 : ENOBUFS;
++	/* what was staged before us goes first */
++	dn_drain_staged(&send);
++	error = dn_io_locked(m0, fs_id, dir, &fwa->f_id, &send, 1);
++	dn_unlock(&send);
++	if (send.head != NULL)
++		dummynet_send(send.head);
++	return (error);
+ }
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 1669b7d..48103d1 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -162,6 +162,9 @@ struct dn_parms {
+ 	/* ticks and other stuff */
+ 	uint64_t	curr_time;
+ 	uint64_t	now_us;		/* the pipes' clock, us of uptime */
++	/* packets that arrived while dn_uh was held, newest first,
++	 * linked by m_nextpkt: whoever holds it enqueues them */
++	struct mbuf * volatile staged;
+ 	/* flowsets and schedulers are in hash tables, with 'hash_size'
+ 	 * buckets. fshash is looked up at every packet arrival
+ 	 * so better be generous if we expect many entries.
+@@ -401,6 +404,9 @@ struct dn_pkt_tag {
+ 	uint16_t if_index;
+ 	uint16_t if_idxgen;
+ 	uint16_t iphdr_off;	/* IP header offset for mtodo()	*/
++	/* for a packet staged while dn_uh was held (dummynet_io()) */
++	int fs_id;		/* flowset, as dummynet_io() found it	*/
++	struct ipfw_flow_id f_id; /* for the masks			*/
+ };
+ 
+ /*
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 3296cbf..28b64cb 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -2650,8 +2650,17 @@ ip_dn_vnet_init(void)
+ static void
+ ip_dn_vnet_destroy(void)
+ {
++	struct mbuf *m, *next;
++
+ 	DN_BH_WLOCK();
+ 	dummynet_flush();
++	/* nothing stages any more (ip_dn_destroy() waited for dummynet_io()) */
++	for (m = V_dn_cfg.staged; m != NULL; m = next) {
++		next = m->m_nextpkt;
++		m->m_nextpkt = NULL;
++		FREE_PKT(m);
++	}
++	V_dn_cfg.staged = NULL;
+ 	DN_BH_WUNLOCK();
+ 
+ 	dn_ht_free(V_dn_cfg.schedhash, 0);
