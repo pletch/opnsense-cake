@@ -1,0 +1,85 @@
+name: Bug or test report
+description: Something went wrong, or a test result worth sharing
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Security problems go privately, as described in SECURITY.md, not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. For a crash or hang, say when (at boot, on Apply, under load).
+    validations:
+      required: true
+  - type: input
+    id: opnsense
+    attributes:
+      label: OPNsense version
+      description: Output of `opnsense-version`
+      placeholder: OPNsense 26.7.8 (amd64)
+    validations:
+      required: true
+  - type: textarea
+    id: packages
+    attributes:
+      label: Package versions
+      description: "Output of `pkg info cake-kmod dummynet-st os-cake`, and whether you installed from the repository or from files"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: CAKE page status line
+      description: The status line at the top of Firewall → Shaper → CAKE
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Shaper and CAKE settings
+      description: Pipe bandwidths and directions, the CAKE entry options (diffserv, isolation, link type, ACK filter, ...), and whether Sub-tick release is on
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Bare metal
+        - VM (Proxmox / KVM)
+        - VM (ESXi)
+        - VM (Hyper-V)
+        - VM (other)
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU, NICs and drivers
+      description: "e.g. N100, 4 × igc; or Atom x5-Z8350, re0 with os-realtek-re"
+    validations:
+      required: true
+  - type: input
+    id: hz
+    attributes:
+      label: kern.hz and RSS
+      description: "Output of `sysctl kern.hz net.inet.rss.enabled`"
+  - type: input
+    id: link
+    attributes:
+      label: Internet link
+      description: Type and speed, e.g. DOCSIS 1000/50, VDSL2 100/40, fiber 2000/2000
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "CAKE's lines from the system log (`grep cake /var/log/system/latest.log`), and for a crash `dmesg` or the panic message and any `/conf/dummynet-st.*` files left behind"
+      render: text
+  - type: textarea
+    id: results
+    attributes:
+      label: Measurements
+      description: Optional. Bufferbloat results (e.g. Waveform) with FQ-CoDel and with CAKE at the same rate, or anything else you measured.
