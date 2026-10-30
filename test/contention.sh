@@ -16,36 +16,21 @@
 #   test/contention.sh [bench|linux|path]
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 . "$(dirname "$0")/ticks.sh"
 TARGET=${1:-bench}
 LEN=${LEN:-15}
 
-cli() {
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
-opn() {
-	tag=R$(date +%N)
-	"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
-	    >/dev/null 2>&1
-}
-
 case "$TARGET" in
 bench)
-	"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 	opn "cd /root/work && DOWN=50Mbit/s UP=50Mbit/s ./lul-setup.sh" 60
 	opn "/root/work/lul-sched.sh cake diffserv4"
 	C=cli S=srv H=10.10.2.2
 	;;
 path)
-	"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 	opn "cd /root/work && DOWN=1Gbit/s UP=1Gbit/s ./lul-setup.sh" 60
 	opn "/root/work/lul-sched.sh fifo"
-	cli 'for x in cli:enp0s3 srv:enp0s4; do
+	cli 'for x in cli:cli0 srv:srv0; do
 		sudo ip netns exec ${x%%:*} /usr/sbin/tc qdisc replace dev ${x#*:} root cake bandwidth 50mbit diffserv4
 	done'
 	C=cli S=srv H=10.10.2.2
@@ -107,7 +92,7 @@ run voice+bulk 0xb8 0x20
 run bulk+voice 0x20 0xb8
 run voice+all 0xb8 0x88 0x00 0x20
 
-[ "$TARGET" = path ] && cli 'for x in cli:enp0s3 srv:enp0s4; do
+[ "$TARGET" = path ] && cli 'for x in cli:cli0 srv:srv0; do
 	sudo ip netns exec ${x%%:*} /usr/sbin/tc qdisc replace dev ${x#*:} root fq_codel
 done'
 [ "$TARGET" = linux ] && cli 'sudo pkill -f "irtt server -b 10.99"; sudo pkill -x netserver;

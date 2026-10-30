@@ -31,22 +31,9 @@
 #   test/features.sh
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 fails=0
 . "$(dirname "$0")/ticks.sh"
-
-opn() {
-	tag=R$(date +%N)
-	out=$("$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" 2>/dev/null)
-	printf '%s\n' "$out" | sed -n "/^BEG-$tag\$/,/^END-$tag /p" | sed '1d;$d'
-}
-
-cli() {
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
 
 # each result with how late dummynet's tick ran since the previous one
 result() { # name ok detail
@@ -66,13 +53,12 @@ flood_pps() {
 	cli 'N="sudo ip netns exec"
 	$N cli netperf -H 10.10.2.2 -t UDP_STREAM -l 12 -P 0 -- -m 1472 -R 1 >/dev/null 2>&1 &
 	sleep 3
-	f=/sys/class/net/enp0s4/statistics/rx_packets
+	f=/sys/class/net/srv0/statistics/rx_packets
 	a=$($N srv cat $f); sleep 6; b=$($N srv cat $f)
 	wait
 	echo $(( (b - a) / 6 ))'
 }
 
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "cd /root/work && DOWN=50Mbit/s UP=10Mbit/s ./lul-setup.sh" 60 | tail -1
 ticks_mark
 
@@ -86,7 +72,7 @@ for x in cli:1 srv:2; do ns=${x%%:*}; n=${x#*:}
 done'
 sched diffserv4 wash
 r=$(cli 'N="sudo ip netns exec"
-$N srv timeout 8 tcpdump -l -n -v -i enp0s4 "icmp or icmp6" 2>/dev/null >/tmp/wash.txt &
+$N srv timeout 8 tcpdump -l -n -v -i srv0 "icmp or icmp6" 2>/dev/null >/tmp/wash.txt &
 sleep 2
 $N cli ping -q -c 2 -Q 0xb9 10.10.2.2 >/dev/null
 $N cli ping -6 -q -c 2 -Q 0xb9 fd00:2::2 >/dev/null
@@ -176,7 +162,7 @@ result ingress $ok "flood delivered $e pps in egress mode, $i pps in ingress mod
 
 echo "== ingress-recovery"
 sched besteffort ingress
-out=$(cli 'N="sudo ip netns exec"; f=/sys/class/net/enp0s4/statistics/rx_packets
+out=$(cli 'N="sudo ip netns exec"; f=/sys/class/net/srv0/statistics/rx_packets
 rm -f /tmp/ir-ping.txt
 $N cli ping -D -n -i 0.1 -w 50 10.10.2.2 >/tmp/ir-ping.txt 2>&1 &
 p=$!

@@ -16,8 +16,7 @@
 #   label|lul-sched.sh arguments
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 . "$(dirname "$0")/ticks.sh"
 RATE=${RATE:-300Mbit/s}
 LEN=${LEN:-40}
@@ -35,19 +34,7 @@ ndown)	test="tcp_ndown --test-parameter download_streams=${2:-64}" ;;
 esac
 
 # run a command on OPNsense, print its output (see robustness.sh)
-opn() {
-	tag=R$(date +%N)
-	out=$("$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" 2>/dev/null)
-	printf '%s\n' "$out" | sed -n "/^BEG-$tag\$/,/^END-$tag /p" | sed '1d;$d'
-}
 
-cli() {
-	ssh -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "cd /root/work && DOWN=$RATE UP=$RATE ./lul-setup.sh" 60 | tail -1
 
 tmp=$(mktemp)

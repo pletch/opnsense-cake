@@ -17,7 +17,7 @@
 # KEYFILE holds the API key and secret on two lines.
 set -u
 
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 . "$(dirname "$0")/ticks.sh"
 API=${API:-https://127.0.0.1:8443/api}
 KEYFILE=${KEYFILE:?KEYFILE must name the API key file}
@@ -35,11 +35,6 @@ api() { # METHOD PATH [JSON]
 	fi
 }
 
-cli() {
-	ssh -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
 # uuids of the CAKE pipes
 pipes=$(api GET trafficshaper/settings/search_pipes | python3 -c '
 import json, sys
@@ -50,7 +45,7 @@ for r in json.load(sys.stdin)["rows"]:
 
 # second client host, one server address per flow
 cli 'N="sudo ip netns exec"
-$N cli ip addr replace 10.10.1.3/24 dev enp0s3
+$N cli ip addr replace 10.10.1.3/24 dev cli0
 # netperf -L does not bind the data connection, so pick B by route
 $N cli ip route replace 10.10.2.20/32 via 10.10.1.1 src 10.10.1.3
 dev=$($N srv ip -o link | awk "!/lo:/ { sub(\":\", \"\", \$2); print \$2; exit }")

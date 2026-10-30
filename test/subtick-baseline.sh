@@ -3,8 +3,8 @@
 # current kern.hz (SUBTICK.md, phase 0), on the lul-setup.sh bench with
 # SCHED (cake, or fq_codel or fifo) on both pipes at RATE:
 #
-#   idle    the router's CPU use and the host CPU of its qemu process with
-#           no traffic (dummynet's callout runs every tick even then)
+#   idle    the router's CPU use and the host CPU of its VM process with
+#           no traffic (the latter with PROX, bench.sh) (dummynet's callout runs every tick even then)
 #   load    the same with 4 greedy TCP downloads, their throughput, and
 #           how late the ticks ran
 #   bursts  the gaps between full-size packets leaving the download pipe
@@ -15,13 +15,11 @@
 #
 #   RATE=300Mbit/s LEN=30 COUNT=60000 LOAD=tcp SCHED=cake test/subtick-baseline.sh
 #
-# The router fetches subtick-burst.sh from a web server on this machine
-# (port 8765), as sercmd mangles quotes and backslashes. Contention and
-# rrul at the same kern.hz: test/contention.sh bench, test/run-lul.sh cake.
+# Contention and rrul at the same kern.hz: test/contention.sh bench,
+# test/run-lul.sh cake.
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 . "$(dirname "$0")/ticks.sh"
 RATE=${RATE:-300Mbit/s}
@@ -31,40 +29,21 @@ SECS=8
 LOAD=${LOAD:-tcp}
 SCHED=${SCHED:-cake}
 
-cli() {
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
-# run a command on the router and print its output
-opn() {
-	tag=R$(date +%N)
-	"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
-	    2>/dev/null | tr -d '\r' | sed -n "/^BEG-$tag\$/,/^END-$tag/p" | sed '1d;$d'
-}
-
-# CPU time of the router's qemu process, in clock ticks
-host_cpu() {
-	awk '{ print $14 + $15 }' "/proc/$(cat "$OPN/qemu.pid")/stat"
-}
-
-# router and host CPU over SECS seconds
+# router CPU over SECS seconds, and the host CPU of its VM process (PROX)
 cpu() {
-	h0=$(host_cpu)
+	h0=$(vm_host_cpu)
 	r=$(opn "sh /root/work/subtick-burst.sh cpu $SECS" 60)
-	h1=$(host_cpu)
-	echo "$1: $r; host qemu $(awk -v d=$((h1 - h0)) -v s=$SECS -v t="$(getconf CLK_TCK)" \
-	    'BEGIN { printf "%.0f%%", 100 * d / t / s }') of a CPU"
+	h1=$(vm_host_cpu)
+	set -- "$1" $h0 $h1
+	if [ $# -eq 5 ]; then
+		echo "$1: $r; host $(awk -v d=$(($4 - $2)) -v s=$SECS -v t="$3" \
+		    'BEGIN { printf "%.0f%%", 100 * d / t / s }') of a CPU"
+	else
+		echo "$1: $r; host ?"
+	fi
 }
 
-python3 -m http.server 8765 --bind 127.0.0.1 -d "$TOP/test" >/dev/null 2>&1 &
-WWW=$!
-trap 'kill $WWW 2>/dev/null' EXIT
-sleep 1
-
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
-opn "fetch -qo /root/work/subtick-burst.sh http://10.0.2.2:8765/subtick-burst.sh" >/dev/null
+put "$TOP/test/subtick-burst.sh" /root/work/
 opn "cd /root/work && DOWN=$RATE UP=$RATE ./lul-setup.sh" 60 | grep lul-setup
 opn "/root/work/lul-sched.sh $SCHED" >/dev/null
 

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Robustness tests for dn_cake on the OPNsense + lul-client test VMs
-# (see lul-setup.sh; run that on OPNsense after boot first).
+# Robustness tests for dn_cake on the bench (bench.sh: the OPNsense and
+# client VMs; run lul-setup.sh on OPNsense after boot first).
 #
 # Builds and loads the CAKE_DEBUG module, then:
 #   normal    RRUL through cake, consistency checks on
@@ -26,36 +26,13 @@
 #   leaks     mbufs, dummynet memory and queued packets back to baseline
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
 SRC=$(cd "$(dirname "$0")/.." && pwd)
-PORT=8765
+. "$SRC/test/bench.sh"
 fails=0
 
-serve=$(mktemp -d)
-cleanup() { [ -n "${httpd:-}" ] && kill "$httpd" 2>/dev/null; rm -rf "$serve"; }
-trap cleanup EXIT INT TERM
-
-tar -C "$SRC/.." -czf "$serve/cake.tgz" "$(basename "$SRC")"
-cp "$SRC/test/opn-robust.sh" "$SRC/test/lul-sched.sh" "$serve/"
-python3 -I -m http.server --bind 127.0.0.1 $PORT --directory "$serve" \
-    >/dev/null 2>&1 &
-httpd=$!
-
-# run a command on OPNsense, print its output, return its exit status
-opn() {
-	tag=R$(date +%N)
-	out=$("$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?")
-	printf '%s\n' "$out" | sed -n "/^BEG-$tag\$/,/^END-$tag /p" | sed '1d;$d'
-	rc=$(printf '%s\n' "$out" | sed -n "s/^END-$tag \([0-9]*\).*/\1/p")
-	return "${rc:-99}"
-}
-
-cli() {
-	ssh -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
+pack=$(mktemp -d)
+trap 'rm -rf "$pack"' EXIT INT TERM
+tar -C "$SRC/.." -czf "$pack/cake.tgz" "$(basename "$SRC")"
 
 stat() { opn '/root/work/opn-robust.sh status' | sed -n "s/^$1 //p"; }
 
@@ -77,9 +54,6 @@ rrul() { # seconds -> background RRUL in the cli netns
 	    >/tmp/rrul.log 2>&1; echo flent-exit \$?"
 }
 
-# clear whatever the console shell is in the middle of (e.g. an open quote)
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
-
 # CAKE built into a CAKE_DEBUG dummynet.ko: only fetch the scripts
 builtin=0
 opn '! kldstat -q -n dn_cake.ko && sysctl -n net.inet.ip.dummynet.cake.check_errors' \
@@ -87,16 +61,14 @@ opn '! kldstat -q -n dn_cake.ko && sysctl -n net.inet.ip.dummynet.cake.check_err
 
 if [ $builtin = 1 ]; then
 echo "== CAKE_DEBUG built into dummynet.ko"
+put "$SRC/test/opn-robust.sh" "$SRC/test/lul-sched.sh" /root/work/ &&
 opn "cd /root/work &&
-fetch -qo opn-robust.sh http://10.0.2.2:$PORT/opn-robust.sh &&
-fetch -qo lul-sched.sh http://10.0.2.2:$PORT/lul-sched.sh &&
 chmod +x opn-robust.sh lul-sched.sh && /root/work/lul-sched.sh fifo >/dev/null &&
 sysctl -n net.inet.ip.dummynet.cake.check_errors" 60 >/dev/null
 else
 echo "== build and load CAKE_DEBUG module"
-opn "cd /root/work && fetch -qo cake.tgz http://10.0.2.2:$PORT/cake.tgz &&
-fetch -qo opn-robust.sh http://10.0.2.2:$PORT/opn-robust.sh &&
-fetch -qo lul-sched.sh http://10.0.2.2:$PORT/lul-sched.sh &&
+put "$pack/cake.tgz" "$SRC/test/opn-robust.sh" "$SRC/test/lul-sched.sh" /root/work/ &&
+opn "cd /root/work &&
 chmod +x opn-robust.sh lul-sched.sh && rm -rf dn_sched_cake &&
 tar xzf cake.tgz && cd dn_sched_cake/sys/modules/dn_sched_cake &&
 make SYSDIR=/usr/src/sys CAKE_DEBUG=1 >/tmp/build.log 2>&1 &&
@@ -166,24 +138,24 @@ consistent && printf '%s' "$r" | grep -q 'ping6-loss 0%' &&
 result ipv6 $ok "$(printf '%s' "$r" | head -1), TCP down ${tput:-?} Mbit/s"
 
 echo "== churn"
-rrul 60 >"$serve/churn.out" &
+rrul 60 >"$pack/churn.out" &
 rpid=$!
 sleep 5
 c=$(opn '/root/work/opn-robust.sh churn 45' 120)
 wait $rpid
-r=$(cat "$serve/churn.out")
+r=$(cat "$pack/churn.out")
 opn '/root/work/opn-robust.sh params diffserv=1 flowmode=7 && ipfw -q pipe 1 config bw 50Mbit/s &&
 /root/work/lul-sched.sh cake' >/dev/null
 consistent && [ "$r" = "flent-exit 0" ] && ok=1 || ok=0
 result churn $ok "$c, $r, check_errors $(stat check_errors)"
 
 echo "== allocfail"
-rrul 45 >"$serve/allocfail.out" &
+rrul 45 >"$pack/allocfail.out" &
 rpid=$!
 sleep 5
 a=$(opn '/root/work/opn-robust.sh allocfail 8' 60)
 wait $rpid
-r=$(cat "$serve/allocfail.out")
+r=$(cat "$pack/allocfail.out")
 opn '/root/work/opn-robust.sh params diffserv=1 && /root/work/lul-sched.sh cake' >/dev/null
 # two instances (one per direction) rebuilt; the failures include the
 # held ones that raced the switch, so check the mask was used up instead
@@ -219,12 +191,12 @@ echo "== vnet"
 opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
 m0=$(stat dnmem)
 opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
-rrul 45 >"$serve/vnet.out" &
+rrul 45 >"$pack/vnet.out" &
 rpid=$!
 sleep 5
 v=$(opn '/root/work/opn-robust.sh vnet 30' 180)
 wait $rpid
-r=$(cat "$serve/vnet.out")
+r=$(cat "$pack/vnet.out")
 opn '/root/work/lul-sched.sh fifo >/dev/null' >/dev/null
 m1=$(stat dnmem)
 opn '/root/work/lul-sched.sh cake >/dev/null' >/dev/null
@@ -245,7 +217,7 @@ errs=$(stat check_errors)
 # a freshly configured scheduler has no instance, but still needs the module
 opn '/root/work/lul-sched.sh cake' >/dev/null
 opn 'kldunload dn_cake' >/dev/null && idle=0 || idle=1
-rrul 30 >"$serve/unload.out" &
+rrul 30 >"$pack/unload.out" &
 rpid=$!
 sleep 8
 opn 'kldunload dn_cake' >/dev/null && busy=0 || busy=1
@@ -255,7 +227,7 @@ opn '/root/work/lul-sched.sh fifo' >/dev/null
 opn 'kldunload dn_cake' >/dev/null && freed=1 || freed=0
 opn 'kldload /root/work/dn_sched_cake/sys/modules/dn_sched_cake/dn_cake.ko' >/dev/null
 [ $idle = 1 ] && [ $busy = 1 ] && [ "$loaded" = yes ] && [ $freed = 1 ] &&
-    [ "$(cat "$serve/unload.out")" = "flent-exit 0" ] && ok=1 || ok=0
+    [ "$(cat "$pack/unload.out")" = "flent-exit 0" ] && ok=1 || ok=0
 result unload $ok "refused with a configured scheduler: $idle, refused while in use: $busy, unloaded when released: $freed, check_errors before unload $errs"
 fi
 

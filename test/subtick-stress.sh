@@ -10,7 +10,8 @@
 #   bounds  a burst of 2^48 - 1 bytes, which overflowed before patch 0005,
 #           and ipfw's largest delay (9999 ms; the kernel clamps larger ones
 #           from other clients): the pipe keeps its rate, the delay its value
-#   pause   the router VM stopped for 5 s under RRUL (QEMU's monitor), as
+#   pause   the router VM suspended for 5 s under RRUL (vm_pause, bench.sh;
+#           skipped without PROX), as
 #           a suspended VM: the pipes pass traffic at their rate after
 #   coalesce  each release between ticks held 2 ms before it runs
 #           (release_task_delay_us, CAKE_DEBUG), at release_us 100 under
@@ -27,25 +28,12 @@
 #   KO=/root/work/subtick/debug/dummynet_st.ko [TESTS='swap pause'] test/subtick-stress.sh
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 KO=${KO:?KO: the CAKE_DEBUG dummynet_st.ko on the router}
 TESTS=${TESTS:-toggle swap cycles bounds pause coalesce}
 fails=0
 
 want() { case " ${TESTS} " in *" $1 "*) return 0 ;; esac; return 1; }
-
-opn() {
-	tag=R$(date +%N)
-	"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
-	    2>/dev/null | tr -d '\r' | sed -n "/^BEG-$tag\$/,/^END-$tag/p" | sed '1d;$d'
-}
-
-cli() {
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
 
 rrul() { # seconds -> RRUL in the cli netns, prints flent's exit status
 	cli "sudo ip netns exec cli flent rrul -l $1 -H 10.10.2.2 -D /tmp \
@@ -57,7 +45,6 @@ setup() {
 	    /root/work/lul-sched.sh cake >/dev/null" 60 | grep lul-setup
 }
 
-# (no double quotes or backslashes: sercmd mangles them)
 bad() { opn 'dmesg | grep -ci -e panic -e cake_check -e witness -e lock.order'; }
 errs() { opn 'sysctl -n net.inet.ip.dummynet.cake.check_errors'; }
 # a 5 s greedy download through pipe 1, in whole Mbit/s
@@ -75,7 +62,6 @@ result() { # name ok detail
 	fi
 }
 
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "sh /root/work/subtick-swap.sh fork $KO" 120
 setup
 base=$(bad)
@@ -156,7 +142,10 @@ result bounds $ok "burst 2^48-1: '$b', $t1 Mbit/s; delay 9999 ms: '$d'; after: $
 
 fi
 
-if want pause; then
+if want pause && [ -z "${PROX:-}" ]; then
+echo "== pause"
+echo "SKIP  pause  no PROX/PROX_VMID to suspend the router VM with"
+elif want pause; then
 echo "== pause"
 # the router stopped for 5 s under load (a suspended VM): its pipes gain at
 # most a second of credit, and pass traffic at their rate afterwards
@@ -164,9 +153,7 @@ opn 'sysctl -q net.inet.ip.dummynet.release_us=100' >/dev/null
 rrul 25 >/tmp/subtick-stress.$$ &
 rpid=$!
 sleep 8
-echo stop | socat - "UNIX-CONNECT:$OPN/monitor.sock" >/dev/null
-sleep 5
-echo cont | socat - "UNIX-CONNECT:$OPN/monitor.sock" >/dev/null
+vm_pause 5
 wait $rpid
 r=$(cat /tmp/subtick-stress.$$)
 rm -f /tmp/subtick-stress.$$

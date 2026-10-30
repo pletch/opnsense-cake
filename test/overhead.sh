@@ -7,8 +7,7 @@
 #   test/overhead.sh
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 . "$(dirname "$0")/ticks.sh"
 UP=${UP:-2}		# Mbit/s; keeps 48-byte packets near 5k pps, well
 			# below what the VM path forwards (8k with dn_cake.ko)
@@ -23,19 +22,6 @@ atm|besteffort atm|0|0|atm|1472 20 21
 pppoe-llcsnap|besteffort pppoe-llcsnap|40|0|atm|1472 100
 negative|besteffort overhead -20|-20|0|none|1472"}
 
-opn() {
-	tag=R$(date +%N)
-	out=$("$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" 2>/dev/null)
-	printf '%s\n' "$out" | sed -n "/^BEG-$tag\$/,/^END-$tag /p" | sed '1d;$d'
-}
-
-cli() {
-	# -n: do not eat the case list the loop reads from stdin
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
 # wire bytes for an IP packet of length $1
 wire() { # ip overhead mpu framing
 	awk -v l="$1" -v o="$2" -v mpu="$3" -v f="$4" 'BEGIN {
@@ -47,7 +33,6 @@ wire() { # ip overhead mpu framing
 	}'
 }
 
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "cd /root/work && UP=${UP}Mbit/s ./lul-setup.sh" 60 | tail -1
 
 printf '%-14s %8s %7s %7s %10s %10s %7s\n' case payload ip wire expect-pps got-pps ratio
@@ -63,7 +48,7 @@ printf '%s\n' "$CASES" | while IFS='|' read -r label params ovh mpu fr sizes; do
 		pps=$(cli "N='sudo ip netns exec'
 		\$N cli netperf -H 10.10.2.2 -t UDP_STREAM -l $LEN -P 0 -- -m $m -R 1 >/dev/null 2>&1 &
 		sleep 3
-		f=/sys/class/net/enp0s4/statistics/rx_packets
+		f=/sys/class/net/srv0/statistics/rx_packets
 		a=\$(\$N srv cat \$f); sleep 6; b=\$(\$N srv cat \$f)
 		wait
 		echo \$(( (b - a) / 6 ))")

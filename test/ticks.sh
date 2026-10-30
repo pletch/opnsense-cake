@@ -13,13 +13,10 @@
 #   ticks_late            "ticks late N%" since ticks_mark, flagged at 10%
 #                         as "(CPU busy?)"
 #
-# Reads the router over its serial console, as the scripts' opn() does.
+# Reads the router with bench.sh's opn(), which the caller has sourced.
 
 _ticks_read() {
-	_tag=T$(date +%N)
-	"${OPN:-$HOME/VMs/opnsense-cake}/sercmd.py" -t 30 -e "END-$_tag" \
-	    "printf 'BEG-%s\\\\n' $_tag; echo \$(date +%s) \$(sysctl -n kern.hz net.inet.ip.dummynet.tick_diff); printf 'END-%s\\\\n' $_tag" 2>/dev/null |
-	    sed -n "/^BEG-$_tag\$/,/^END-$_tag/p" | sed '1d;$d' | tail -1
+	opn 'echo $(date +%s) $(sysctl -n kern.hz net.inet.ip.dummynet.tick_diff)' 30 | tail -1
 }
 
 ticks_mark() {

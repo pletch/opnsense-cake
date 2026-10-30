@@ -10,24 +10,11 @@
 #   RATE=10Mbit/s FLOWS=32 LEN=25 test/subtick-pipes.sh
 set -u
 
-OPN=${OPN:-$HOME/VMs/opnsense-cake}
-CLI=${CLI:-$HOME/VMs/lul-client}
+. "$(dirname "$0")/bench.sh"
 . "$(dirname "$0")/ticks.sh"
 RATE=${RATE:-10Mbit/s}
 FLOWS=${FLOWS:-32}
 LEN=${LEN:-25}
-
-cli() {
-	ssh -n -q -i "$CLI/id_lul" -p 2223 -o BatchMode=yes \
-	    -o UserKnownHostsFile="$CLI/known_hosts" debian@127.0.0.1 "$@"
-}
-
-opn() {
-	tag=R$(date +%N)
-	"$OPN/sercmd.py" -t "${2:-120}" -e "END-$tag [0-9]+" \
-	    "printf 'BEG-%s\\\\n' $tag; ( $1 ) 2>&1; printf 'END-%s %d\\\\n' $tag \$?" \
-	    2>/dev/null | tr -d '\r' | sed -n "/^BEG-$tag\$/,/^END-$tag/p" | sed '1d;$d'
-}
 
 # the fork's release counters (wakeups, packets), or nothing
 rel() {
@@ -35,7 +22,6 @@ rel() {
 	    tr '\n' ' '
 }
 
-"$OPN/sercmd.py" -t 3 '\x03' >/dev/null 2>&1
 opn "cd /root/work && DOWN=$RATE UP=1Gbit/s ./lul-setup.sh" 60 | grep lul-setup
 opn "ipfw -q sched 1 config pipe 1 mask dst-port 0xffff type fq_codel &&
     ipfw -q queue 1 config sched 1 queue 1000 &&
