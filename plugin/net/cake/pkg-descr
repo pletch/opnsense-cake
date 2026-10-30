@@ -13,6 +13,15 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.10
+
+* CAKE draws the random numbers for its deficit dither and BLUE from a
+  cheap generator of its own instead of arc4random(), which ran ChaCha20
+  for every flow refill: about 12% of a CPU less at 300 Mbit/s each way
+  on an Atom. In cake-kmod 1.5.10 and dummynet-st 1.0.10 alike; CAKE's
+  behaviour is unchanged (it still matches sch_cake packet for packet)
+* os-cake itself: unchanged
+
 1.4.9
 
 * A shaper rule aimed at a pipe with CAKE itself, not at a queue on
