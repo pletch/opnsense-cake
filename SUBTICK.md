@@ -1025,19 +1025,51 @@ was at 36 ms from 250; with RSS the box still had about a CPU spare at
 ### Open: closing the rest of the gap with Linux
 
 On the Z8350 the fork with 0008 and RSS needs about three CPUs for what
-Linux and CAKE do on one. Not measured yet, so ranked by expectation;
-the first step is a whole-box profile at 300 Mbit/s each way with RSS
-that splits the CPU between pf's two input passes, ipfw, dummynet and
-CAKE, netisr's hand-offs and the driver.
+Linux and CAKE do on one. The items were first ranked by expectation;
+the whole-box profile below has since measured them.
 
-1. **No second pass through the input path for "in" rules** (kernel). A
-   released "in" packet goes back into `ip_input()` (`netisr_dispatch()`
-   in `dummynet_send()`): pf's input pass again (state lookup and
-   normalization; about 20% of dummynet's thread in the 0008 profile),
-   then routing, ipfw and pf on output. Either resume such a packet after
-   the input filters, at forwarding, or let pf recognize a packet it has
-   already passed on input, as it does for `route-to`'s looped ones.
-   Both are OPNsense kernel changes, to propose there or to FreeBSD.
+**Whole-box profile** (2026-10-30; 1.5.9 with Realtek's driver, RSS,
+"in" rules, 300 Mbit/s each way; kernel stacks at 997 Hz on all four
+CPUs, each sample charged to the subsystem nearest the leaf; % of one
+CPU, of 400):
+
+| | CPU |
+|---|---|
+| spinning on the `re0` locks (interface queue and driver) | 55–80% |
+| netisr hand-offs, wakeups, context switches (100k/s) | ~63% |
+| pf (one input and one output pass, about 6.5 µs each) | ~55% |
+| ipfw, routing, driver, mbufs | ~25% each |
+| CAKE | ~13% (with `arc4random()`, below) |
+| dummynet | ~9% |
+| bpf (`dhclient` and `hostwatch` listening on `re0`) | ~8% |
+| RSS hashing | ~7% |
+
+- **`arc4random()`.** CAKE's deficit dither and BLUE drew from it per
+  refill: about 12% of a CPU in ChaCha20, mostly on dummynet's thread.
+  Replaced with a cheap generator, `cake_random()` (branch
+  `cake-random`, for the next release).
+- **The `re0` locks.** Two locks share that name, the interface's send
+  queue and the driver's own lock. Every packet the four netisr threads
+  send takes both, and so does the receive task's batch. Together they
+  are held for about 30% of a CPU, but the convoy of up to five threads
+  spinning on them costs far more. A fix belongs in the driver (a
+  trylock with a hand-off to the holder, as 0008 does for `dn_uh`), not
+  here.
+- **Settings tried.**
+  - Two RSS buckets instead of four leave two netisr threads saturated:
+    80–145 ms RTT, and 200 Mbit/s each way could not be held.
+  - Stopping `hostwatch` saved under 1%: `dhclient` keeps bpf busy on
+    `re0` anyway.
+
+1. **No second pass through the input path for "in" rules: already
+   so.** OPNsense's `dummynet_send()` marks a released "in" packet
+   `M_PASSIN`, and `ip_input()` goes straight past the input filters
+   (`passin`). At 300 Mbit/s each way, `pf_test()` ran 51.8k times/s on
+   input and 51.7k on output, for 51.8k packets/s into dummynet. pf's
+   own dummynet flag (`PF_MTAG_FLAG_DUMMYNET`) would not have served
+   anyway: clearing it also deletes ipfw's `MTAG_IPFW_RULE` tag, and pf
+   runs before ipfw on input. pf's cost is its passes themselves (about
+   6.5 µs each on this Atom, with OPNsense's default rules).
 2. **Release from the thread that enqueues** (module). Linux runs a
    qdisc's dequeue on the CPU that enqueues, unless the shaper waits for
    its timer; dummynet hands every release to its own thread. The holder
