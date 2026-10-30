@@ -987,3 +987,50 @@ hand-offs, the second pass through the input path and through pf for
 RSS shapes 300 Mbit/s each way at 1.4–1.6 ms, where stock without RSS
 was at 36 ms from 250; with RSS the box still had about a CPU spare at
 300, so its ceiling is above what the hairpin can show.
+
+### Open: closing the rest of the gap with Linux
+
+On the Z8350 the fork with 0008 and RSS needs about three CPUs for what
+Linux and CAKE do on one. Not measured yet, so ranked by expectation;
+the first step is a whole-box profile at 300 Mbit/s each way with RSS
+that splits the CPU between pf's two input passes, ipfw, dummynet and
+CAKE, netisr's hand-offs and the driver.
+
+1. **No second pass through the input path for "in" rules** (kernel). A
+   released "in" packet goes back into `ip_input()` (`netisr_dispatch()`
+   in `dummynet_send()`): pf's input pass again (state lookup and
+   normalization; about 20% of dummynet's thread in the 0008 profile),
+   then routing, ipfw and pf on output. Either resume such a packet after
+   the input filters, at forwarding, or let pf recognize a packet it has
+   already passed on input, as it does for `route-to`'s looped ones.
+   Both are OPNsense kernel changes, to propose there or to FreeBSD.
+2. **Release from the thread that enqueues** (module). Linux runs a
+   qdisc's dequeue on the CPU that enqueues, unless the shaper waits for
+   its timer; dummynet hands every release to its own thread. The holder
+   of `dn_uh` in `dummynet_io()` (0008) could serve the events already
+   due and send them after the unlock, so that releases stay on the
+   netisr threads RSS spreads, without a thread hand-off and a lock
+   acquisition each; dummynet's thread would only time the releases of
+   quiet pipes. The first to try.
+3. **Hardware queues.** A NIC with several receive and transmit queues
+   (Intel `igb`, `igc`, `ix`) hashes in hardware and has a transmit queue
+   per CPU: no software hash, fewer hand-offs. For the README, not code.
+4. **A lock per scheduler instead of `dn_uh`** (module, invasive). With
+   RSS, four netisr threads enqueue at once; 0008 cut their spinning to
+   1–3%, but they still take turns. Per-scheduler locks would let pipes
+   (download and upload) run in parallel; the heap and the configuration
+   paths take `dn_uh` today.
+5. **Smaller:** no `m_tag_get()` per packet (a UMA zone, or room in the
+   mbuf header); batching in `dummynet_send()` (FreeBSD has no general
+   `xmit_more`, so little to gain).
+
+Some of the gap stays whatever is done: OPNsense's pf, with its default
+rules, scrub and logging, does more per packet than the seven-line
+nftables ruleset of the comparison.
+
+Also open from the Z8350: the two single pings of about 0.95 s in
+otherwise normal runs (stock and 0008, not reproduced); what makes
+FreeBSD's `re(4)` stop transmitting (every hang had either one saturated
+thread transmitting, "out" rules or the old fork's contention, or
+neither RSS nor 0008); and RSS on a multi-queue Intel NIC, which the
+README recommends for the release path without a measurement.
