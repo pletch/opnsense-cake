@@ -14,6 +14,7 @@
  *   php hw-shaper.php rate A B <rate Mbit/s>
  *   php hw-shaper.php subtick A B <0|1> [release_us]
  *   php hw-shaper.php direction A B <in|out>
+ *   php hw-shaper.php sched A B <cake|fq_codel>
  *
  * Each stage runs in a process of its own, as a model relation only sees
  * the pipes saved before the process started. Apply with hw-subtick.sh's
@@ -56,9 +57,9 @@ function named($items)
     return $found;
 }
 
-if (!in_array($stage, ['pipes', 'queues', 'rules', 'retarget', 'cake', 'rate', 'subtick', 'direction']) ||
+if (!in_array($stage, ['pipes', 'queues', 'rules', 'retarget', 'cake', 'rate', 'subtick', 'direction', 'sched']) ||
     $A == '' || $B == '') {
-    echo "usage: hw-shaper.php pipes|queues|rules|retarget|cake|rate|subtick|direction A B [args]\n";
+    echo "usage: hw-shaper.php pipes|queues|rules|retarget|cake|rate|subtick|direction|sched A B [args]\n";
     exit(1);
 }
 
@@ -140,6 +141,25 @@ case 'direction':
         }
     }
     check($ts);
+    break;
+case 'sched':
+    /* fq_codel: the CAKE entries off and the pipes on FQ-CoDel, with the
+     * fork for all pipes, so that it releases between ticks as for CAKE */
+    $fq = $argv[4] == 'fq_codel';
+    foreach ($ts->pipes->pipe->iterateItems() as $uuid => $p) {
+        if (in_array($uuid, $pipes)) {
+            $p->scheduler = $fq ? 'fq_codel' : '';
+        }
+    }
+    check($ts);
+    $cake = new Cake();
+    foreach ($cake->pipes->pipe->iterateItems() as $uuid => $c) {
+        if (str_starts_with((string)$c->description, 'subtick-')) {
+            $c->enabled = $fq ? '0' : '1';
+        }
+    }
+    $cake->general->subtick_scope = $fq ? 'all' : 'cake';
+    check($cake);
     break;
 case 'subtick':
     $cake = new Cake();

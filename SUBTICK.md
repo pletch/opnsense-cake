@@ -983,6 +983,40 @@ logging) does more than seven lines of nftables, and dummynet's thread
 hand-offs, the second pass through the input path and through pf for
 "in" rules cost the rest. None of it is in CAKE.
 
+**FQ-CoDel against CAKE** (1.5.9 release packages, Realtek's driver,
+RSS, "in" rules; `SCHED=fq_codel test/hw-subtick.sh threads off 250`,
+which turns the CAKE entries off, puts the pipes on FQ-CoDel with its
+defaults and the fork on all pipes). CPU is the receiving, dummynet and
+netisr threads' together, of 400%; one 20 s run each:
+
+| each way | scheduler | dummynet | CPU | retransmits | ping RTT median / p90 |
+|---|---|---|---|---|---|
+| 200 Mbit/s | CAKE | stock | 245% | 382 | 2.51 / 3.56 ms |
+| 200 Mbit/s | CAKE | fork, 250 us | 273% | 7 | 1.11 / 1.35 ms |
+| 200 Mbit/s | FQ-CoDel | stock | 206% | 756 | 1.78 / 2.33 ms |
+| 200 Mbit/s | FQ-CoDel | fork, 250 us | 250% | 809 | 0.97 / 1.16 ms |
+| 250 Mbit/s | CAKE | stock | 262% | 1211 | 1.99 / 2.84 ms |
+| 250 Mbit/s | CAKE | fork, 250 us | 301% | 1 | 1.47 / 1.86 ms |
+| 250 Mbit/s | FQ-CoDel | stock | 240% | 581 | 2.45 / 3.60 ms |
+| 250 Mbit/s | FQ-CoDel | fork, 250 us | 262% | 793 | 1.07 / 1.39 ms |
+| 300 Mbit/s | CAKE | stock | 337% | 356 | 2.72 / 3.74 ms |
+| 300 Mbit/s | CAKE | fork, 250 us | 302% | 244 | 1.32 / 3.22 ms |
+| 300 Mbit/s | FQ-CoDel | stock | 289% | 483 | 2.26 / 3.25 ms |
+| 300 Mbit/s | FQ-CoDel | fork, 250 us | 295% | 1923 | 1.70 / 4.88 ms |
+
+FQ-CoDel costs 20–40 points less at 200 and 250 Mbit/s and about the
+same on the fork at 300, where forwarding, not the scheduler, is most
+of the CPU. The release clock matters more to latency than the
+scheduler: either on stock dummynet holds packets 2–2.7 ms, either on
+the fork 1–1.5 ms. FQ-CoDel drops more to hold its target: about 800
+retransmits a run where CAKE on the fork had a handful, and at 300 it
+fell further behind (p90 4.9 ms). Single runs: stock CAKE's
+retransmits ranged from 1 to 1211 over the session, so differences of a
+few tens of percent are noise. So on a box this small CAKE is worth its
+cost; RSS and the fork matter more than the choice of scheduler. With
+the base re(4) driver the same matrix hung `re0` once (FQ-CoDel, fork,
+250 Mbit/s); with Realtek's, none.
+
 **Gate:** 0008 goes in the series. On this box, the fork with 0008 and
 RSS shapes 300 Mbit/s each way at 1.4–1.6 ms, where stock without RSS
 was at 36 ms from 250; with RSS the box still had about a CPU spare at

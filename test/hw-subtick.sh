@@ -39,6 +39,8 @@
 # interval in us (1000: at the tick, at kern.hz 1000). With BUSY=N, N busy
 # loops run on the firewall during the load, pinned to its CPUs 0 to N-1.
 # DIR=out puts the two rules on the "out" direction (default in).
+# SCHED=fq_codel shapes with FQ-CoDel instead of CAKE (the CAKE entries
+# off, the fork for all pipes).
 #
 # FW and B are the firewall's and host B's ssh hosts (keys, root on the
 # firewall), A_IP and B_IP the hosts' addresses; all four must be set:
@@ -85,6 +87,7 @@ mode() {
 	fi
 	echo "$SHAPER rate $A_IP $B_IP $RATE" | fw >/dev/null || exit 1
 	echo "$SHAPER direction $A_IP $B_IP ${DIR:-in}" | fw >/dev/null || exit 1
+	echo "$SHAPER sched $A_IP $B_IP ${SCHED:-cake}" | fw >/dev/null || exit 1
 	mod=$(apply)
 	MAC=$(echo "ifconfig re0 ether | awk '/ether/ { print \$2 }'" | fw)
 	case "$1:$mod" in
@@ -240,10 +243,10 @@ threads)
 	[ $# -gt 0 ] || { echo "usage: $0 threads MODE..." >&2; exit 1; }
 	for m in "$@"; do
 		mode "$m"
-		echo "== $m: $mod, $RATE Mbit/s each way, rules ${DIR:-in}"
+		echo "== $m: $mod, ${SCHED:-cake}, $RATE Mbit/s each way, rules ${DIR:-in}"
 		ssh -n -o BatchMode=yes "$B" 'pkill -x iperf3; sleep 1; iperf3 -s -D'
 		sleep 1
-		iperf3 -c "$B_IP" -P 4 --bidir -t 20 >/tmp/hw-iperf.$$ 2>&1 &
+		timeout 60 iperf3 -c "$B_IP" -P 4 --bidir -t 20 >/tmp/hw-iperf.$$ 2>&1 &
 		ip=$!
 		sleep 3
 		ping -n -i 0.25 -c 60 "$B_IP" >/tmp/hw-ping.$$ 2>&1 &
