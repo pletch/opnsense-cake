@@ -1070,14 +1070,35 @@ CPU, of 400):
    anyway: clearing it also deletes ipfw's `MTAG_IPFW_RULE` tag, and pf
    runs before ipfw on input. pf's cost is its passes themselves (about
    6.5 µs each on this Atom, with OPNsense's default rules).
-2. **Release from the thread that enqueues** (module). Linux runs a
-   qdisc's dequeue on the CPU that enqueues, unless the shaper waits for
-   its timer; dummynet hands every release to its own thread. The holder
-   of `dn_uh` in `dummynet_io()` (0008) could serve the events already
-   due and send them after the unlock, so that releases stay on the
-   netisr threads RSS spreads, without a thread hand-off and a lock
-   acquisition each; dummynet's thread would only time the releases of
-   quiet pipes. The first to try.
+2. **Release from the thread that enqueues: tried, not kept.** Linux runs
+   a qdisc's dequeue on the CPU that enqueues unless the shaper waits for
+   its timer; dummynet hands every release to its own thread, which at
+   300 Mbit/s each way woke about 4,500 times a second for 16 packets
+   each, while packets arrived in `dummynet_io()` 54,000 times a second.
+   The experiment (branch `inline-release`, patch 0009, not pushed): the
+   holder of `dn_uh` in `dummynet_io()` serves the events already due
+   and sends what they release after the unlock, then moves the wakeup
+   to the next event (later as well as earlier). With the heap's keys
+   on the release grid the callout still fired first at each grid point
+   (56% of releases inline, no fewer wakeups); with exact keys and only
+   the wakeup rounded, arriving packets made 22,000 releases a second of
+   about 2 packets, and dummynet's thread still woke 4,700 times a
+   second (the tick, and every gap in arrivals before a grid point). A/B
+   against 1.5.9's module, 5 runs each, medians:
+
+   | each way | | busy, of 400% | retransmits | ping RTT median / p90 |
+   |---|---|---|---|---|
+   | 200 Mbit/s | 1.5.9 | 276% | 0 | 1.08 / 1.37 ms |
+   | 200 Mbit/s | 0009 | 292% | 129 | 0.83 / 2.44 ms |
+   | 300 Mbit/s | 1.5.9 | 340% | 883 | 1.35 / 2.68 ms |
+   | 300 Mbit/s | 0009 | 335% | 2380 | 2.39 / 16.7 ms |
+
+   Releasing at the exact due time lowered the median RTT at 200, but the
+   tail, the retransmits and the CPU got worse: the release work moved
+   onto the netisr threads, which are what saturates on a small box, in
+   many small batches under `dn_uh`, and dummynet's thread had been a
+   fifth worker taking it off them. The wakeups it was meant to save
+   were about 4% of the box's context switches.
 3. **Hardware queues.** A NIC with several receive and transmit queues
    (Intel `igb`, `igc`, `ix`) hashes in hardware and has a transmit queue
    per CPU: no software hash, fewer hand-offs. For the README, not code.
