@@ -26,7 +26,7 @@ copies the tag too); latency and throughput as before.
  1 file changed, 24 insertions(+), 2 deletions(-)
 
 diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
-index ac05064..bb1fc9b 100644
+index ac05064..7289dd5 100644
 --- a/sys/netpfil/ipfw/ip_dn_io.c
 +++ b/sys/netpfil/ipfw/ip_dn_io.c
 @@ -152,6 +152,14 @@ static u_long dn_rel_catchups;
@@ -49,7 +49,7 @@ index ac05064..bb1fc9b 100644
  SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, staged,
      CTLFLAG_RD, &dn_staged, 0, "Packets left to dummynet's holder");
 +SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_keep_tag,
-+    CTLFLAG_RW, &dn_keep_tag, 0,
++    CTLFLAG_RWTUN, &dn_keep_tag, 0,
 +    "Released in packets pass ipfw on output at once (one_pass)");
  #ifdef CAKE_DEBUG
  /* for tests: dummynet_fine_task() sleeps first, so that wakeups queue up */
