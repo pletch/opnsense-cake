@@ -13,6 +13,23 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.11
+
+* New option on the CAKE page: Skip ipfw on output for traffic shaped
+  inbound (off by default). With dummynet-st, a packet released from an
+  "in" shaper rule passes the shaper's rules (ipfw) on its way out at
+  once, instead of being checked against every rule again, none of
+  which would act on it: about a tenth of a CPU less at 200 Mbit/s each
+  way on an Atom. It takes effect only while every enabled shaper rule
+  is an "in" rule on a single interface and no captive portal zone
+  exists; otherwise the page and the system log say why not. If a
+  ruleset that acts on output is loaded later without Apply here (a
+  captive portal's), the page warns and the service shows stopped until
+  Apply
+* dummynet-st 1.0.11: patch 0010, the switch behind that option
+  (net.inet.ip.dummynet.release_keep_tag, default off)
+* cake-kmod 1.5.11: unchanged
+
 1.4.10
 
 * CAKE draws the random numbers for its deficit dither and BLUE from a
