@@ -1176,6 +1176,15 @@ little.
   loaded later without Apply (captive portal's) makes the page warn and
   the service show stopped until Apply. A first version had the module
   poll ipfw's rule count to stop by itself; dropped as too indirect.
+  Tested on the bench with "in" rules and the switch on (a loader
+  tunable as well, so that it survives the suites' module swaps):
+  `robustness.sh` (240,000 packets through CAKE, `unload` skipped as
+  CAKE is built in) and `subtick-stress.sh` (toggle, swap, cycles,
+  bounds, pause, coalesce) with the CAKE_DEBUG fork, on the normal and
+  the KASAN kernel: all passed, `check_errors` 0, no KASAN report; and on
+  the Z8350 end to end (`bench-kit/kt-e2e.sh`): off, on, a captive
+  portal-like rule loaded behind os-cake's back (warning, service shown
+  stopped), "out" rules (off, with the rules named).
 - **A UMA zone for dummynet's tag**: no gain. Allocation was 0.8% of a
   CPU either way (`malloc(9)` serves small sizes from per-CPU caches),
   and freeing through the zone cost about 1 point more.
