@@ -15,15 +15,18 @@
 #                                      drops and marks, throughput,
 #                                      retransmits and ping RTT
 #
-#   LX=z8350lin IF=enp1s0 B=mintbox A_IP=192.168.11.59 B_IP=192.168.11.110 \
+# LX is the Linux box's ssh host (a user with sudo), IF its interface, B
+# host B's ssh host, A_IP and B_IP the hosts' addresses; all must be set:
+#
+#   LX=fwlinux IF=eth0 B=hostb A_IP=192.0.2.10 B_IP=192.0.2.20 \
 #       test/hw-linux.sh setup 250 fw
 set -u
 
-LX=${LX:-z8350lin}
-IF=${IF:-enp1s0}
-B=${B:-mintbox}
-A_IP=${A_IP:-192.168.11.59}
-B_IP=${B_IP:-192.168.11.110}
+LX=${LX:?LX: ssh host of the Linux box}
+IF=${IF:?IF: interface of the Linux box}
+B=${B:?B: ssh host of host B}
+A_IP=${A_IP:?A_IP: address of host A, this machine}
+B_IP=${B_IP:?B_IP: address of host B}
 
 lx() {
 	ssh -o BatchMode=yes "$LX" sh -s
@@ -62,7 +65,7 @@ setup)
 				type filter hook forward priority 0; policy drop;
 				ct state established,related accept
 				ct state invalid drop
-				ip saddr 192.168.11.0/24 ip daddr 192.168.11.0/24 accept
+				ip saddr { $A_IP, $B_IP } ip daddr { $A_IP, $B_IP } accept
 			}
 		}
 		NFT

@@ -40,14 +40,17 @@
 # loops run on the firewall during the load, pinned to its CPUs 0 to N-1.
 # DIR=out puts the two rules on the "out" direction (default in).
 #
-#   FW=z8350 B=mintbox A_IP=192.168.11.59 B_IP=192.168.11.110 RATE=100 \
+# FW and B are the firewall's and host B's ssh hosts (keys, root on the
+# firewall), A_IP and B_IP the hosts' addresses; all four must be set:
+#
+#   FW=fw B=hostb A_IP=192.0.2.10 B_IP=192.0.2.20 RATE=100 \
 #       LEN=35 MEAS=10 test/hw-subtick.sh load off 1000 250 100
 set -u
 
-FW=${FW:-z8350}
-B=${B:-mintbox}
-A_IP=${A_IP:-192.168.11.59}
-B_IP=${B_IP:-192.168.11.110}
+FW=${FW:?FW: ssh host of the firewall}
+B=${B:?B: ssh host of host B}
+A_IP=${A_IP:?A_IP: address of host A, this machine}
+B_IP=${B_IP:?B_IP: address of host B}
 RATE=${RATE:-100}
 LEN=${LEN:-35}
 MEAS=${MEAS:-10}
