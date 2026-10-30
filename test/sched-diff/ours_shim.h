@@ -207,7 +207,7 @@ static struct { uint64_t curr_time; uint64_t io_pkt_drop; } V_dn_cfg;
 /* the scheduler's clocks run on the trace's */
 static inline uint64_t cake_now_ns(void) { return trace_now_ns; }
 static inline uint64_t cake_now_us(void) { return trace_now_ns / 1000; }
-#define arc4random()	trace_random_ours()
+static inline uint32_t cake_random(void) { return trace_random_ours(); }
 
 /* the hashes sch_cake gets from its flow dissector, rotated so that our
  * multiply-shift slot (top bits) is its modulo slot (low bits) */

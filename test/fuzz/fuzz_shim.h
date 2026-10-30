@@ -238,6 +238,6 @@ static inline uint32_t fuzz_random(void)
 }
 static inline uint64_t cake_now_ns(void) { return fuzz_now_ns; }
 static inline uint64_t cake_now_us(void) { return fuzz_now_ns / 1000; }
-#define arc4random()	fuzz_random()
+static inline uint32_t cake_random(void) { return fuzz_random(); }
 
 #endif

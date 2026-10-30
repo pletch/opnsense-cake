@@ -335,6 +335,23 @@ cake_now_ns(void)
 }
 
 /*
+ * The deficit dither and BLUE's drop draw need a number per refill, not
+ * an unpredictable one: arc4random(), ChaCha20 per call, took about 12% of
+ * a CPU at 300 Mbit/s each way on an Atom. sch_cake has the per-CPU
+ * get_random_u16()/u32(); here a 64-bit LCG (Knuth's MMIX constants),
+ * its high half, seeded from arc4random() by each new instance. Callers
+ * hold dn_uh; a lost update between vnets only repeats a number.
+ */
+static uint64_t cake_rng;
+
+static __inline uint32_t
+cake_random(void)
+{
+	cake_rng = cake_rng * 6364136223846793005ULL + 1442695040888963407ULL;
+	return (cake_rng >> 32);
+}
+
+/*
  * COBALT: CoDel and BLUE, as in sch_cake.
  */
 
@@ -503,7 +520,7 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 	}
 
 	/* simple BLUE; lack of ECN is deliberate */
-	if (v->p_drop && !drop && arc4random() < v->p_drop)
+	if (v->p_drop && !drop && cake_random() < v->p_drop)
 		drop = 1;
 
 	/* overload the drop_next field as an activity timeout */
@@ -1316,7 +1333,7 @@ cake_flow_quantum(struct cake_si *si, struct cake_flow *f)
 	if (cake_ddst(si->flow_mode))
 		load = MAX(load, hosts[f->dsthost].dsthost_bulk);
 	return ((si->tins[f->tin].flow_quantum * (65535 / load) +
-	    (arc4random() & 0xffff)) >> 16);
+	    (cake_random() & 0xffff)) >> 16);
 }
 
 /*
@@ -2526,6 +2543,7 @@ cake_new_sched(struct dn_sch_inst *_si)
 	else {
 		/* init perturbation for this si */
 		si->perturbation = random();
+		cake_rng ^= (uint64_t)arc4random() << 32 | arc4random();
 
 		error = cake_new_tables(si, schk);
 		if (error != 0)

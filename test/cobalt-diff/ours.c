@@ -14,7 +14,7 @@ struct mbuf {
 static uint64_t rng;
 
 static uint32_t
-arc4random(void)
+cake_random(void)
 {
 	/* splitmix64; the same generator stands in for get_random_u32() */
 	uint64_t z = (rng += 0x9e3779b97f4a7c15ULL);
