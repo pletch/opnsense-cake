@@ -208,6 +208,65 @@ compare the change in `net.inet.ip.dummynet.tick_diff` over a minute with
 few percent or less on an idle host. The bench scripts in `test/` print it
 with their results (`test/ticks.sh`).
 
+### Small multi-core firewalls: turn on receive side scaling
+
+A NIC with a single receive queue, as most Realtek and many small boxes'
+NICs have, hands every packet it receives to one thread: pf, ipfw and the
+queueing into the pipes all run on one CPU. On a small firewall that CPU
+is the first to run out. Packets then wait in the NIC's receive ring,
+ahead of the shaper, where CAKE cannot see or manage them: latency climbs
+to tens of milliseconds while CAKE's own queues stay short.
+
+OPNsense's kernel has software receive side scaling (RSS): it hashes the
+packets itself and spreads that work over one netisr thread per CPU. It
+is off by default. On **System → Settings → Tunables**, add:
+
+| tunable | value |
+|---|---|
+| `net.isr.bindthreads` | `1` |
+| `net.isr.maxthreads` | `-1` (one thread per CPU) |
+| `net.inet.rss.enabled` | `1` |
+| `net.inet.rss.bits` | log2 of the number of CPUs: `2` for 4 |
+| `net.isr.dispatch` | `hybrid` |
+
+and reboot. `netstat -Q` should then list `ip` with policy `cpu`.
+
+Measured on an Intel Atom x5-Z8350 (4 cores, 1.44 GHz) with an RTL8111,
+CAKE on both directions of traffic forwarded through its one port
+(`test/hw-subtick.sh`), ping RTT median under 4 greedy TCP flows each way:
+
+| each way | without RSS | with RSS |
+|---|---|---|
+| 200 Mbit/s, stock dummynet | 5.4 ms | 2.4–2.6 ms |
+| 250 Mbit/s, stock dummynet | 36 ms | 2.6 ms |
+| 250 Mbit/s, dummynet-st | 7–11 ms | 1.2 ms |
+| 300 Mbit/s, dummynet-st | 17–18 ms | 1.4–1.6 ms |
+
+Without RSS, the figures from 250 Mbit/s up are with Realtek's driver, as
+FreeBSD's hung there (below); with RSS, FreeBSD's own `re(4)`.
+
+The dummynet-st figures are with patch 0008 of
+[SUBTICK.md](SUBTICK.md)'s series, which matters more with RSS: several
+netisr threads then queue into the pipes at once, and without it they
+wait on dummynet's lock. NICs with several receive queues of their own
+(most Intel ones) already spread this work.
+
+With RSS, shape on the **in** direction where you can (download on WAN in,
+as usual). A packet released from an "in" rule goes on through the input
+path, which RSS spreads over the netisr threads; one from an "out" rule
+goes straight out from dummynet's own thread. On the Z8350 at 300 Mbit/s
+each way, latency was about the same (1.2–1.7 ms with dummynet-st), but
+dummynet's thread was at 50% of a CPU with "in" rules and 95% with
+"out" ones.
+
+FreeBSD's `re(4)` driver on the same box sometimes stopped transmitting
+under sustained load (`re0: watchdog timeout` in `dmesg`, then again
+every few seconds until a reboot): without RSS at 200–250 Mbit/s each
+way, with the stock dummynet as well as the fork, and with RSS once, with
+the stock dummynet and "out" rules at 300 Mbit/s each way. With RSS and
+"in" rules it ran 20 runs up to 300 Mbit/s each way without one.
+Realtek's driver, the **os-realtek-re** plugin, did not stop in any run.
+
 ## Upgrade, roll back and remove
 
 - **Upgrade:** from the repository, `pkg upgrade -r cake`; from files,

@@ -2,10 +2,15 @@
 # Run on the OPNsense VM by subtick-baseline.sh:
 #
 #   subtick-burst.sh cpu SECONDS    the router's CPU use over SECONDS
-#   subtick-burst.sh burst COUNT [IF]
+#   subtick-burst.sh burst COUNT [IF [FILTER]]
 #                                   capture COUNT full-size packets going
 #                                   out on IF (vtnet2, the download pipe;
-#                                   vtnet3 is the upload pipe) and report
+#                                   vtnet3 is the upload pipe), and of
+#                                   those only FILTER's (a pcap filter, for
+#                                   pipes sharing an interface; with
+#                                   BURST_Q= , all directions, for a NIC
+#                                   whose outgoing packets bpf does not
+#                                   see with -Q out), and report
 #                                   their payload rate, the gaps between
 #                                   them and the bursts they form (a gap
 #                                   of 50 us or more starts a new burst)
@@ -24,8 +29,11 @@ cpu)
 	;;
 burst)
 	rm -f /tmp/burst.pcap
-	tcpdump -i "${3:-vtnet2}" -Q out -n -s 96 -c "$2" -w /tmp/burst.pcap \
-	    greater 1000 2>/tmp/burst.err
+	q=${BURST_Q-out}
+	# -p: not promiscuous, as Realtek's re(4) driver stops forwarding
+	# while it is; the firewall's own outgoing packets are seen anyway
+	timeout 60 tcpdump -p -i "${3:-vtnet2}" ${q:+-Q $q} -n -s 96 -c "$2" \
+	    -w /tmp/burst.pcap greater 1000 ${4:+and \( $4 \)} 2>/tmp/burst.err || true
 	grep -E 'dropped' /tmp/burst.err || true
 	tcpdump -r /tmp/burst.pcap -n -tt 2>/dev/null | awk '{
 		t = $1
@@ -57,7 +65,7 @@ burst)
 	rm -f /tmp/burst.pcap
 	;;
 *)
-	echo "usage: $0 cpu SECONDS | burst COUNT [IF]" >&2
+	echo "usage: $0 cpu SECONDS | burst COUNT [IF [FILTER]]" >&2
 	exit 1
 	;;
 esac

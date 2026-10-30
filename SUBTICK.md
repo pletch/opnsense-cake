@@ -807,3 +807,157 @@ million, about 19 million pieces, passed with no KASAN report. A control
 build with `cake_hdr()` off by one (a direct pointer to a header one byte
 past `m_len`) panicked in `cake_get_tcp()` in the first round with the
 ACK filter on.
+
+### Real hardware: an Atom x5-Z8350 (2026-10-29/30)
+
+The live firewall (phase 5) had CPU to spare; this box has not. An Intel
+Atom x5-Z8350 (4 cores, 1.44 GHz, 2 GB), OPNsense 26.7.8 bare metal with
+one RTL8111 (`re0`), on the user's LAN only. Two hosts there, A and B,
+route to each other through it (a /32 route each), so all their traffic
+comes in and goes out of the one port: CAKE pipes of `test/hw-shaper.php`
+shape it both ways, rules on LAN `in` (aimed at queues on the pipes; a
+rule aimed at a pipe goes through its FIFO, which the first setup did:
+the pipes kept their rate and CAKE saw nothing, see *os-cake* below).
+Load: 4 TCP flows each way (`iperf3 --bidir`), a ping every 0.25 s; per
+thread CPU by DTrace's profile. `test/hw-subtick.sh` drives it (`load`,
+`idle`, `soak`, `threads`); `test/hw-nicwatch.sh` reboots the box on a
+NIC watchdog timeout. Each packet crosses the port twice, so above about
+350 Mbit/s each way the port, not the box, is the limit.
+
+**100 Mbit/s each way, no RSS, FreeBSD's re(4):** the fork does what the
+bench predicted, at a cost bare metal can carry.
+
+| | stock | fork, tick | 250 µs | 100 µs |
+|---|---|---|---|---|
+| ping RTT median | 1.65 ms | 1.69 ms | 0.93 ms | 0.80 ms |
+| largest burst out of the download pipe | 16 | 9 | 4 | 4 |
+| releases between ticks | – | – | 4010/s | 9620/s |
+
+A release took 33 µs of CPU of its own at 250 µs (19 at 100), beside
+the forwarding of its packets; the whole extra cost, router CPU against
+stock, was about 25 µs per release (6.4 points of 4 CPUs at 9600/s),
+against the bench's 80. Idle, the fork costs nothing over stock (94.7
+against 94.8% idle, both 1200 timer interrupts a second); dummynet's
+tick itself is 900 of those (273/s with it unloaded) and no measurable
+CPU. Four busy loops pinned to the CPUs changed nothing: dummynet's
+threads run at PI_NET and preempt them (so the bench's 13% loss under
+contention presumably came from the host taking its vCPUs away, which a
+process inside the guest cannot do).
+
+**200 Mbit/s each way: the receive path spun on `dn_uh`.** Stock was
+already over its limit there (51% of the ticks late: a tick's work took
+1.5 ms of CPU), and still forwarded 191 Mbit/s. The fork at 250 µs did
+worse than stock:
+
+- With FreeBSD's re(4), `re0` stopped transmitting (watchdog timeout,
+  then again every 10–30 s, also idle, until a reboot) in 4 of 4 runs,
+  5–10 s in; stock (4 runs) and the fork at the tick (2) did not.
+- With Realtek's driver (os-realtek-re), no hang, but ping RTT 35–40 ms
+  against 4–5 ms for stock, about 1500 retransmits in 20 s against 15,
+  while CAKE's own queues held 10–60 packets (0.5–2.5 ms).
+
+The packets waited ahead of CAKE, in the NIC's receive ring: the
+receiving thread (`re0 taskq`) was at 99.6% of a CPU against 75% with
+stock, and the difference was spinning in `lock_delay()` (1954 profile
+samples of 7976 against 591), on `dn_uh`, in `dummynet_io()`. The fork
+took the lock 5100 times a second, 4–60 µs each, where stock's tick
+takes it 950 times for 60–250 µs: about the same share of the time, but
+each short hold landed in the middle of the receiving thread's 21,000
+acquisitions a second.
+
+**Patch 0008** (`0008-stage-packets-when-dn-uh-is-held.patch`): a packet
+that finds `dn_uh` held is pushed on a lock-free list and `dummynet_io()`
+returns; whoever holds the lock enqueues the list, oldest first, before
+its own work and again before releasing it, and looks once more after
+the release. The tag is attached before taking the lock. On the Z8350
+at 200 Mbit/s each way, with Realtek's driver:
+
+| | stock | 0008, `stage=0` | 0008 |
+|---|---|---|---|
+| ping RTT median / p90 | 4.96 / 7.13 ms | 35.3 / 40.4 ms | 1.14 / 2.42 ms |
+| retransmits in 20 s | 14 | 1258 | 0 |
+| receiving thread on CPU, spinning | 70%, 4% | 99%, 22% | 87%, 0% |
+
+With FreeBSD's re(4): 3 of 3 soak rounds at 200 Mbit/s with no hang
+(RTT 1.1–1.2 ms, largest burst 12–13 packets against stock's 64–87);
+`stage=0` on the same module hung it within 30 s. On the bench, with
+the CAKE_DEBUG fork: `robustness.sh` and `subtick-stress.sh` passed on
+the normal kernel (31% of the packets staged), the WITNESS/INVARIANTS
+kernel (no lock order reversal or assertion) and the KASAN kernel
+(`robustness.sh` with 3.5 million staged, `kfuzz.sh` a million packets,
+no report).
+
+**The next limit: forwarding what is released.** With 0008, dummynet's
+thread was the busiest (98% at 200 Mbit/s each way), 89% of it in
+`dummynet_send()`: a packet of an "in" rule goes back into `ip_input()`,
+pf, routing, ipfw and pf on output and the driver, inline. Two ways to
+spread that, both tried and dropped:
+
+- `netisr_queue()` instead of `netisr_dispatch()`, a flow hash set in
+  `dummynet_io()` keeping each flow on one thread. With netisr's one
+  thread, its 1000-packet queue stood half full after CAKE (RTT 38 ms):
+  the work moved, with no more CPU for it. With one per CPU, fine at
+  200 Mbit/s each way, but at 300 the netisr thread on the receiving
+  thread's CPU starved (netisr runs at SWI priority, below it): RTT
+  0.6–1.9 s, about 1.4 s worst even with the threads kept apart.
+- Send threads of dummynet's own, one per CPU but one at PI_NET, each
+  with a 64-packet queue (full: the releaser forwarded inline, so an
+  overload backs up into CAKE). Without RSS, RTT 1.1 and 1.4 ms at 200
+  and 250 Mbit/s each way against 2.2 and 7.0 without them; above that
+  the receiving thread was the limit again. With RSS (below) they did
+  harm, 56 ms at 300 Mbit/s: RSS already hands released packets to the
+  netisr threads, and the PI_NET send threads starved those. RSS is
+  configuration and did more, so the patch was dropped.
+
+**Software RSS** (README, *Small multi-core firewalls*): OPNsense's
+kernel hashes received packets in software and spreads `ip_input()`,
+pf, ipfw and `dummynet_io()` over one netisr thread per CPU
+(`net.inet.rss.enabled`, `net.isr.maxthreads`, `bindthreads`,
+`dispatch=hybrid`). The receiving thread then did 40–60% of a CPU, the
+netisr threads 1.3–2.2 CPUs. With FreeBSD's re(4), two rounds each:
+
+| each way | stock | 0008 |
+|---|---|---|
+| 200 Mbit/s | 2.4–2.6 ms | 1.11–1.12 ms |
+| 250 Mbit/s | 2.6–2.7 ms | 1.18–1.21 ms |
+| 300 Mbit/s | 2.9–4.5 ms | 1.41–1.57 ms |
+
+(ping RTT median; throughput 99% of the rate, 0–40 retransmits; with
+RSS, stock's receive path spun on `dn_uh` 10–19% of the time, 0008's
+1–3%.) Without RSS, at 250 Mbit/s each way, stock was at 36 ms and 0008
+at 7–11 ms (Realtek's driver).
+
+Rule direction, with RSS and 0008: about the same latency on "in" and
+"out" rules (1.1–1.7 ms at 250 and 300 Mbit/s each way), but dummynet's
+thread at 50% of a CPU with "in" rules and 85–97% with "out" ones: an
+"in" packet goes on through netisr, which RSS spreads, an "out" one out
+from dummynet's thread. Stock with "out" rules was worse than with "in"
+(6 ms and 172 retransmits at 300 Mbit/s, and one re(4) hang).
+
+**re(4) hangs, all told:** the old fork at 250 µs, 200 Mbit/s, "in" (4
+of 4); stock with "out" rules, no RSS, 200 Mbit/s (1) and with RSS, 300
+(1 of 2); stock "in", no RSS, 250 (1). None in 20 runs of stock and 0008
+with RSS and "in" rules up to 300 Mbit/s each way, nor with Realtek's
+driver at all. Each hang left the chip timing out until a reboot.
+
+**Also seen:** twice, once with stock and once with 0008, a single ping
+of about 0.95 s in a run that was otherwise at its usual 1–3 ms; not
+reproduced, cause unknown. With Realtek's driver, `tcpdump` putting
+`re0` in promiscuous mode stalled forwarding for the rest of a run
+(`subtick-burst.sh` captures with `-p` since); with re(4), bpf saw none
+of the outgoing packets with `-Q out` (the captures select them by
+source MAC address). The bench's `lul-setup.sh` can now put its pipes on
+"in" rules (`DIR=in`), which the suites had never run.
+
+**os-cake:** the first setup's rules aimed at the pipes, so traffic was
+shaped by the pipes' FIFOs and CAKE never saw it, with nothing to say
+so but an empty statistics table. The CAKE page now warns of an enabled
+shaper rule aimed at a CAKE pipe itself, the wrapper logs it, and
+System → Services shows CAKE stopped until it is aimed at a queue
+(`rules_on_cake_pipes()`, with tests in `plugin-lib.py`).
+
+**Gate:** 0008 goes in the series. On this box, the fork with 0008 and
+RSS shapes 300 Mbit/s each way at 1.4–1.6 ms, where stock without RSS
+was at 36 ms from 250; with RSS the box still had about a CPU spare at
+300, so its ceiling is above what the hairpin can show. How that
+compares with Linux and CAKE on the same box is not measured.
