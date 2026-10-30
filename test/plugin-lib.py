@@ -20,13 +20,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import lib  # noqa: E402
 
 
-def config(shaper_pipes, cake_pipes):
-    """ a config.xml with traffic shaper pipes (uuid, number, mask) and CAKE entries (uuid, pipe, fields) """
+def config(shaper_pipes, cake_pipes, queues=(), rules=()):
+    """ a config.xml with traffic shaper pipes (uuid, number, mask), queues (uuid, pipe uuid), rules
+    (uuid, target uuid, fields) and CAKE entries (uuid, pipe, fields) """
     xml = '<opnsense><OPNsense><TrafficShaper><pipes>'
     for uuid, number, mask in shaper_pipes:
         xml += '<pipe uuid="%s"><number>%s</number>%s</pipe>' % (
             uuid, number, '' if mask is None else '<mask>%s</mask>' % mask)
-    xml += '</pipes></TrafficShaper><Cake><pipes>'
+    xml += '</pipes><queues>'
+    for uuid, pipe in queues:
+        xml += '<queue uuid="%s"><pipe>%s</pipe></queue>' % (uuid, pipe)
+    xml += '</queues><rules>'
+    for uuid, target, fields in rules:
+        xml += '<rule uuid="%s"><target>%s</target>%s</rule>' % (
+            uuid, target, ''.join('<%s>%s</%s>' % (k, v, k) for k, v in fields.items()))
+    xml += '</rules></TrafficShaper><Cake><pipes>'
     for uuid, pipe, fields in cake_pipes:
         xml += '<pipe uuid="%s"><pipe>%s</pipe>%s</pipe>' % (
             uuid, pipe, ''.join('<%s>%s</%s>' % (k, v, k) for k, v in fields.items()))
@@ -35,6 +43,36 @@ def config(shaper_pipes, cake_pipes):
     f.write(xml)
     f.close()
     return f.name
+
+
+class RulesOnCakePipes(unittest.TestCase):
+    """ a rule aimed at a pipe goes through its FIFO: the CAKE page warns of those on CAKE pipes """
+    def run_lib(self, rules, cake_enabled='1'):
+        lib.CONFIG = config([('p1', '1', 'none'), ('p2', '2', 'none')],
+                            [('c1', 'p1', {'enabled': cake_enabled})], [('q1', 'p1')], rules)
+        try:
+            return lib.rules_on_cake_pipes()
+        finally:
+            os.unlink(lib.CONFIG)
+
+    def test_rule_on_cake_pipe(self):
+        self.assertEqual(self.run_lib([('r1', 'p1', {'enabled': '1', 'description': 'download'})]), [
+            "shaper rule download points at pipe 1 itself, so its traffic goes through the pipe's FIFO, "
+            "not CAKE: point the rule at a queue on the pipe"])
+
+    def test_no_description(self):
+        self.assertEqual(len(self.run_lib([('r1', 'p1', {'enabled': '1', 'sequence': '3'})])), 1)
+        self.assertIn('rule with sequence 3 ', self.run_lib([('r1', 'p1', {'sequence': '3'})])[0])
+
+    def test_rule_on_queue(self):
+        self.assertEqual(self.run_lib([('r1', 'q1', {'enabled': '1'})]), [])
+
+    def test_rule_on_other_pipe(self):
+        self.assertEqual(self.run_lib([('r1', 'p2', {'enabled': '1'})]), [])
+
+    def test_disabled(self):
+        self.assertEqual(self.run_lib([('r1', 'p1', {'enabled': '0'})]), [])
+        self.assertEqual(self.run_lib([('r1', 'p1', {'enabled': '1'})], cake_enabled='0'), [])
 
 
 class CakePipes(unittest.TestCase):

@@ -47,8 +47,8 @@ import syslog
 import tempfile
 import time
 from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
-    load_dummynet, set_release, shaper_pipes, st_active, st_loaded, st_status, st_trying, \
-    subtick_settings, ST_KMOD
+    load_dummynet, rules_on_cake_pipes, set_release, shaper_pipes, st_active, st_loaded, st_status, \
+    st_trying, subtick_settings, ST_KMOD
 
 # held for the whole run: boot, configd reloads and Apply may start the wrapper at once,
 # and two runs would interleave flushes, unloads and loads
@@ -138,6 +138,10 @@ if __name__ == '__main__':
         enabled = cake_enabled()
         for error in errors:
             syslog.syslog(syslog.LOG_WARNING, error)
+        # and so does a rule aimed at a CAKE pipe itself, whose traffic CAKE never sees
+        bypassed = rules_on_cake_pipes()
+        for error in bypassed:
+            syslog.syslog(syslog.LOG_WARNING, error)
         # dummynet-st, unless switched off: dummynet with CAKE built in, releasing
         # packets between ticks. Otherwise, or when it does not match the kernel or
         # does not load, the stock dummynet with dn_cake.ko.
@@ -167,7 +171,7 @@ if __name__ == '__main__':
             result = load_cake(rules_file, pipes)
             st_trying(False)
             if result == 0:
-                set_active(len(pipes) == enabled)
+                set_active(len(pipes) == enabled and not bypassed)
                 sys.exit(0)
             syslog.syslog(syslog.LOG_ERR, 'dnctl failed on the CAKE rules (%d), pipes keep their own scheduler' % result)
             set_active(False)
@@ -185,7 +189,7 @@ if __name__ == '__main__':
         if pipes:
             result = load_cake(rules_file, pipes)
             if result == 0:
-                set_active(len(pipes) == enabled)
+                set_active(len(pipes) == enabled and not bypassed)
                 sys.exit(0)
             syslog.syslog(syslog.LOG_ERR, 'dnctl failed on the CAKE rules (%d), pipes keep their own scheduler' % result)
     except SystemExit:

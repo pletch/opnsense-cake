@@ -151,9 +151,12 @@ Then:
 
 1. On **Firewall → Shaper**, set up pipes and queues as for FQ-CoDel, and point
    the shaper rules at the **queues**. Rules that target a pipe itself go
-   through its internal FIFO. FQ-CoDel's target, interval, quantum, limit and
-   flows on the pipe also apply to CAKE; the quantum is the most a flow gets
-   per round, and tins with a low rate share get less, as in sch_cake.
+   through its internal FIFO: the pipe still limits the rate, but CAKE never
+   sees the traffic. For a pipe with CAKE, the CAKE page warns of such a
+   rule and **System → Services** shows CAKE stopped. FQ-CoDel's target,
+   interval, quantum, limit and flows on the pipe also apply to CAKE; the
+   quantum is the most a flow gets per round, and tins with a low rate share
+   get less, as in sch_cake.
 2. On **Firewall → Shaper → CAKE**, add an entry for each pipe that should use
    CAKE: diffserv mode, isolation, link type (overhead), ACK filter and so on.
    Then **Apply**. The status line at the top says whether the module is in

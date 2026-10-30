@@ -31,8 +31,8 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import cake_enabled, cake_pipes, kmod_status, shaper_pipes, st_status, subtick_settings, \
-    CONFIG, DNCTL, RELEASE_DEFAULT
+from lib import cake_enabled, cake_pipes, kmod_status, rules_on_cake_pipes, shaper_pipes, st_status, \
+    subtick_settings, CONFIG, DNCTL, RELEASE_DEFAULT
 
 # the shaper rules rc.d/dnctl hands the wrapper
 SHAPER_RULES = '/usr/local/etc/dnctl.conf'
@@ -134,6 +134,11 @@ if __name__ == '__main__':
     result['warnings'] = []
     try:
         cake_pipes(result['warnings'])
+    except (OSError, ET.ParseError):
+        pass
+    # shaper rules that bypass CAKE, which the wrapper cannot see from the pipes alone
+    try:
+        result['warnings'].extend(rules_on_cake_pipes())
     except (OSError, ET.ParseError):
         pass
     try:

@@ -202,6 +202,30 @@ def cake_enabled():
                 if item.findtext('enabled') == '1'])
 
 
+def rules_on_cake_pipes():
+    """ the enabled shaper rules that point at a pipe with CAKE itself, not at a queue on it:
+    dummynet sends their traffic through the pipe's internal FIFO, so the pipe still limits
+    the rate but CAKE never sees a packet, and its statistics stay empty
+    :return: list of messages
+    """
+    root = ET.parse(CONFIG).getroot()
+    numbers = dict()
+    for pipe in root.findall('./OPNsense/TrafficShaper/pipes/pipe'):
+        if int_value(pipe.findtext('number'), 1, 65535) is not None:
+            numbers[pipe.get('uuid')] = str(int(pipe.findtext('number')))
+    cake = set(item.findtext('pipe') for item in root.findall('./OPNsense/Cake/pipes/pipe')
+               if item.findtext('enabled') == '1' and item.findtext('pipe') in numbers)
+    result = []
+    for rule in root.findall('./OPNsense/TrafficShaper/rules/rule'):
+        if (rule.findtext('enabled') or '1') != '1' or rule.findtext('target') not in cake:
+            continue
+        name = rule.findtext('description') or 'with sequence %s' % (rule.findtext('sequence') or '?')
+        result.append('shaper rule %s points at pipe %s itself, so its traffic goes through the '
+                      "pipe's FIFO, not CAKE: point the rule at a queue on the pipe"
+                      % (name, numbers[rule.findtext('target')]))
+    return result
+
+
 def set_active(active):
     """ mark the CAKE service running (every enabled entry's pipe uses CAKE) or not.
     The services list shows a service running while the process in its pidfile is, and
