@@ -956,8 +956,34 @@ shaper rule aimed at a CAKE pipe itself, the wrapper logs it, and
 System → Services shows CAKE stopped until it is aimed at a queue
 (`rules_on_cake_pipes()`, with tests in `plugin-lib.py`).
 
+**Linux on the same box** (Debian 13 live, kernel 6.12, `r8169`;
+`test/hw-linux.sh`): both directions leave the one port, so its egress
+has a `prio` qdisc with a CAKE per direction, by address, each at the
+rate (defaults: diffserv3, triple-isolate); ICMP redirects off; with and
+without a stateful nftables ruleset (conntrack), and with and without
+RPS over the 4 CPUs. Busy CPU from `mpstat` (all softirq), of the box:
+
+| each way | Linux, nftables, no RPS | Linux, nftables, RPS | FreeBSD, 0008, RSS |
+|---|---|---|---|
+| 200 Mbit/s | 0.70 ms, 19% | 0.89 ms, 71% | 1.11 ms, about 55% |
+| 250 Mbit/s | 0.77 ms, 21% | 0.97 ms, 66% | 1.2 ms, about 63% |
+| 300 Mbit/s | 0.86 ms, 23% | 0.99 ms, 71% | 1.4–1.6 ms, about 71% |
+| 350 Mbit/s | 1.09 ms, 24%, 206 retransmits | 0.86 ms, 70% | – |
+
+(ping RTT median; FreeBSD's CPU from the profile of its receiving,
+dummynet and netisr threads, so not quite the same measure.) Linux
+forwards and shapes 300 Mbit/s each way on one CPU, near its limit at
+350; RPS spreads it at three times the CPU and buys latency only there.
+Without rules, 2–3 points less; GRO off changed nothing measurable.
+CAKE marked ECN on both systems and dropped nothing on Linux. So with
+0008 and RSS, FreeBSD's latency is within about 0.5 ms of Linux's up to
+300 Mbit/s each way (it was tens of ms), but it needs about three CPUs
+for what Linux does on one: OPNsense's pf (default rules, scrub,
+logging) does more than seven lines of nftables, and dummynet's thread
+hand-offs, the second pass through the input path and through pf for
+"in" rules cost the rest. None of it is in CAKE.
+
 **Gate:** 0008 goes in the series. On this box, the fork with 0008 and
 RSS shapes 300 Mbit/s each way at 1.4–1.6 ms, where stock without RSS
 was at 36 ms from 250; with RSS the box still had about a CPU spare at
-300, so its ceiling is above what the hairpin can show. How that
-compares with Linux and CAKE on the same box is not measured.
+300, so its ceiling is above what the hairpin can show.
