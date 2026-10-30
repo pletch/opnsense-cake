@@ -248,8 +248,14 @@ FreeBSD's hung there (below); with RSS, FreeBSD's own `re(4)`.
 The dummynet-st figures are from 1.0.9 on (patch 0008 of
 [SUBTICK.md](SUBTICK.md)'s series), which matters more with RSS: several
 netisr threads then queue into the pipes at once, and before it they
-waited on dummynet's lock. NICs with several receive queues of their own
-(most Intel ones) already spread this work.
+waited on dummynet's lock.
+
+NICs with several receive queues of their own (most Intel ones: `igb`,
+`igc`, `ix`) already spread the receiving work over the CPUs without RSS.
+RSS can still help them on a small CPU with "in" rules: the packets
+dummynet releases go back into the input path from dummynet's one
+thread, and only RSS spreads that work over the netisr threads (not
+measured on such a NIC). With CPU to spare, it makes little difference.
 
 With RSS, shape on the **in** direction where you can (download on WAN in,
 as usual). A packet released from an "in" rule goes on through the input
