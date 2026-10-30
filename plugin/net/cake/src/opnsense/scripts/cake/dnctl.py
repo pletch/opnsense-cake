@@ -37,7 +37,9 @@
     With dummynet-st installed and not switched off, the CAKE rules go in on the forked
     dummynet_st.ko instead (CAKE built in, packets released between ticks), loaded in place
     of dummynet.ko and dn_cake.ko; without CAKE entries, or when it does not match the
-    kernel or load, the stock dummynet comes back.
+    kernel or load, the stock dummynet comes back. On request, and when no ipfw rule acts on
+    output (keep_tag_blockers()), the fork lets released "in" packets pass ipfw on output
+    without walking its rules.
 """
 import fcntl
 import os
@@ -47,8 +49,8 @@ import syslog
 import tempfile
 import time
 from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
-    load_dummynet, rules_on_cake_pipes, set_release, shaper_pipes, st_active, st_loaded, st_status, \
-    st_trying, subtick_settings, ST_KMOD
+    keep_tag_blockers, keep_tag_wanted, load_dummynet, rules_on_cake_pipes, set_keep_tag, \
+    set_release, shaper_pipes, st_active, st_loaded, st_status, st_trying, subtick_settings, ST_KMOD
 
 # held for the whole run: boot, configd reloads and Apply may start the wrapper at once,
 # and two runs would interleave flushes, unloads and loads
@@ -68,6 +70,17 @@ def cake_rule(line, args):
     # quantum, limit and flows parameters do
     params = [x for x in parts[idx + 2:] if x not in ['codel', 'pie']]
     return ' '.join(parts[:idx] + ['type', 'cake'] + params + args) + '\n'
+
+
+def keep_tag():
+    """ whether released "in" packets skip ipfw on output: when asked for and the ruleset
+    (just generated, loaded after this) has no rule acting on output; logs why not """
+    if not keep_tag_wanted():
+        return False
+    blockers = keep_tag_blockers()
+    for blocker in blockers:
+        syslog.syslog(syslog.LOG_WARNING, 'not skipping ipfw on output: %s' % blocker)
+    return not blockers
 
 
 def lock_run():
@@ -160,6 +173,7 @@ if __name__ == '__main__':
             # all pipes, none with CAKE: the rules as they are, on the fork
             st_trying(True)
             set_release(release_us)
+            set_keep_tag(keep_tag())
             result = load_stock(rules_file)
             st_trying(False)
             set_active(False)
@@ -168,6 +182,7 @@ if __name__ == '__main__':
             # before the rules: CAKE sets its targets by it when a pipe is configured
             st_trying(True)
             set_release(release_us)
+            set_keep_tag(keep_tag())
             result = load_cake(rules_file, pipes)
             st_trying(False)
             if result == 0:

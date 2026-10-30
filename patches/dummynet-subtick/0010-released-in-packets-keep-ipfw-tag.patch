@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 16:00:00 -0400
+Subject: [PATCH] dummynet_st: released "in" packets may keep ipfw's tag
+
+The tenth of the sub-tick release series (opnsense-cake SUBTICK.md),
+from the forwarding measurements on an Atom x5-Z8350 firewall.
+
+OPNsense's dummynet_send() marks a released "in" packet M_PASSIN, so
+that ip_input() skips the input filters, and deletes ipfw's tag. On
+output ipfw then sees a new packet and walks all its rules, though with
+"in" rules only none acts on it: at 200 Mbit/s each way through CAKE
+that was about 11% of a CPU on the Atom, half of all ipfw_chk() time.
+
+With net.inet.ip.dummynet.release_keep_tag set (default 0), the tag
+stays when it carries IPFW_ONEPASS (net.inet.ip.fw.one_pass), and ipfw's
+output hook passes the packet at once, as it does a packet reinjected on
+output. No ipfw rule applies to that packet on output then, so os-cake
+sets it only on request, and only for a ruleset in which no rule acts on
+output (every shaper rule "in" on a single interface, no captive
+portal). Measured: ipfw_chk() from 21% to 10% of a CPU, about 10 points
+less in all (ip_forward()'s copy of the header for ICMP errors now
+copies the tag too); latency and throughput as before.
+---
+ sys/netpfil/ipfw/ip_dn_io.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index ac05064..bb1fc9b 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -152,6 +152,14 @@ static u_long dn_rel_catchups;
+  */
+ static int dn_stage = 1;
+ static u_long dn_staged;
++/*
++ * A released "in" packet keeps ipfw's tag while dn_keep_tag is set, so that
++ * under net.inet.ip.fw.one_pass ipfw passes it on output at once instead of
++ * walking its rules; then no ipfw rule applies to it on output. Off by
++ * default: os-cake sets it on request, for a ruleset with no rule acting on
++ * output.
++ */
++static int dn_keep_tag;
+ 
+ static int
+ sysctl_release_us(SYSCTL_HANDLER_ARGS)
+@@ -228,6 +236,9 @@ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, stage,
+     "Leave a packet that finds dummynet busy to its holder (0: wait)");
+ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, staged,
+     CTLFLAG_RD, &dn_staged, 0, "Packets left to dummynet's holder");
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_keep_tag,
++    CTLFLAG_RW, &dn_keep_tag, 0,
++    "Released in packets pass ipfw on output at once (one_pass)");
+ #ifdef CAKE_DEBUG
+ /* for tests: dummynet_fine_task() sleeps first, so that wakeups queue up */
+ static int dn_fine_delay_us;
+@@ -1091,6 +1102,15 @@ dummynet_fine_task(void *context, int pending)
+ 	VNET_LIST_RUNLOCK();
+ }
+ 
++/* whether a released "in" packet keeps ipfw's tag, for ipfw to pass it */
++static inline int
++dn_keep_released_tag(struct m_tag *tag)
++{
++
++	return (dn_keep_tag != 0 &&
++	    (((struct ipfw_rule_ref *)(tag + 1))->info & IPFW_ONEPASS) != 0);
++}
++
+ /*
+  * forward a chain of packets to the proper destination.
+  * This runs outside the dummynet lock.
+@@ -1136,7 +1156,8 @@ dummynet_send(struct mbuf *m)
+ 
+ 		case DIR_IN :
+ 		        m->m_flags |= M_PASSIN;
+-			m_tag_delete(m, tag);
++			if (!dn_keep_released_tag(tag))
++				m_tag_delete(m, tag);
+ 
+ 			netisr_dispatch(NETISR_IP, m);
+ 			break;
+@@ -1144,7 +1165,8 @@ dummynet_send(struct mbuf *m)
+ #ifdef INET6
+ 		case DIR_IN | PROTO_IPV6:
+ 		        m->m_flags |= M_PASSIN;
+-			m_tag_delete(m, tag);
++			if (!dn_keep_released_tag(tag))
++				m_tag_delete(m, tag);
+ 
+ 			netisr_dispatch(NETISR_IPV6, m);
+ 			break;

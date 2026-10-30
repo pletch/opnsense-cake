@@ -15,6 +15,7 @@
  *   php hw-shaper.php subtick A B <0|1> [release_us]
  *   php hw-shaper.php direction A B <in|out>
  *   php hw-shaper.php sched A B <cake|fq_codel>
+ *   php hw-shaper.php keeptag A B <0|1>   (Skip ipfw on output, the CAKE page's)
  *
  * Each stage runs in a process of its own, as a model relation only sees
  * the pipes saved before the process started. Apply with hw-subtick.sh's
@@ -57,9 +58,9 @@ function named($items)
     return $found;
 }
 
-if (!in_array($stage, ['pipes', 'queues', 'rules', 'retarget', 'cake', 'rate', 'subtick', 'direction', 'sched']) ||
+if (!in_array($stage, ['pipes', 'queues', 'rules', 'retarget', 'cake', 'rate', 'subtick', 'direction', 'sched', 'keeptag']) ||
     $A == '' || $B == '') {
-    echo "usage: hw-shaper.php pipes|queues|rules|retarget|cake|rate|subtick|direction|sched A B [args]\n";
+    echo "usage: hw-shaper.php pipes|queues|rules|retarget|cake|rate|subtick|direction|sched|keeptag A B [args]\n";
     exit(1);
 }
 
@@ -159,6 +160,11 @@ case 'sched':
         }
     }
     $cake->general->subtick_scope = $fq ? 'all' : 'cake';
+    check($cake);
+    break;
+case 'keeptag':
+    $cake = new Cake();
+    $cake->general->keep_tag = $argv[4];
     check($cake);
     break;
 case 'subtick':

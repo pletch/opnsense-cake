@@ -17,4 +17,10 @@
         <type>text</type>
         <help>The longest a packet waits for release once the pipe's rate lets it go, in microseconds. Lower releases more often, at more CPU cost on a router short of it; the clock tick (1000 at kern.hz=1000) or more releases once per tick, as the stock dummynet. Applies to every shaper pipe, not only the CAKE ones.</help>
     </field>
+    <field>
+        <id>cake.general.keep_tag</id>
+        <label>Skip ipfw on output for traffic shaped inbound</label>
+        <type>checkbox</type>
+        <help>With dummynet-st, a packet a shaper rule on "in" queued is sent on without passing the traffic shaper's rules (ipfw) a second time on its way out, where they would pass it anyway. Saves CPU on small firewalls: about a tenth of a CPU at 200 Mbit/s each way on an Atom. Takes effect only while every enabled shaper rule is an "in" rule on a single interface and no captive portal zone exists, as no ipfw rule then applies to that traffic on output; otherwise this page says why it is not in effect. Set up a captive portal later and this page warns until Apply turns it off.</help>
+    </field>
 </form>

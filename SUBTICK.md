@@ -1107,13 +1107,88 @@ CPU, of 400):
    1–3%, but they still take turns. Per-scheduler locks would let pipes
    (download and upload) run in parallel; the heap and the configuration
    paths take `dn_uh` today.
-5. **Smaller:** no `m_tag_get()` per packet (a UMA zone, or room in the
-   mbuf header); batching in `dummynet_send()` (FreeBSD has no general
-   `xmit_more`, so little to gain).
+5. **Smaller:** batching in `dummynet_send()` (FreeBSD has no general
+   `xmit_more`, so little to gain). A UMA zone for dummynet's per-packet
+   tag was tried and gave nothing (below).
+6. **No ipfw walk on output for released "in" packets: done, as an
+   option** (patch 0010 and os-cake's "Skip ipfw on output for traffic
+   shaped inbound"; below).
 
-Some of the gap stays whatever is done: OPNsense's pf, with its default
-rules, scrub and logging, does more per packet than the seven-line
-nftables ruleset of the comparison.
+**Where the gap is** (2026-10-30; 1.5.10, Realtek's driver, RSS, "in"
+rules; `bench-kit` scripts `fwexp.sh`, `boxrun.sh`, `stackcat.py`,
+`pfcat.py`). Each variant ran 5 times, each run paired with a baseline
+run just before it. Whole-box busy CPU swings by 45–90 points in about
+one run in four (OPNsense's periodic jobs), so the medians below settle
+only effects of tens of points, and the profiles (kernel stacks at 997
+Hz, no fbt probes) settle the rest.
+
+At 200 Mbit/s each way, shaped, the change in busy CPU (of 400%):
+
+| variant | change |
+|---|---|
+| pf disabled | −54 |
+| OPNsense's pf rules without `scrub in all` | −7 |
+| pf with one `pass all keep state` rule | −2 |
+| ipfw with only the two shaper rules | −6 |
+| `net.isr.dispatch` direct / deferred (from hybrid) | +2 / −11 |
+
+pf's cost is its engine, not OPNsense's 63 logged rules and 8 NAT rules:
+about 4.5 µs per pass, of which `pf_test()`'s own setup 10% of a CPU,
+the state lookup 8.5%, normalization 7%, `pf_tcp_track_full()` 5%, the
+per-packet counters 3.5%, and synproxy, syncookie, dummynet-route and
+rule-to-action checks that run for every packet though unused here 3%.
+
+The same traffic paced by the senders (180 Mbit/s each way, under the
+200 Mbit/s pipes, so that every variant carries the same packets):
+
+| | busy CPU (of 400%) | ping RTT |
+|---|---|---|
+| pf, ipfw, dummynet-st and CAKE | ~245% | 1.0 ms |
+| pf only (ipfw off) | ~88% | 0.49 ms |
+| no pf, no ipfw | ~61% | 0.47 ms |
+
+So bare forwarding, about 61%, is already close to all of Linux's cost
+with conntrack and CAKE (about 76% of a CPU at 200 Mbit/s each way), pf
+adds about 27 points, and the shaper path about 155. Shaped minus
+unshaped by function: scheduler and wakeups (`spinlock_exit`) +19,
+`ipfw_chk()` +18.5, spinning (`lock_delay`, on the `re0` send locks and
+`dn_uh`) +17, the driver's receive work +12, CAKE's enqueue and dequeue
++9, pf +15 (the same passes, dearer per packet), the second trip through
+`ip_input()`, `ip_forward()` and `ip_output()` +9, tag allocation and
+lookup ~+6. CAKE and dummynet themselves are a small part; the rest is
+the shape of the path: a packet queued in dummynet and handed back to
+netisr by another thread, and more threads sending through the NIC's
+one queue. `ip_forward()`'s own work is about 2% of a CPU and the route
+lookup 0.5%, so moving released packets to `ip_tryforward()` would gain
+little.
+
+- **ipfw on output** (patch 0010). OPNsense's `dummynet_send()` deletes
+  ipfw's tag from a released "in" packet, so ipfw walks all its rules
+  again on output, where with only "in" rules none acts. Keeping the tag
+  (with `net.inet.ip.fw.one_pass`, ipfw passes such a packet at once)
+  took `ipfw_chk()` from 21% to 10% of a CPU at 200 Mbit/s each way,
+  about 10 points less in all (`ip_forward()`'s header copy for ICMP
+  errors now copies the tag too), latency and throughput unchanged.
+  Then no ipfw rule applies to the packet on output, so it is an option
+  on the CAKE page, off by default, which os-cake applies only while
+  every shaper rule is "in" on a single interface and no captive portal
+  zone exists (its accounting counts traffic on output). A ruleset
+  loaded later without Apply (captive portal's) makes the page warn and
+  the service show stopped until Apply. A first version had the module
+  poll ipfw's rule count to stop by itself; dropped as too indirect.
+- **A UMA zone for dummynet's tag**: no gain. Allocation was 0.8% of a
+  CPU either way (`malloc(9)` serves small sizes from per-CPU caches),
+  and freeing through the zone cost about 1 point more.
+- **Turning ipfw off and on** (`net.inet.ip.fw.enable`) relinks ipfw's
+  hooks ahead of pf on input; a released "in" packet, marked to skip the
+  input filters, then never reaches pf, whose state tracking drops the
+  connection's packets (`state-mismatch`). OPNsense's shaper start runs
+  `sync_fw_hooks.py` afterwards to put pf back in front; a test that
+  toggles the sysctl must do the same.
+
+Some of the gap stays whatever is done here: pf's per-packet engine,
+FreeBSD's forwarding with a single-queue NIC, and the hand-off that a
+queue in dummynet implies.
 
 Also open from the Z8350: the two single pings of about 0.95 s in
 otherwise normal runs (stock and 0008, not reproduced); what makes

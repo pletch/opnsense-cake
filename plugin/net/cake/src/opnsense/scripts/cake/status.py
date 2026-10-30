@@ -31,8 +31,9 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import cake_enabled, cake_pipes, kmod_status, rules_on_cake_pipes, shaper_pipes, st_status, \
-    subtick_settings, CONFIG, DNCTL, RELEASE_DEFAULT
+from lib import cake_enabled, cake_pipes, keep_tag_blockers, keep_tag_wanted, kmod_status, \
+    rules_on_cake_pipes, set_active, shaper_pipes, st_status, subtick_settings, CONFIG, DNCTL, \
+    RELEASE_DEFAULT
 
 # the shaper rules rc.d/dnctl hands the wrapper
 SHAPER_RULES = '/usr/local/etc/dnctl.conf'
@@ -110,9 +111,17 @@ def subtick_status():
         result['enabled'], result['release_us'], result['scope'] = True, RELEASE_DEFAULT, 'cake'
     if result['loaded']:
         for name in ['release_us', 'release_wakeups', 'release_pkts', 'release_late_us',
-                     'release_late_max', 'release_catchups']:
+                     'release_late_max', 'release_catchups', 'release_keep_tag']:
             value = sysctl('net.inet.ip.dummynet.' + name)
             result['now_' + name] = int(value) if value is not None and value.isdigit() else None
+    # "Skip ipfw on output for traffic shaped inbound": asked for, in effect, and what stops it now
+    try:
+        wanted = keep_tag_wanted()
+        blockers = keep_tag_blockers() if wanted or result.get('now_release_keep_tag') else []
+    except (OSError, ET.ParseError):
+        wanted, blockers = False, []
+    result['keep_tag'] = {'wanted': wanted, 'on': bool(result.get('now_release_keep_tag')),
+                          'blockers': blockers}
     return result
 
 
@@ -152,6 +161,17 @@ if __name__ == '__main__':
     if st_needed and st['enabled'] and not st['loaded']:
         result['warnings'].append('dummynet-st is not in use: %s; the stock dummynet and dn_cake.ko are used '
                                   'instead (see the system log)' % (st['reason'] or 'it did not load'))
+    kt = st['keep_tag']
+    if st['loaded'] and kt['wanted'] and not kt['on']:
+        for blocker in kt['blockers'] or ['Apply has not run since it was ticked']:
+            result['warnings'].append('released inbound packets do not skip ipfw on output: %s' % blocker)
+    if st['loaded'] and kt['on'] and kt['blockers']:
+        # a ruleset loaded since the last Apply (captive portal's) acts on output: the
+        # service shows stopped until Apply turns the skip off
+        for blocker in kt['blockers']:
+            result['warnings'].append('released inbound packets skip ipfw on output, but %s: Apply on '
+                                      'this page to stop that' % blocker)
+        set_active(False)
     if st['loaded'] and st['current'] is False:
         result['warnings'].append('the loaded dummynet_st.ko is not the one installed: Apply replaces it')
     if result['current'] is False:

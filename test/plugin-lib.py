@@ -75,6 +75,102 @@ class RulesOnCakePipes(unittest.TestCase):
         self.assertEqual(self.run_lib([('r1', 'p1', {'enabled': '1'})], cake_enabled='0'), [])
 
 
+class KeepTag(unittest.TestCase):
+    """ "Skip ipfw on output for traffic shaped inbound": only for a ruleset with no rule acting
+    on output, and no captive portal zone """
+    BASE = """flush
+add 100 allow pfsync from any to any
+add 110 allow carp from any to any
+add 120 pass layer2 mac-type arp,rarp
+add 130 pass layer2 mac-type 0x888e,0x88c7
+add 140 pass layer2 mac-type 0x8863,0x8864
+add 150 deny layer2 not mac-type ip,ipv6
+
+# allow traffic send from localhost
+add 200 skipto 60000 ipv6 from ::1 to any
+add 201 skipto 60000 ipv4 from 127.0.0.0/8 to any
+add 202 skipto 60000 ipv6 from any to ::1
+add 203 skipto 60000 ipv4 from any to 127.0.0.0/8
+%s
+add 60000 return via any
+%s
+# pass authorized
+add 65533 pass ip from any to any
+
+# block all unmatched
+add 65534 deny all from any to any
+"""
+    IN1 = ('add 60001 queue 1 ip from 192.0.2.20 to 192.0.2.10 src-port  any dst-port any in   via re0 '
+           '// b97b11e1 lan: down')
+    IN2 = ('add 60002 queue 2 ip from any to any src-port  any dst-port any in tcp tcpflags ack  '
+           'via igb0 // c5340511 wan: acks')
+
+    def run_lib(self, shaper, cp_rules='', zone=False, keep_tag=None):
+        f = tempfile.NamedTemporaryFile('w', suffix='.rules', delete=False)
+        f.write(self.BASE % (cp_rules, shaper))
+        f.close()
+        c = tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False)
+        c.write('<opnsense><OPNsense>%s%s</OPNsense></opnsense>' % (
+            '<captiveportal><zones><zone uuid="z1"><enabled>0</enabled></zone></zones></captiveportal>'
+            if zone else '',
+            '' if keep_tag is None else '<Cake><general><keep_tag>%s</keep_tag></general></Cake>' % keep_tag))
+        c.close()
+        lib.CONFIG = c.name
+        try:
+            return lib.keep_tag_blockers(f.name) if keep_tag is None else lib.keep_tag_wanted()
+        finally:
+            os.unlink(f.name)
+            os.unlink(c.name)
+
+    def test_in_rules(self):
+        self.assertEqual(self.run_lib(self.IN1), [])
+        self.assertEqual(self.run_lib(self.IN1 + '\n' + self.IN2), [])
+
+    def test_out_rule(self):
+        out = self.IN2.replace(' in ', ' out ')
+        self.assertEqual(self.run_lib(self.IN1 + '\n' + out), [
+            'shaper rule acks also acts on output (direction out or both, or two interfaces)'])
+
+    def test_both_directions(self):
+        self.assertEqual(len(self.run_lib(self.IN1.replace(' in ', ' '))), 1)
+
+    def test_two_interfaces(self):
+        two = ('add 60003 pipe 3 ip from any to any src-port  any dst-port any recv re0  xmit re1 '
+               '// 1234 lan -> wan: both ways')
+        self.assertEqual(self.run_lib(self.IN1 + '\n' + two), [
+            'shaper rule both ways also acts on output (direction out or both, or two interfaces)'])
+
+    def test_captive_portal(self):
+        cp = ('add 3001 skipto tablearg ip from table(1) to any via re0\n'
+              'add 3001 skipto tablearg ip from any to table(1) via re0')
+        self.assertEqual(len(self.run_lib(self.IN1, cp_rules=cp)), 2)
+        # a zone, even disabled (no rules yet): enabling it later reloads ipfw without Apply here
+        self.assertEqual(self.run_lib(self.IN1, zone=True), [
+            'captive portal has a zone, and its accounting counts traffic on output'])
+
+    def test_unknown_rule(self):
+        self.assertEqual(self.run_lib(self.IN1 + '\nadd 60010 deny ip from any to any in via re0'), [
+            'ipfw rule 60010 is neither OPNsense\'s own nor an "in" shaper rule'])
+        self.assertEqual(len(self.run_lib(self.IN1, cp_rules='add 1000 count ip from any to any')), 1)
+
+    def test_comment_words(self):
+        # words after // are the rule's description, not its options
+        self.assertEqual(self.run_lib(self.IN1.replace('lan: down', 'lan: out xmit')), [])
+
+    def test_missing_file(self):
+        lib.CONFIG = config([], [])
+        try:
+            self.assertEqual(lib.keep_tag_blockers('/nonexistent/ipfw.rules'), [
+                'the ipfw ruleset (/nonexistent/ipfw.rules) cannot be read'])
+        finally:
+            os.unlink(lib.CONFIG)
+
+    def test_wanted(self):
+        self.assertTrue(self.run_lib('', keep_tag='1'))
+        self.assertFalse(self.run_lib('', keep_tag='0'))
+        self.assertFalse(self.run_lib('', keep_tag=''))
+
+
 class CakePipes(unittest.TestCase):
     def run_lib(self, shaper_pipes, cake_pipes):
         lib.CONFIG = config(shaper_pipes, cake_pipes)

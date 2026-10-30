@@ -265,6 +265,15 @@ each way, latency was about the same (1.2–1.7 ms with dummynet-st), but
 dummynet's thread was at 50% of a CPU with "in" rules and 95% with
 "out" ones.
 
+With only "in" rules, also tick **Skip ipfw on output for traffic shaped
+inbound** on the CAKE page (dummynet-st 1.0.11 on). A packet released
+from an "in" rule then passes the shaper's rules (ipfw) on its way out at
+once, instead of being checked against every rule again, none of which
+would act on it: about a tenth of a CPU less at 200 Mbit/s each way on
+the Z8350. It takes effect only while every enabled shaper rule is an
+"in" rule on a single interface and no captive portal zone exists;
+otherwise the page says why not.
+
 FreeBSD's `re(4)` driver on the same box sometimes stopped transmitting
 under sustained load (`re0: watchdog timeout` in `dmesg`, then again
 every few seconds until a reboot): without RSS at 200–250 Mbit/s each

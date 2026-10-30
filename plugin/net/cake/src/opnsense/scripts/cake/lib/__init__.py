@@ -48,6 +48,7 @@ ACTIVE = '/var/run/cake.pid'
 # dummynet-st: dummynet with CAKE built in and packets released between
 # ticks (SUBTICK.md), loaded instead of dummynet.ko and dn_cake.ko
 ST_KMOD = '/boot/modules/dummynet_st.ko'
+IPFW_RULES = '/usr/local/etc/ipfw.rules'
 ST_KERNEL = '/usr/local/libexec/dummynet-st/kernel'
 ST_DUMMYNET = '/usr/local/libexec/dummynet-st/dummynet.sha256'
 ST_KERNEL_VERSION = '/usr/local/libexec/dummynet-st/kernel.version'
@@ -696,4 +697,72 @@ def st_crashed():
 def set_release(release_us):
     """ net.inet.ip.dummynet.release_us of the loaded dummynet_st.ko """
     subprocess.run(['/sbin/sysctl', '-q', 'net.inet.ip.dummynet.release_us=%d' % release_us],
+                   capture_output=True)
+
+
+# OPNsense's own rules in the ipfw ruleset it generates (templates/OPNsense/IPFW/ipfw.conf),
+# none of which changes what happens to a forwarded packet on output
+IPFW_FIXED = {tuple(line.split()) for line in (
+    'add 100 allow pfsync from any to any',
+    'add 110 allow carp from any to any',
+    'add 120 pass layer2 mac-type arp,rarp',
+    'add 130 pass layer2 mac-type 0x888e,0x88c7',
+    'add 140 pass layer2 mac-type 0x8863,0x8864',
+    'add 150 deny layer2 not mac-type ip,ipv6',
+    'add 200 skipto 60000 ipv6 from ::1 to any',
+    'add 201 skipto 60000 ipv4 from 127.0.0.0/8 to any',
+    'add 202 skipto 60000 ipv6 from any to ::1',
+    'add 203 skipto 60000 ipv4 from any to 127.0.0.0/8',
+    'add 60000 return via any',
+    'add 65533 pass ip from any to any',
+    'add 65534 deny all from any to any',
+)}
+
+
+def keep_tag_wanted():
+    """ whether "Skip ipfw on output for traffic shaped inbound" is ticked (CAKE page) """
+    general = ET.parse(CONFIG).getroot().find('./OPNsense/Cake/general')
+    return general is not None and general.findtext('keep_tag') == '1'
+
+
+def keep_tag_blockers(path=IPFW_RULES):
+    """ why released "in" packets may not skip ipfw on output: a rule in the generated ruleset
+    that acts on output (a shaper rule "out", for both directions or on two interfaces, or
+    any rule but OPNsense's own and single-interface "in" shaper rules), or a captive portal
+    zone, whose accounting counts traffic on output. With none, ipfw would pass such a packet
+    on output anyway, and dummynet-st (patch 0010) can let it keep ipfw's one-pass tag so that
+    ipfw passes it at once.
+    :return: list of messages, empty when it may
+    """
+    result = []
+    try:
+        with open(path) as f_in:
+            lines = f_in.readlines()
+    except OSError:
+        return ['the ipfw ruleset (%s) cannot be read' % path]
+    for line in lines:
+        rule, _, comment = line.partition('//')
+        words = rule.split()
+        if not words or words[0].startswith('#') or words == ['flush'] or tuple(words) in IPFW_FIXED:
+            continue
+        number = words[1] if len(words) > 1 else '?'
+        if (words[0] == 'add' and number.isdigit() and 60000 < int(number) < 65533
+                and len(words) > 3 and words[2] in ('pipe', 'queue')):
+            if 'in' in words and 'via' in words and not {'out', 'xmit', 'recv'} & set(words):
+                continue
+            # the description follows the rule's uuid and interfaces: "uuid lan: name"
+            name = comment.split(':', 1)[1].strip() if ':' in comment else 'number %s' % number
+            result.append('shaper rule %s also acts on output (direction out or both, or two '
+                          'interfaces)' % name)
+        else:
+            result.append('ipfw rule %s is neither OPNsense\'s own nor an "in" shaper rule' % number)
+    if ET.parse(CONFIG).getroot().find('./OPNsense/captiveportal/zones/zone') is not None:
+        result.append('captive portal has a zone, and its accounting counts traffic on output')
+    return result
+
+
+def set_keep_tag(on):
+    """ net.inet.ip.dummynet.release_keep_tag of the loaded dummynet_st.ko (absent before
+    dummynet-st 1.0.11: then nothing happens) """
+    subprocess.run(['/sbin/sysctl', '-q', 'net.inet.ip.dummynet.release_keep_tag=%d' % bool(on)],
                    capture_output=True)

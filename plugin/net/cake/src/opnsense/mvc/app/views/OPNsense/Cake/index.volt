@@ -136,7 +136,9 @@
                 if (st.loaded) {
                     $status.addClass("alert-success").text(
                         "{{ lang._('dummynet-st is loaded, releasing packets at most %s us after they are due; %s pipes use its CAKE.') }}"
-                        .replace("%s", st.now_release_us).replace("%s", data.schedulers.length)
+                        .replace("%s", st.now_release_us).replace("%s", data.schedulers.length) +
+                        (st.keep_tag && st.keep_tag.on
+                            ? " {{ lang._('Traffic shaped inbound skips ipfw on output.') }}" : "")
                     );
                 } else if (data.usable) {
                     $status.addClass("alert-success").text(
