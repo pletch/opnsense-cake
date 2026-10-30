@@ -129,12 +129,12 @@ over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-ca
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.8
-fetch $R/cake-kmod-1.5.8.pkg $R/dummynet-st-1.0.8.pkg $R/os-cake-1.4.8.pkg $R/SHA256SUMS
+R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.9
+fetch $R/cake-kmod-1.5.9.pkg $R/dummynet-st-1.0.9.pkg $R/os-cake-1.4.9.pkg $R/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.5.8.pkg
-pkg add dummynet-st-1.0.8.pkg
-pkg add os-cake-1.4.8.pkg
+pkg add cake-kmod-1.5.9.pkg
+pkg add dummynet-st-1.0.9.pkg
+pkg add os-cake-1.4.9.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
@@ -245,10 +245,10 @@ CAKE on both directions of traffic forwarded through its one port
 Without RSS, the figures from 250 Mbit/s up are with Realtek's driver, as
 FreeBSD's hung there (below); with RSS, FreeBSD's own `re(4)`.
 
-The dummynet-st figures are with patch 0008 of
-[SUBTICK.md](SUBTICK.md)'s series, which matters more with RSS: several
-netisr threads then queue into the pipes at once, and without it they
-wait on dummynet's lock. NICs with several receive queues of their own
+The dummynet-st figures are from 1.0.9 on (patch 0008 of
+[SUBTICK.md](SUBTICK.md)'s series), which matters more with RSS: several
+netisr threads then queue into the pipes at once, and before it they
+waited on dummynet's lock. NICs with several receive queues of their own
 (most Intel ones) already spread this work.
 
 With RSS, shape on the **in** direction where you can (download on WAN in,
