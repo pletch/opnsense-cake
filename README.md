@@ -29,13 +29,21 @@ What it adds over FQ-CoDel:
 - COBALT AQM, DSCP wash, ingress mode and a byte memory limit.
 
 **Status:** tested on OPNsense 26.7 (FreeBSD 15.1) in a VM with the test
-suites in [VERIFICATION.md](VERIFICATION.md), and in use on one OPNsense
-26.7 router (a Proxmox VM) on a 2 Gbit/s symmetric fiber link. **Running
+suites in [VERIFICATION.md](VERIFICATION.md), on bare metal on a small
+Intel Atom box with a Realtek NIC (see
+[Small multi-core firewalls](#small-multi-core-firewalls-turn-on-receive-side-scaling)),
+and in use on one OPNsense 26.7 router (a Proxmox VM) on a 2 Gbit/s
+symmetric fiber link. **Running
 OPNsense in a VM? Set `kern.hz=1000`**
 ([why](#opnsense-in-a-vm-set-kernhz1000)); it helps FQ-CoDel too. `dn_cake.ko` is an unofficial kernel module: it runs
 in your firewall's kernel and is not supported by OPNsense or FreeBSD. If
 it can't be used, the plugin leaves the shaper on each pipe's own
 scheduler.
+
+This project was written and tested with the help of an AI coding
+assistant (Claude): code, tests and documentation. The author directed
+the work, ran the tests on the systems described here, and is
+responsible for what is in the repository.
 
 To install on OPNsense, see [Install on OPNsense](#install-on-opnsense) and
 [`plugin/README.md`](plugin/README.md). Read [Security notes](#security-notes)
@@ -219,14 +227,17 @@ to tens of milliseconds while CAKE's own queues stay short.
 
 OPNsense's kernel has software receive side scaling (RSS): it hashes the
 packets itself and spreads that work over one netisr thread per CPU. It
-is off by default. On **System → Settings → Tunables**, add:
+is off by default. "CPU" here means a logical CPU, as `sysctl hw.ncpu`
+counts them: a core, or each of its threads with hyperthreading (SMT).
+That is what netisr and RSS count. On **System → Settings → Tunables**,
+add:
 
 | tunable | value |
 |---|---|
 | `net.isr.bindthreads` | `1` |
 | `net.isr.maxthreads` | `-1` (one thread per CPU) |
 | `net.inet.rss.enabled` | `1` |
-| `net.inet.rss.bits` | log2 of the number of CPUs: `2` for 4 |
+| `net.inet.rss.bits` | log2 of the number of CPUs, rounded up: `2` for 4, `3` for 6 or 8 |
 | `net.isr.dispatch` | `hybrid` |
 
 and reboot. `netstat -Q` should then list `ip` with policy `cpu`.
@@ -344,8 +355,10 @@ installed from a file, not from one of the firewall's package
 repositories. That is expected; see *Install the packages*.
 
 **Does it work on real hardware?** It is built for any amd64 OPNsense
-26.7. So far it has been tested in VMs (see *Status*); reports from
-bare-metal installs, especially on cable and DSL links, are welcome.
+26.7. So far it has been tested in VMs and on one bare-metal box, an
+Intel Atom x5-Z8350 with a Realtek NIC (see *Status*). Reports from
+other hardware, Intel NICs especially, and from cable and DSL links are
+welcome.
 
 **Where do I report a problem?** Bugs in the GitHub issues, with the
 OPNsense version, the CAKE settings and the status line. Vulnerabilities
