@@ -293,7 +293,18 @@ o_debug_flow(uint32_t flow)
 	}
 }
 
+static int
+o_delays(int tin, uint64_t d[3])
+{
+	if (tin < 0 || (uint32_t)tin >= si->tin_cnt)
+		return (0);
+	d[0] = si->tins[tin].peak_delay;
+	d[1] = si->tins[tin].avg_delay;
+	d[2] = si->tins[tin].base_delay;
+	return (1);
+}
+
 const struct sched_impl ours_impl = {
 	"dn_sched_cake", o_init, o_enqueue, o_dequeue, o_qlen, o_debug,
-	o_debug_flow
+	o_debug_flow, o_delays
 };

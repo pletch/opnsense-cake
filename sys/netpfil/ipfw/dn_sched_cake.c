@@ -1504,13 +1504,17 @@ cake_ewma(uint64_t avg, uint64_t sample, int shift)
 	return (avg);
 }
 
-/* count a packet the tin sends, and its queue delay (us) as sch_cake does */
+/*
+ * count a packet the tin sends, and its queue delay as sch_cake does: in
+ * ns, as the averages move by 1/256 of a sample, and an average in us
+ * would never fall to 255 us or below
+ */
 static __inline void
 cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now_ns,
 	uint64_t pkt_ts)
 {
 	uint64_t delay = now_ns > pkt_ts && pkt_ts != 0 ?
-	    (now_ns - pkt_ts) / 1000 : 0;
+	    now_ns - pkt_ts : 0;
 
 	tin->tx_pkts++;
 	tin->tx_bytes += m->m_pkthdr.len;
@@ -2822,8 +2826,8 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 		    (uintmax_t)b->ecn_marks, (uintmax_t)b->ack_drops,
 		    b->backlog, (uintmax_t)b->backlog_bytes, b->sparse_flows,
 		    b->bulk_flows, b->decaying_flows, b->unresponsive_flows,
-		    (uintmax_t)b->way_collisions, (uintmax_t)b->peak_delay,
-		    (uintmax_t)b->avg_delay, (uintmax_t)b->base_delay);
+		    (uintmax_t)b->way_collisions, (uintmax_t)b->peak_delay / 1000,
+		    (uintmax_t)b->avg_delay / 1000, (uintmax_t)b->base_delay / 1000);
 	}
 	error = sbuf_finish(&sb);
 	sbuf_delete(&sb);

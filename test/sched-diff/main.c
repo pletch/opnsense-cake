@@ -524,6 +524,30 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		t->steps++;
 	}
 	t->drops += ndrops_linux;
+	/* both sent the same packets at the same times: so the delay EWMAs */
+	for (i = 0; !pace_hz && i < 8; i++) {
+		uint64_t dl[3], dd[3];
+		static const char *const dname[] = { "peak", "average", "base" };
+		int k, hl = linux_impl.delays(i, dl), ho = ours_impl.delays(i, dd);
+
+		if (hl != ho) {
+			printf("mismatch: seed %" PRIu64 ": tin %d exists in one only\n",
+			    seed, i);
+			t->mismatches++;
+			free(pkts);
+			return (1);
+		}
+		for (k = 0; hl && k < 3; k++) {
+			if (dl[k] == dd[k])
+				continue;
+			printf("mismatch: seed %" PRIu64 " %s: tin %d %s delay"
+			    " sch_cake %" PRIu64 " ns, dn_sched_cake %" PRIu64 " ns\n",
+			    seed, modes[m].name, i, dname[k], dl[k], dd[k]);
+			t->mismatches++;
+			free(pkts);
+			return (1);
+		}
+	}
 	if (pace_hz) {
 		/* each tin's share of the link, as fractions of the rate */
 		double worst = 0, d, secs_run = (end - 1000000) / 1e9;

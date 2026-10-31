@@ -161,6 +161,20 @@ linux_next_release(void)
 	return (t < f ? t : f);
 }
 
+static int
+l_delays(int tin, uint64_t d[3])
+{
+	struct cake_sched_data *qd = qdisc_priv(sch);
+
+	if (tin >= qd->tin_cnt)
+		return (0);
+	d[0] = qd->tins[tin].peak_delay;
+	d[1] = qd->tins[tin].avge_delay;
+	d[2] = qd->tins[tin].base_delay;
+	return (1);
+}
+
 const struct sched_impl linux_impl = {
-	"sch_cake", l_init, l_enqueue, l_dequeue, l_qlen, l_debug, l_debug_flow
+	"sch_cake", l_init, l_enqueue, l_dequeue, l_qlen, l_debug, l_debug_flow,
+	l_delays
 };

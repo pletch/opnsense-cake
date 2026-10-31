@@ -219,7 +219,7 @@ struct cake_tin {
 	uint64_t	tx_pkts;	/* dequeued and sent */
 	uint64_t	tx_bytes;
 	uint64_t	way_collisions;	/* flows that had to share a queue */
-	/* queue delay of sent packets, us, as sch_cake's EWMAs */
+	/* queue delay of sent packets, ns, as sch_cake's EWMAs */
 	uint64_t	peak_delay;
 	uint64_t	avg_delay;
 	uint64_t	base_delay;

@@ -51,6 +51,8 @@ struct sched_impl {
 	uint32_t (*qlen)(void);
 	void	(*debug)(void);		/* print the tins' state */
 	void	(*debug_flow)(uint32_t flow);	/* print its queued packets */
+	/* a tin's peak, average and base delay EWMAs, ns; 0 if no such tin */
+	int	(*delays)(int tin, uint64_t d[3]);
 };
 extern const struct sched_impl linux_impl, ours_impl;
 
