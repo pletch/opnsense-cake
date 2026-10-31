@@ -7,3 +7,4 @@
 0007-copy-obj-sched-length.patch
 0008-stage-packets-when-dn-uh-is-held.patch
 0010-released-in-packets-keep-ipfw-tag.patch
+0011-staged-packets-serialize-rcvif.patch

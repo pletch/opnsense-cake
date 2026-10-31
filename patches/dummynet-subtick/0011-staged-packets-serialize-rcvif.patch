@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 10:00:00 -0400
+Subject: [PATCH] dummynet_st: a staged packet's interface is serialized
+
+The eleventh of the sub-tick release series (opnsense-cake SUBTICK.md),
+from an outside review of patches 0008 and 0010.
+
+A packet that finds dn_uh held is staged with its raw rcvif pointer (patch
+0008). The holder normally takes it within microseconds, but a
+configuration change releases dn_uh without draining the list, leaving it
+to the next packet or tick, up to a tick later. If the receiving
+interface is destroyed meanwhile and its epoch grace period ends after
+the staging thread's section, the holder dereferences a freed ifnet. Now
+the pointer is serialized when the packet is staged, as dn_enqueue() and
+CAKE's enqueue do for a queued packet, and restored when it is drained;
+a packet whose interface went away is dropped and counted.
+
+Also: the comment on dn_drain_staged() now says how a staged packet meets
+a configuration change (it carries its flowset's number, looked up when
+drained, as for a packet that had waited for dn_uh: dropped or sent to a
+recreated flowset of that number, as the ipfw rule naming it would);
+net.inet.ip.dummynet.staged is described as cumulative; and
+dn_keep_released_tag() checks the tag's length before reading the rule.
+---
+ sys/netpfil/ipfw/ip_dn_io.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index 7289dd5..d1b793b 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -235,7 +235,8 @@ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, stage,
+     CTLFLAG_RWTUN, &dn_stage, 0,
+     "Leave a packet that finds dummynet busy to its holder (0: wait)");
+ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, staged,
+-    CTLFLAG_RD, &dn_staged, 0, "Packets left to dummynet's holder");
++    CTLFLAG_RD, &dn_staged, 0,
++    "Packets left to dummynet's holder (cumulative)");
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_keep_tag,
+     CTLFLAG_RWTUN, &dn_keep_tag, 0,
+     "Released in packets pass ipfw on output at once (one_pass)");
+@@ -917,6 +918,11 @@ dropit:
+ /*
+  * Enqueue the packets staged while dn_uh was held (dummynet_io()), in
+  * the order they came; those that can leave at once are added to send.
++ * A staged packet carries its flowset's number, not a pointer, and is
++ * looked up now, as one that had waited for dn_uh would be after the
++ * holder: if a configuration change deleted or recreated the flowset
++ * meanwhile, the packet is dropped or goes to the new one, as the ipfw
++ * rule that names that number would send it.
+  */
+ static void
+ dn_drain_staged(struct mq *send)
+@@ -939,6 +945,14 @@ dn_drain_staged(struct mq *send)
+ 		m->m_nextpkt = NULL;
+ 		dt = dn_tag_get(m);
+ 		dn_staged++;
++		if (m->m_pkthdr.rcvif != NULL &&
++		    __predict_false(m_rcvif_restore(m) == NULL)) {
++			/* its interface went away while it was staged */
++			V_dn_cfg.io_pkt++;
++			V_dn_cfg.io_pkt_drop++;
++			FREE_PKT(m);
++			continue;
++		}
+ 		(void)dn_io_locked(&m, dt->fs_id, dt->dn_dir, &dt->f_id, send, 0);
+ 	}
+ }
+@@ -1108,6 +1122,7 @@ dn_keep_released_tag(struct m_tag *tag)
+ {
+ 
+ 	return (dn_keep_tag != 0 &&
++	    tag->m_tag_len >= sizeof(struct ipfw_rule_ref) &&
+ 	    (((struct ipfw_rule_ref *)(tag + 1))->info & IPFW_ONEPASS) != 0);
+ }
+ 
+@@ -1295,6 +1310,13 @@ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ 			dt = dn_tag_get(m);
+ 			dt->fs_id = fs_id;
+ 			dt->f_id = fwa->f_id;
++			/*
++			 * As dn_enqueue() does for a queued packet: its
++			 * interface may go away before a holder takes it,
++			 * after this thread's epoch section has ended
++			 */
++			if (m->m_pkthdr.rcvif != NULL)
++				m_rcvif_serialize(m);
+ 			*m0 = NULL;
+ 			do {
+ 				head = V_dn_cfg.staged;
