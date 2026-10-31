@@ -13,6 +13,15 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.13
+
+* cake-kmod 1.5.13 and dummynet-st 1.0.13: CAKE's peak, average and
+  base delay statistics are kept in ns, as sch_cake keeps them. Kept in
+  us, the average and peak delay could not fall below 255 us, so on a
+  fast link the CAKE page showed 0.26 ms for both whatever the delay.
+  Only the statistics change
+* os-cake 1.4.13: unchanged
+
 1.4.12
 
 * dummynet-st 1.0.12: a packet that found dummynet busy and was left to
