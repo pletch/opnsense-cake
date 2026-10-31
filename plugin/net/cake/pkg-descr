@@ -13,6 +13,17 @@ kernel, the stock dummynet and cake-kmod are used.
 Plugin Changelog
 ================
 
+1.4.12
+
+* dummynet-st 1.0.12: a packet that found dummynet busy and was left to
+  the lock's holder (1.0.9) kept a raw pointer to the interface it came
+  in on. After a shaper reconfiguration it could wait up to a clock
+  tick, and if that interface was destroyed meanwhile (a VLAN or tunnel
+  removed), dummynet would read it after it was freed. The pointer is
+  now kept the way dummynet keeps it for queued packets, and such a
+  packet is dropped. Found by an outside review
+* os-cake 1.4.12 and cake-kmod 1.5.12: unchanged
+
 1.4.11
 
 * New option on the CAKE page: Skip ipfw on output for traffic shaped

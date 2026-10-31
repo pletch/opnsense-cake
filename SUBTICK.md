@@ -1185,6 +1185,20 @@ little.
   the Z8350 end to end (`bench-kit/kt-e2e.sh`): off, on, a captive
   portal-like rule loaded behind os-cake's back (warning, service shown
   stopped), "out" rules (off, with the rules named).
+- **Patch 0011, from an outside review** (2026-10-31). A packet staged
+  while `dn_uh` is held (0008) kept its raw `rcvif` pointer; after a
+  configuration change, which releases `dn_uh` without draining, it can
+  wait up to a tick, and an interface destroyed meanwhile would be read
+  after it was freed. It is now serialized when staged and restored when
+  drained, as dummynet's and CAKE's queues do; a packet whose interface
+  went away is dropped. The review's other concern, a staged packet
+  meeting a deleted or recreated flowset, is the stock behaviour of a
+  packet waiting for `dn_uh`: it carries the flowset's number and is
+  looked up when it is taken, as the ipfw rule naming that number would
+  send it. With `one_pass` off, the kept tag of 0010 is deleted as before
+  (one more ipfw pass per released packet, measured). `robustness.sh` and
+  `subtick-stress.sh` passed on the normal and KASAN kernels with "in"
+  rules and `release_keep_tag` on, 86,680 and 125,936 packets staged.
 - **A UMA zone for dummynet's tag**: no gain. Allocation was 0.8% of a
   CPU either way (`malloc(9)` serves small sizes from per-CPU caches),
   and freeing through the zone cost about 1 point more.
