@@ -111,7 +111,7 @@ fingerprint: "5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502"
 EOF
 cat > /usr/local/etc/pkg/repos/cake.conf <<'EOF'
 cake: {
-  url: "https://pletch.github.io/opnsense-cake/26.7",
+  url: "https://pkg.pletch.org/26.7",
   signature_type: "fingerprints",
   fingerprints: "/usr/local/etc/pkg/fingerprints/cake",
   enabled: yes
@@ -341,6 +341,19 @@ loads the module: the pipes keep running with their own scheduler (FQ-CoDel
 or whatever they are set to), and the CAKE page says why. A `cake-kmod`
 built for the new kernel brings CAKE back. Updates that leave
 `dummynet.ko` unchanged, which are most of them, keep CAKE.
+
+**Why does the firmware page say it can't find the repository?** If this
+project's package repository can't be reached, `pkg update` fails as a whole,
+even when the OPNsense mirror is fine: System → Firmware can report *Could
+not find the repository on the selected mirror* and list no updates, and
+`pkg upgrade` refuses to run. To confirm, run `pkg update -f` and look for
+`Unable to update repository cake`. CAKE itself keeps running, as it needs
+nothing from the repository. To get OPNsense updates in the meantime, turn
+the repository off, and set it back to `yes` once it is reachable:
+
+```sh
+sed -i '' 's/enabled: yes/enabled: no/' /usr/local/etc/pkg/repos/cake.conf
+```
 
 **Which diffserv mode?** `besteffort` if you don't mark traffic, otherwise
 `diffserv3` or `diffserv4`. `diffserv8` and `precedence` are experimental:

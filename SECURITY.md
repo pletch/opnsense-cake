@@ -49,7 +49,7 @@ from. From after v1.4.5 they are signed (`git tag -v vX.Y.Z`; GitHub shows
 them as verified).
 
 The packages are also published in a pkg(8) repository,
-https://pletch.github.io/opnsense-cake/26.7, whose catalogue lists every
+https://pkg.pletch.org/26.7, whose catalogue lists every
 package's SHA256 and is signed with a key kept offline rather than in
 GitHub (`plugin/repo.sh`, see `RELEASING.md`). Its public key is
 `plugin/keys/cake-repo.pub` (RSA 4096), with the fingerprint
