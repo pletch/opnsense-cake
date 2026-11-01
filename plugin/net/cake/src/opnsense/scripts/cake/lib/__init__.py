@@ -276,7 +276,8 @@ def kernel_reason(package, version_file, fallback):
 
 
 def dummynet_file():
-    """ the dummynet.ko in use: the loaded one, else the one kldload picks
+    """ the dummynet.ko in use: the loaded one, else the one kldload picks. dummynet_st.ko
+    provides the dummynet module too, so with the fork loaded that is the file on disk.
     :return: path, or None if dummynet is built into the kernel
     """
     out = subprocess.run(['/sbin/kldstat', '-v', '-n', 'dummynet.ko'], capture_output=True, text=True)
@@ -285,7 +286,7 @@ def dummynet_file():
             parts = line.split()
             if len(parts) == 6 and parts[4] == 'dummynet.ko':
                 return parts[5].strip('()')
-    elif subprocess.run(['/sbin/kldstat', '-q', '-m', 'dummynet']).returncode == 0:
+    elif not st_loaded() and subprocess.run(['/sbin/kldstat', '-q', '-m', 'dummynet']).returncode == 0:
         return None
     return DUMMYNET
 

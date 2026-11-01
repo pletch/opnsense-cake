@@ -339,6 +339,67 @@ class LoadedModule(unittest.TestCase):
 
 
 
+class DummynetCheck(unittest.TestCase):
+    """ dummynet_check: which dummynet.ko is compared with the one cake-kmod is built against,
+    with kldstat faked """
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = lib.DUMMYNET, lib.KMOD_DUMMYNET, lib.KMOD_KERNEL_VERSION, lib.subprocess.run
+        d = self.dir.name
+        lib.DUMMYNET = os.path.join(d, 'dummynet.ko')
+        lib.KMOD_DUMMYNET = os.path.join(d, 'dummynet.sha256')
+        lib.KMOD_KERNEL_VERSION = os.path.join(d, 'kernel.version')
+        with open(lib.DUMMYNET, 'wb') as f:
+            f.write(b'stock dummynet')
+        self.known(lib.file_digest(lib.DUMMYNET))
+        # what is loaded: a file name, or the module alone when it is in the kernel
+        self.file, self.path, self.module = None, None, False
+        lib.subprocess.run = self.run_cmd
+
+    def tearDown(self):
+        lib.DUMMYNET, lib.KMOD_DUMMYNET, lib.KMOD_KERNEL_VERSION, lib.subprocess.run = self.saved
+        self.dir.cleanup()
+
+    def known(self, digest):
+        with open(lib.KMOD_DUMMYNET, 'w') as f:
+            f.write(digest + '\n')
+
+    def run_cmd(self, args, **kwargs):
+        self.assertEqual(args[0], '/sbin/kldstat')
+        if args[1:] == ['-q', '-m', 'dummynet']:
+            return lib.subprocess.CompletedProcess(args, 0 if self.module else 1, '', '')
+        wanted = args[-1]
+        out = ''
+        if wanted == self.file:
+            out = '%2d    1 0xffffffff8305f000     7954 %s (%s)\n' % (7, self.file, self.path)
+        return lib.subprocess.CompletedProcess(args, 0 if wanted == self.file else 1, out, '')
+
+    def test_not_loaded(self):
+        self.assertEqual(lib.dummynet_check(), ('match', ''))
+
+    def test_stock_loaded(self):
+        self.file, self.path, self.module = 'dummynet.ko', lib.DUMMYNET, True
+        self.assertEqual(lib.dummynet_check(), ('match', ''))
+
+    def test_built_into_kernel(self):
+        self.module = True
+        state, reason = lib.dummynet_check()
+        self.assertEqual(state, 'mismatch')
+        self.assertIn('built into this kernel', reason)
+
+    def test_fork_loaded(self):
+        # it provides the dummynet module, which is not dummynet in the kernel: the stock file counts
+        self.file, self.path, self.module = 'dummynet_st.ko', '/boot/modules/dummynet_st.ko', True
+        self.assertEqual(lib.dummynet_check(), ('match', ''))
+
+    def test_fork_loaded_other_kernel(self):
+        self.file, self.path, self.module = 'dummynet_st.ko', '/boot/modules/dummynet_st.ko', True
+        self.known('0' * 64)
+        state, reason = lib.dummynet_check()
+        self.assertEqual(state, 'mismatch')
+        self.assertIn('is not the one cake-kmod is built for', reason)
+
+
 class Subtick(unittest.TestCase):
     """ dummynet-st: the setting, and whether the package can be used """
     def setUp(self):
