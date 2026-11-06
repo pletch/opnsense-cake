@@ -14,6 +14,23 @@ built in, the plugin uses that CAKE, and sub-tick release replaces it.
 Plugin Changelog
 ================
 
+1.4.15
+
+* os-cake 1.4.15: on a kernel with CAKE built in, such as OPNsense's CAKE
+  test kernel (opnsense-update -zbkr 26.7.8_4), the plugin refused the
+  kernel and pipes fell back to their own scheduler. It now uses that CAKE,
+  with no module, and the status line says so
+* Sub-tick release is now off by default on every kernel. A setting already
+  saved stays as it is, so an install where it was saved as on keeps
+  dummynet-st; one where nothing was ever saved goes to the stock dummynet
+  and dn_cake.ko. Ticked on a kernel with CAKE built in, dummynet-st and its
+  own CAKE replace the built-in one
+* The CAKE page shows Sub-tick release for, Release interval and Skip ipfw
+  on output only with Sub-tick release ticked
+* dummynet-st 1.0.15: also accepts the CAKE test kernel's dummynet.ko. The
+  module itself is unchanged
+* cake-kmod 1.5.15: unchanged
+
 1.4.14
 
 * os-cake 1.4.14: the status script's "dummynet" field said "mismatch"
