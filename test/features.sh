@@ -117,7 +117,10 @@ done
 result ack-filter $ok "download ${down_no_ack_filter:-?} -> ${down_ack_filter:-?} -> ${down_ack_filter_aggressive:-?} Mbit/s"
 
 echo "== ack-collision"
-cli 'N="sudo ip netns exec"; $N srv ss -ltn | grep -q "0.0.0.0:12869 " ||
+# a server address per download; the standing netserver only listens on 10.10.2.2
+cli 'N="sudo ip netns exec"
+for i in 11 12; do $N srv ip addr replace 10.10.2.$i/24 dev srv0; done
+$N srv ss -ltn | grep -q "0.0.0.0:12869 " ||
     $N srv netserver -L 0.0.0.0 -p 12869 >/dev/null'
 for mode in no-ack-filter ack-filter; do
 	sched besteffort flowblind $mode
