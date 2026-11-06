@@ -108,11 +108,13 @@ digests over a connection (`plugin/sign-server.py`).
 
 ## Installing from the repository
 
-The README's install section has the client setup: a fingerprint file with
-the key's SHA256 and a `cake` repository with `signature_type:
-"fingerprints"`. If the key ever changes, that section, `SECURITY.md` and
-the release notes need the new fingerprint, and every firewall its new
-fingerprint file.
+The README's install section has the client setup, which fetches two files
+from this repository: `plugin/keys/cake-repo.fingerprint`, the key's SHA256,
+and `plugin/cake.conf`, a `cake` repository with `signature_type:
+"fingerprints"`. If the key ever changes, the fingerprint file, `SECURITY.md`
+and the release notes need the new fingerprint, and every firewall its new
+fingerprint file. They are fetched from `main`, so a change there reaches new
+installs at once.
 
 Installed from the repository, `os-cake` shows on the Plugins page as
 provided by the `cake` repository (not orphaned), and updates arrive with

@@ -99,39 +99,46 @@ The packages are ready built for **OPNsense 26.7 (amd64)**, so there is
 nothing to build. They are in a signed package repository, and attached to
 the [releases](https://github.com/pletch/opnsense-cake/releases).
 
-**From the repository** (recommended): as root on the firewall (console or
-ssh, shell option 8), trust the repository's key by its fingerprint, add the
-repository, and install:
+**From the repository** (recommended): bring OPNsense up to date first (the
+Plugins page won't install a plugin on an out-of-date firewall). Then, as root
+on the firewall (console or ssh, shell option 8), trust the repository's key
+and add the repository:
 
 ```sh
 mkdir -p /usr/local/etc/pkg/fingerprints/cake/trusted /usr/local/etc/pkg/fingerprints/cake/revoked
-cat > /usr/local/etc/pkg/fingerprints/cake/trusted/cake-repo <<'EOF'
-function: "sha256"
-fingerprint: "5f20160ba5f94441e79af9f1f1c2fe8ad8dd52cdea612efa838cdc798d2eb502"
-EOF
-cat > /usr/local/etc/pkg/repos/cake.conf <<'EOF'
-cake: {
-  url: "https://pkg.pletch.org/26.7",
-  signature_type: "fingerprints",
-  fingerprints: "/usr/local/etc/pkg/fingerprints/cake",
-  enabled: yes
-}
-EOF
-pkg update -r cake
+fetch -o /usr/local/etc/pkg/fingerprints/cake/trusted/cake-repo https://raw.githubusercontent.com/pletch/opnsense-cake/main/plugin/keys/cake-repo.fingerprint
+fetch -o /usr/local/etc/pkg/repos/cake.conf https://raw.githubusercontent.com/pletch/opnsense-cake/main/plugin/cake.conf
+pkg update
+```
+
+`pkg update` must say `3 packages processed` the first time. If it prints `No
+trusted public keys found` or `No trusted certificate`, the catalogue does not
+match the fingerprint, and pkg installs nothing from the repository, even
+though the command still ends with `All repositories are up to date`. The
+fingerprint is in `/usr/local/etc/pkg/fingerprints/cake/trusted/cake-repo`:
+check it against [Security notes](#security-notes) and the release notes. Both
+files come from this repository on GitHub rather than from the package host,
+so the host alone can't supply a key of its own.
+
+Then, on **System → Firmware → Plugins**, click **Click to view the community
+plugins** at the bottom of the list (`os-cake` is hidden until you do, and the
+search box won't find it), and press **+** on `os-cake`. OPNsense shows its
+*Third party software* notice, as it does for any package not from OPNsense;
+press **Install**. pkg checks every package it installs against the signed
+catalogue, and `os-cake` brings `cake-kmod` and `dummynet-st` along.
+
+Without the GUI, the same install from the shell, after the commands above:
+
+```sh
 pkg install -r cake os-cake
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
-`pkg update -r cake` must say `3 packages processed`. If it prints `No
-trusted public keys found` or `No trusted certificate`, the catalogue does
-not match the fingerprint, and pkg installs nothing from the repository
-(check the fingerprint against [Security notes](#security-notes) and the
-release notes). pkg checks every package it installs against the signed
-catalogue; `os-cake` brings `cake-kmod` and `dummynet-st` along. The last command registers
-the plugin, as the Plugins page does when it installs one; from the shell,
-`pkg` skips that, and System → Firmware → Plugins would list `os-cake` as
-*misconfigured*. A firewall that installed the packages from files moves
-over to the repository with `pkg install -fy -r cake cake-kmod dummynet-st os-cake`.
+The last command registers the plugin, as the Plugins page does when it
+installs one; from the shell, `pkg` skips that, and the Plugins page would
+list `os-cake` as *misconfigured*. A firewall that installed the packages from
+files moves over to the repository with
+`pkg install -fy -r cake cake-kmod dummynet-st os-cake`.
 
 **From the files:** with the versions of the latest release,
 
@@ -295,7 +302,8 @@ Realtek's driver, the **os-realtek-re** plugin, did not stop in any run.
 
 ## Upgrade, roll back and remove
 
-- **Upgrade:** from the repository, `pkg upgrade -r cake`; from files,
+- **Upgrade:** from the repository, **System → Firmware → Updates** or
+  `pkg upgrade -r cake`; from files,
   `pkg add` the new packages over the old ones. The plugin registration is
   kept. The install reloads the shaper, which swaps the loaded module for
   the new one (from os-cake 1.3.4: upgrading to it already does). Before
@@ -307,7 +315,10 @@ Realtek's driver, the **os-realtek-re** plugin, did not stop in any run.
 - **Turn CAKE off** without uninstalling: disable the CAKE entries and
   Apply. The pipes go back to their own scheduler and the module is
   unloaded.
-- **Remove:** `pkg delete os-cake dummynet-st cake-kmod`, then
+- **Remove:** the trash icon on the Plugins page, which also removes
+  `cake-kmod` and `dummynet-st` if the page or `pkg install -r cake os-cake`
+  brought them along. From the shell, or after installing from files:
+  `pkg delete os-cake dummynet-st cake-kmod`, then
   `/usr/local/opnsense/scripts/firmware/register.php remove os-cake`. The
   CAKE entries stay in the configuration, unused. To drop the repository
   too: `rm -r /usr/local/etc/pkg/repos/cake.conf /usr/local/etc/pkg/fingerprints/cake`.
