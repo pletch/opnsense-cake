@@ -210,17 +210,30 @@ So to test the kernel's own CAKE, leave the box unticked, and untick it if it wa
 already on. `dummynet-st` lists this one kernel, `26.7.8_4`: on any other kernel
 with CAKE built in, the plugin stays on that kernel's CAKE and the page says why.
 
-Without the plugin, remove it (`pkg delete os-cake dummynet-st cake-kmod`), set up
-the pipes, queues and rules on **Firewall → Shaper**, then set CAKE on each pipe,
-using the numbers `dnctl pipe show` lists:
+Without the plugin, remove it (`pkg delete os-cake dummynet-st cake-kmod`) and set
+up the pipes, queues and rules on **Firewall → Shaper**, with the rules pointing at
+the **queues**: traffic from a rule aimed at a pipe never reaches CAKE. Then set CAKE
+on each pipe, using the numbers `dnctl pipe show` lists. For example, a download pipe
+and an upload pipe with the ACK filter:
 
 ```
 dnctl sched 10000 config pipe 10000 type cake diffserv4 triple-isolate
-dnctl sched show
+dnctl sched 10001 config pipe 10001 type cake diffserv3 triple-isolate ack-filter
 ```
 
-A reboot, or Apply on the Shaper page, puts the pipe's own scheduler back, so run
-it again after either. The options are in `man dnctl`.
+Rates and queues stay as they were. Other options include `besteffort`, `flows`,
+`dual-srchost`, `dual-dsthost`, `wash`, `ingress`, `overhead 18 mpu 64`, and presets
+such as `docsis` and `pppoe-ptm`; see `man dnctl`. To check it:
+
+```
+dnctl sched show
+sysctl net.inet.ip.dummynet.cake.stats
+kldstat | grep -E 'dummynet|dn_cake'
+```
+
+`dnctl sched show` should say `type CAKE`, and `kldstat` should list only
+`dummynet.ko`. A reboot, or Apply on the Shaper page, puts the pipe's own scheduler
+back, so run the commands again after either.
 
 Back to the stock kernel:
 
@@ -399,6 +412,8 @@ CAKE says whether the module is loaded and how many pipes use it, or why
 it can't be used. Below it, each pipe's statistics per tin, as
 `tc -s qdisc` shows them on Linux.
 
+![The CAKE page under load: the status line, the settings, the CAKE entries and each pipe's statistics per tin](docs/cake-page.png)
+
 **What happens when OPNsense updates?** If the update changes
 `dummynet.ko`, or moves to a new FreeBSD release, the plugin no longer
 loads the module: the pipes keep running with their own scheduler (FQ-CoDel
@@ -513,6 +528,7 @@ patches/ipfw-cake.patch               ipfw(8)/dnctl(8): "type cake" parameters, 
 patches/opnsense-src-cake.patch       opnsense/src: scheduler in dummynet.ko, wire_len hook, ipfw patch
 patches/opnsense-core-cake.patch      opnsense/core: Traffic Shaper support (older option set)
 test/                                 latency, robustness, isolation, overhead, feature, perf and fuzz tests
+docs/cake-page.png                    the CAKE page, shown in the FAQ
 LICENSE                               BSD-3-Clause (scheduler) and BSD-2-Clause (everything else)
 SECURITY.md                           how to report vulnerabilities, verifying packages
 FREEBSD.md                            CAKE on FreeBSD without the plugin, patches
