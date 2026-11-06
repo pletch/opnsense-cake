@@ -5,7 +5,7 @@
     <items>
         <general>
             <subtick type="BooleanField">
-                <Default>1</Default>
+                <Default>0</Default>
                 <Required>Y</Required>
             </subtick>
             <release_us type="IntegerField">

@@ -34,12 +34,14 @@
     same way: the rules go in unchanged, which frees and unloads it, then the new one is
     loaded and the CAKE rules go in. The CAKE service shows as running when every enabled
     CAKE entry got CAKE.
-    With dummynet-st installed and not switched off, the CAKE rules go in on the forked
+    With sub-tick release ticked on the page, the CAKE rules go in on the forked
     dummynet_st.ko instead (CAKE built in, packets released between ticks), loaded in place
     of dummynet.ko and dn_cake.ko; without CAKE entries, or when it does not match the
     kernel or load, the stock dummynet comes back. On request, and when no ipfw rule acts on
     output (keep_tag_blockers()), the fork lets released "in" packets pass ipfw on output
     without walking its rules.
+    A kernel whose own dummynet has CAKE needs neither module: unless dummynet-st replaces it
+    as above, the CAKE rules go in on it, with the checks on dn_cake.ko skipped.
 """
 import fcntl
 import os
@@ -48,7 +50,7 @@ import sys
 import syslog
 import tempfile
 import time
-from lib import cake_enabled, cake_pipes, kmod_status, kmod_current, set_active, DNCTL, \
+from lib import cake_enabled, cake_pipes, dnctl_path, kmod_status, kmod_current, set_active, \
     keep_tag_blockers, keep_tag_wanted, load_dummynet, rules_on_cake_pipes, set_keep_tag, \
     set_release, shaper_pipes, st_active, st_loaded, st_status, st_trying, subtick_settings, ST_KMOD
 
@@ -133,7 +135,7 @@ def load_cake(rules_file, pipes):
     with tempfile.NamedTemporaryFile('w', prefix='dnctl-cake.', suffix='.conf', delete=False) as f_out:
         f_out.write(''.join(rules))
     try:
-        return os.spawnv(os.P_WAIT, DNCTL, ['dnctl', f_out.name])
+        return os.spawnv(os.P_WAIT, dnctl_path(), ['dnctl', f_out.name])
     finally:
         os.unlink(f_out.name)
 
@@ -155,7 +157,7 @@ if __name__ == '__main__':
         bypassed = rules_on_cake_pipes()
         for error in bypassed:
             syslog.syslog(syslog.LOG_WARNING, error)
-        # dummynet-st, unless switched off: dummynet with CAKE built in, releasing
+        # dummynet-st, when ticked: dummynet with CAKE built in, releasing
         # packets between ticks. Otherwise, or when it does not match the kernel or
         # does not load, the stock dummynet with dn_cake.ko.
         st_wanted, release_us, scope = subtick_settings()
@@ -163,7 +165,8 @@ if __name__ == '__main__':
         # for CAKE pipes, or for all: also for a shaper without CAKE entries
         st_needed = bool(pipes) or (scope == 'all' and shaper_pipes(rules_file))
         if st_needed and st_wanted and not st['usable']:
-            syslog.syslog(syslog.LOG_WARNING, '%s, using the stock dummynet' % st['reason'])
+            syslog.syslog(syslog.LOG_WARNING, '%s, using %s' % (
+                st['reason'], "the kernel's dummynet" if st['builtin'] else 'the stock dummynet'))
         fork = st_needed and st_wanted and st['usable']
         if not load_dummynet(fork) and fork:
             syslog.syslog(syslog.LOG_WARNING, 'loading %s failed, using the stock dummynet' % ST_KMOD)

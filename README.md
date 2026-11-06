@@ -65,22 +65,22 @@ More documentation:
 ## Install on OPNsense
 
 The plugin route changes none of OPNsense's own files and survives its
-updates, but by default it replaces part of the kernel at runtime: the
-wrapper swaps a forked dummynet (`dummynet_st.ko`, in beta) in for the
-stock `dummynet.ko`. To stay on the stock dummynet, untick *Sub-tick
-release* on the CAKE page and Apply. There are three packages:
+updates. By default it uses the stock dummynet with `dn_cake.ko`. Ticking
+*Sub-tick release* on the CAKE page and pressing Apply replaces part of the
+kernel at runtime: the wrapper swaps a forked dummynet (`dummynet_st.ko`, in
+beta) in for the stock `dummynet.ko`. There are three packages:
 
 - **`cake-kmod`**: `/boot/modules/dn_cake.ko`, and a dnctl that can set CAKE
   parameters, in `/usr/local/libexec/cake/`. It is built for one OPNsense
   series (26.7 is FreeBSD 15.1) and records that release.
-- **`dummynet-st`** (beta, used by default): `/boot/modules/dummynet_st.ko`,
+- **`dummynet-st`** (beta, off by default): `/boot/modules/dummynet_st.ko`,
   dummynet with CAKE built in that releases packets between clock ticks
   ([SUBTICK.md](SUBTICK.md)), built and checked like `cake-kmod`. Nothing
   loads it at boot: the wrapper swaps it in for the stock `dummynet.ko`
   while CAKE entries are enabled (or, with *Sub-tick release for* set to
   *All pipes*, whenever the shaper has pipes, so FQ-CoDel and the other
-  schedulers release between ticks too), unless *Sub-tick release* is
-  switched off on the CAKE page, and uses the stock dummynet and
+  schedulers release between ticks too), if *Sub-tick release* is
+  ticked on the CAKE page, and uses the stock dummynet and
   `dn_cake.ko` when it does not match the kernel or does not load.
 - **`os-cake`**: a **Firewall → Shaper → CAKE** page and a dnctl wrapper.
   It depends on `cake-kmod` and `dummynet-st`.
@@ -181,6 +181,57 @@ Then:
 3. With a link type set, the pipe bandwidth can be close to the line or sync
    rate; without one, set it 5–15% below.
 4. **If OPNsense runs in a VM, set `kern.hz` to 1000.** See below.
+
+### Sub-tick release and OPNsense's CAKE test kernel
+
+**Sub-tick release** on the CAKE page is off by default. Off, CAKE runs on the
+stock dummynet with `dn_cake.ko`. Ticked, `dummynet-st` and its own CAKE release
+packets between clock ticks. A setting already saved as on stays on through an
+upgrade: from os-cake 1.4.15 the default only applies where none is saved.
+
+An OPNsense maintainer has built a snapshot kernel with this project's CAKE
+inside its `dummynet.ko`, as a step towards CAKE in OPNsense itself. It is a test
+build, from the `cake` branch of `opnsense/src`, not a supported release. To try it:
+
+```
+opnsense-update -zbkr 26.7.8_4
+reboot
+```
+
+With the plugin installed, the CAKE page then works as usual, and its status line
+says which CAKE is in use:
+
+| *Sub-tick release* | What runs | Status line |
+|---|---|---|
+| Off | the kernel's built-in CAKE, with no module | "CAKE is built into this kernel" |
+| On | `dummynet-st` and its own CAKE, **in place of** the built-in one | "It replaces the CAKE built into this kernel." |
+
+So to test the kernel's own CAKE, leave the box unticked, and untick it if it was
+already on. `dummynet-st` lists this one kernel, `26.7.8_4`: on any other kernel
+with CAKE built in, the plugin stays on that kernel's CAKE and the page says why.
+
+Without the plugin, remove it (`pkg delete os-cake dummynet-st cake-kmod`), set up
+the pipes, queues and rules on **Firewall → Shaper**, then set CAKE on each pipe,
+using the numbers `dnctl pipe show` lists:
+
+```
+dnctl sched 10000 config pipe 10000 type cake diffserv4 triple-isolate
+dnctl sched show
+```
+
+A reboot, or Apply on the Shaper page, puts the pipe's own scheduler back, so run
+it again after either. The options are in `man dnctl`.
+
+Back to the stock kernel:
+
+```
+opnsense-update -bkr 26.7.8
+reboot
+```
+
+One tester reported the console stopping at "Starting device manager" on this
+kernel, with the system still coming up; going back to the stock kernel cleared it.
+This has not been reproduced or explained. Tested here on a VM only.
 
 ### OPNsense in a VM: set `kern.hz=1000`
 
@@ -353,7 +404,10 @@ it can't be used. Below it, each pipe's statistics per tin, as
 loads the module: the pipes keep running with their own scheduler (FQ-CoDel
 or whatever they are set to), and the CAKE page says why. A `cake-kmod`
 built for the new kernel brings CAKE back. Updates that leave
-`dummynet.ko` unchanged, which are most of them, keep CAKE.
+`dummynet.ko` unchanged, which are most of them, keep CAKE. A kernel with
+CAKE built in, such as a test build from `opnsense-src-cake.patch`, needs no
+module: the plugin uses that CAKE. Ticking *Sub-tick release* there replaces it
+with `dummynet-st` and its own CAKE, if `dummynet-st` lists that kernel.
 
 **Why does the firmware page say it can't find the repository?** If this
 project's package repository can't be reached, `pkg update` fails as a whole,

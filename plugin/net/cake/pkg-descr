@@ -5,10 +5,11 @@ the traffic shaper use it in place of FQ-CoDel.
 
 The scheduler is an unofficial kernel module (cake-kmod) built for a
 specific OPNsense series. If it does not match the running kernel,
-the shaper keeps running with the pipes' own scheduler. From 1.4.1, the
-plugin uses dummynet-st by default instead: dummynet with CAKE built in,
+the shaper keeps running with the pipes' own scheduler. Sub-tick release,
+off by default, uses dummynet-st instead: dummynet with its own CAKE,
 which releases packets between clock ticks; when that does not match the
-kernel, the stock dummynet and cake-kmod are used.
+kernel, the stock dummynet and cake-kmod are used. On a kernel with CAKE
+built in, the plugin uses that CAKE, and sub-tick release replaces it.
 
 Plugin Changelog
 ================

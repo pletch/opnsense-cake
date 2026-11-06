@@ -90,7 +90,7 @@ git -C "${WRK}/src" sparse-checkout set sys sbin/ipfw share/mk
 git -C "${WRK}/src" checkout -q "${SRC_COMMIT}"
 
 SRCDIR="${WRK}/src" DUMMYNET="${WRK}/kernel/boot/kernel/dummynet.ko" \
-    KERNEL_VERSION="${KERNEL_VERSION}" \
+    KERNEL_VERSION="${KERNEL_VERSION}" ST_ALSO_DUMMYNET="${ST_ALSO_DUMMYNET:-}" \
     SERIES="${SERIES}" PLUGINS_COMMIT="${PLUGINS_COMMIT}" \
     PLUGINS_TREE="${WRK}/plugins" sh "${HERE}/build.sh" "${OUT}"
 

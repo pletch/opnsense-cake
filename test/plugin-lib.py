@@ -339,6 +339,145 @@ class LoadedModule(unittest.TestCase):
 
 
 
+class CakeBuiltin(unittest.TestCase):
+    """ a kernel whose own dummynet has CAKE: told from dn_cake.ko and the fork, and usable without
+    the checks on dn_cake.ko; kldstat and kldload faked """
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = lib.DUMMYNET, lib.DNCTL, lib.BASE_DNCTL, lib.KMOD, lib.subprocess.run
+        d = self.dir.name
+        lib.DUMMYNET, lib.DNCTL, lib.BASE_DNCTL, lib.KMOD = (os.path.join(d, n) for n in (
+            'dummynet.ko', 'dnctl', 'base-dnctl', 'dn_cake.ko'))
+        self.write(lib.DUMMYNET, b'stock dummynet')
+        self.write(lib.BASE_DNCTL, b'stock dnctl')
+        # what kldstat reports
+        self.modules, self.files = set(), set()
+        self.kldload = []
+        lib.subprocess.run = self.run_cmd
+
+    def tearDown(self):
+        lib.DUMMYNET, lib.DNCTL, lib.BASE_DNCTL, lib.KMOD, lib.subprocess.run = self.saved
+        self.dir.cleanup()
+
+    def write(self, path, data, mode=0o644):
+        with open(path, 'wb') as f:
+            f.write(data)
+        os.chmod(path, mode)
+
+    def run_cmd(self, args, **kwargs):
+        rc = 1
+        if args[:3] == ['/sbin/kldstat', '-q', '-m']:
+            rc = 0 if args[3] in self.modules else 1
+        elif args[:3] == ['/sbin/kldstat', '-q', '-n']:
+            rc = 0 if args[3] in self.files else 1
+        elif args[0] == '/sbin/kldload':
+            self.kldload.append(args[-1])
+            self.modules |= {'dummynet', 'dn_cake'} if b'dn_cake' in open(lib.DUMMYNET, 'rb').read() else {'dummynet'}
+            rc = 0
+        return lib.subprocess.CompletedProcess(args, rc, '', '')
+
+    def builtin_kernel(self):
+        self.write(lib.DUMMYNET, b'dummynet with dn_cake inside')
+
+    def test_stock_not_loaded(self):
+        self.assertFalse(lib.cake_builtin())
+
+    def test_builtin_not_loaded(self):
+        self.builtin_kernel()
+        self.assertTrue(lib.cake_builtin())
+
+    def test_builtin_loaded(self):
+        self.modules = {'dummynet', 'dn_cake'}
+        self.assertTrue(lib.cake_builtin())
+
+    def test_module_loaded(self):
+        self.modules, self.files = {'dummynet', 'dn_cake'}, {'dummynet.ko', 'dn_cake.ko'}
+        self.assertFalse(lib.cake_builtin())
+
+    def test_fork_loaded(self):
+        self.modules, self.files = {'dummynet', 'dn_cake'}, {'dummynet_st.ko'}
+        self.assertFalse(lib.cake_builtin())
+
+    def test_old_dummynet_still_loaded(self):
+        """ the new kernel is installed, but runs after the next reboot """
+        self.builtin_kernel()
+        self.modules, self.files = {'dummynet'}, {'dummynet.ko'}
+        self.assertFalse(lib.cake_builtin())
+
+    def test_dnctl_base_knows_cake(self):
+        self.builtin_kernel()
+        self.write(lib.BASE_DNCTL, b'... triple-isolate ...')
+        self.assertEqual(lib.dnctl_path(), lib.BASE_DNCTL)
+
+    def test_dnctl_base_older_than_kernel(self):
+        self.builtin_kernel()
+        self.assertEqual(lib.dnctl_path(), lib.DNCTL)
+
+    def test_dnctl_stock_kernel(self):
+        self.write(lib.BASE_DNCTL, b'... triple-isolate ...')
+        self.assertEqual(lib.dnctl_path(), lib.DNCTL)
+
+    def test_status_ignores_module_checks(self):
+        self.builtin_kernel()
+        self.write(lib.DNCTL, b'', 0o755)
+        status = lib.kmod_status()
+        self.assertTrue(status['builtin'])
+        self.assertTrue(status['usable'])
+        self.assertEqual(status['reason'], '')
+        self.assertEqual(self.kldload, [])
+
+    def test_status_load(self):
+        self.builtin_kernel()
+        self.write(lib.DNCTL, b'', 0o755)
+        status = lib.kmod_status(load=True)
+        self.assertEqual(self.kldload, ['dummynet'])
+        self.assertTrue(status['loaded'])
+        self.assertTrue(status['usable'])
+
+    def test_status_no_dnctl(self):
+        self.builtin_kernel()
+        status = lib.kmod_status(load=True)
+        self.assertFalse(status['usable'])
+        self.assertIn('does not know it', status['reason'])
+        self.assertEqual(self.kldload, [])
+
+    def fork_status(self, general, listed=True):
+        """ st_status on a kernel with CAKE built in, with a dummynet-st built for this FreeBSD
+        release, and this kernel's dummynet.ko in its list or not """
+        names = ('ST_KMOD', 'ST_KERNEL', 'ST_KERNEL_VERSION', 'ST_DUMMYNET', 'ST_TRYING', 'ST_ACTIVE', 'ST_ACTIVE_BOOT',
+                 'ST_UNCLEAN', 'ST_HELD', 'ST_CHECKED', 'CRASH_DIR', 'CONFIG')
+        saved = [getattr(lib, n) for n in names]
+        for n in names:
+            setattr(lib, n, os.path.join(self.dir.name, n))
+        try:
+            self.builtin_kernel()
+            self.write(lib.ST_KMOD, b'')
+            self.write(lib.ST_KERNEL, os.uname().release.split('-')[0].encode())
+            self.write(lib.ST_KERNEL_VERSION, b'FreeBSD 15.1-RELEASE stable/26.7-n1-abc SMP\n')
+            self.write(lib.ST_DUMMYNET, ((lib.file_digest(lib.DUMMYNET) if listed else 'another') + '\n').encode())
+            self.write(lib.CONFIG, ('<opnsense><OPNsense><Cake><general>%s</general></Cake></OPNsense></opnsense>'
+                                    % general).encode())
+            return lib.st_status()
+        finally:
+            for n, v in zip(names, saved):
+                setattr(lib, n, v)
+
+    def test_fork_lists_this_kernel(self):
+        status = self.fork_status('')
+        self.assertTrue(status['builtin'])
+        self.assertTrue(status['usable'])
+
+    def test_fork_other_kernel(self):
+        status = self.fork_status('', listed=False)
+        self.assertFalse(status['usable'])
+        self.assertIn('its built-in CAKE is used', status['reason'])
+
+    def test_status_cake_kmod_absent_base_knows(self):
+        self.builtin_kernel()
+        self.write(lib.BASE_DNCTL, b'... triple-isolate ...')
+        self.assertTrue(lib.kmod_status()['usable'])
+
+
 class DummynetCheck(unittest.TestCase):
     """ dummynet_check: which dummynet.ko is compared with the one cake-kmod is built against,
     with kldstat faked """
@@ -455,10 +594,12 @@ class Subtick(unittest.TestCase):
         with open(lib.ST_DUMMYNET, 'w') as f:
             f.write((known or lib.file_digest(lib.DUMMYNET)) + '\n')
 
-    def test_settings_default_on(self):
-        # a config.xml from before the setting: on, the default interval
+    def test_settings_default_off(self):
+        # a config.xml from before the settings, or without this one: off, the default interval
         self.general(None)
-        self.assertEqual(lib.subtick_settings(), (True, lib.RELEASE_DEFAULT, 'cake'))
+        self.assertEqual(lib.subtick_settings(), (False, lib.RELEASE_DEFAULT, 'cake'))
+        self.general({'release_us': '250'})
+        self.assertEqual(lib.subtick_settings(), (False, 250, 'cake'))
 
     def test_settings(self):
         self.general({'subtick': '0', 'release_us': '100'})

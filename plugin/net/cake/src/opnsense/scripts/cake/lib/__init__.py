@@ -41,6 +41,7 @@ KMOD_DUMMYNET = '/usr/local/libexec/cake/dummynet.sha256'
 KMOD_KERNEL_VERSION = '/usr/local/libexec/cake/kernel.version'
 DUMMYNET = '/boot/kernel/dummynet.ko'
 DNCTL = '/usr/local/libexec/cake/dnctl'
+BASE_DNCTL = '/sbin/dnctl'
 # which dn_cake.ko the wrapper loaded: kld id, boot time, file and its SHA256
 KMOD_LOADED = '/var/run/cake-kmod.loaded'
 # the pidfile of the CAKE entry in the services list, see plugins.inc.d/cake.inc
@@ -291,6 +292,39 @@ def dummynet_file():
     return DUMMYNET
 
 
+def file_contains(path, text):
+    """ whether a file holds these bytes, False if it cannot be read """
+    try:
+        with open(path, 'rb') as f_in:
+            return text in f_in.read()
+    except OSError:
+        return False
+
+
+def cake_builtin():
+    """ whether CAKE comes with this kernel's dummynet (opnsense-src-cake.patch), so that
+    dn_cake.ko does not apply: the loaded dummynet has the dn_cake module without that
+    file, or, with none loaded yet, the one kldload picks declares it. The fork has CAKE
+    too, but is a package of its own with its own checks.
+    :return: bool
+    """
+    if st_loaded():
+        return False
+    if subprocess.run(['/sbin/kldstat', '-q', '-m', 'dummynet']).returncode == 0:
+        return subprocess.run(['/sbin/kldstat', '-q', '-m', 'dn_cake']).returncode == 0 \
+            and subprocess.run(['/sbin/kldstat', '-q', '-n', 'dn_cake.ko']).returncode != 0
+    return file_contains(DUMMYNET, b'dn_cake')
+
+
+def dnctl_path():
+    """ the dnctl to set CAKE with: with CAKE built in the kernel, the base system's, from
+    the same source, if it is new enough to know CAKE (kernel and base update separately);
+    otherwise cake-kmod's """
+    if cake_builtin() and file_contains(BASE_DNCTL, b'triple-isolate'):
+        return BASE_DNCTL
+    return DNCTL
+
+
 def dummynet_check():
     """ whether the dummynet.ko in use is one cake-kmod is built against
     :return: (state, reason): state is 'match', 'unchecked' for a cake-kmod
@@ -372,7 +406,8 @@ def kmod_current():
 
 
 def kmod_status(load=False):
-    """ whether dn_cake.ko is installed, built for the running kernel and loaded
+    """ whether dn_cake.ko is installed, built for the running kernel and loaded, or CAKE
+    comes with the kernel (builtin), which needs none of that, only a dnctl that can set it
     :param load: load the module if it is usable but not loaded yet
     :return: dict
     """
@@ -382,8 +417,22 @@ def kmod_status(load=False):
         'kernel_running': os.uname().release,
         'loaded': subprocess.run(['/sbin/kldstat', '-q', '-m', 'dn_cake']).returncode == 0,
         'dummynet': None,
+        'builtin': cake_builtin(),
         'reason': ''
     }
+    if result['builtin']:
+        result['installed'], result['dummynet'], result['current'] = True, 'builtin', None
+        if dnctl_path() == DNCTL and not os.access(DNCTL, os.X_OK):
+            result['reason'] = 'CAKE is built into this kernel, but %s does not know it and cake-kmod is ' \
+                               'not installed: update the base system' % BASE_DNCTL
+        elif load:
+            subprocess.run(['/sbin/kldload', '-n', 'dummynet'], capture_output=True)
+            result['loaded'] = subprocess.run(['/sbin/kldstat', '-q', '-m', 'dn_cake']).returncode == 0
+            if not result['loaded']:
+                result['reason'] = 'loading dummynet failed'
+        result['usable'] = result['reason'] == ''
+        return result
+
     if os.path.isfile(KMOD_KERNEL):
         with open(KMOD_KERNEL) as f_in:
             result['kernel_built'] = f_in.read().strip()
@@ -414,16 +463,16 @@ def kmod_status(load=False):
 def subtick_settings():
     """ whether to use dummynet-st, the longest a due packet waits for release, and for
     which pipes: 'cake' (while a CAKE entry is enabled) or 'all' (while the shaper has a
-    pipe). On, for CAKE pipes, unless set otherwise, also with a config.xml from before
-    the settings.
+    pipe). Off unless ticked on the CAKE page, also with a config.xml from before the
+    settings.
     :return: (bool, us, scope)
     """
     general = ET.parse(CONFIG).getroot().find('./OPNsense/Cake/general')
     if general is None:
-        return True, RELEASE_DEFAULT, 'cake'
+        return False, RELEASE_DEFAULT, 'cake'
     release = int_value(general.findtext('release_us'), 10, 10000)
     scope = 'all' if general.findtext('subtick_scope') == 'all' else 'cake'
-    return (general.findtext('subtick') or '1') == '1', release or RELEASE_DEFAULT, scope
+    return general.findtext('subtick') == '1', release or RELEASE_DEFAULT, scope
 
 
 def shaper_pipes(rules_file):
@@ -454,10 +503,12 @@ def st_status():
     """ whether dummynet-st is installed, built for the running kernel, and loaded. Like
     cake-kmod, it is built for one FreeBSD release and replaces one stock dummynet.ko,
     whose SHA256 it records; the stock file is checked on disk, as the fork may be the
-    one loaded.
+    one loaded. On a kernel with CAKE built in (builtin), it replaces that dummynet and its
+    CAKE when it lists that dummynet.ko.
     :return: dict
     """
-    result = {'installed': os.path.isfile(ST_KMOD), 'loaded': st_loaded(), 'reason': ''}
+    builtin = file_contains(DUMMYNET, b'dn_cake')
+    result = {'installed': os.path.isfile(ST_KMOD), 'loaded': st_loaded(), 'reason': '', 'builtin': builtin}
     running = os.uname().release.split('-')[0]
     if not result['installed']:
         result['reason'] = 'dummynet-st is not installed'
@@ -474,7 +525,8 @@ def st_status():
                                'used until a dummynet-st for this release is installed' % (
                                    built_version(ST_KERNEL_VERSION) or built, os.uname().release)
         elif file_digest(DUMMYNET) not in known:
-            result['reason'] = kernel_reason('dummynet-st', ST_KERNEL_VERSION, 'the stock dummynet is used')
+            result['reason'] = kernel_reason('dummynet-st', ST_KERNEL_VERSION,
+                                             'its built-in CAKE is used' if builtin else 'the stock dummynet is used')
     # kept out after a crash, until the retry action
     result['held'] = False
     if result['reason'] == '' and os.path.exists(ST_TRYING) and not result['loaded']:

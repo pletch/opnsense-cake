@@ -3,8 +3,8 @@
 A forked `dummynet.ko` that releases packets between ticks: the plan, what
 was measured along the way, and the reviews since. It ships as the
 `dummynet-st` package (from opnsense-cake 1.5.1, `dummynet-st` 1.0.1), and
-os-cake uses it by default, swapping `dummynet_st.ko` in for the stock
-`dummynet.ko` at runtime; *Sub-tick release* on the CAKE page turns it off.
+os-cake uses it when *Sub-tick release* is ticked on the CAKE page (off by
+default), swapping `dummynet_st.ko` in for the stock `dummynet.ko` at runtime.
 It is beta: tested on the bench and one live firewall.
 
 ## Why the pipe is tick-bound
@@ -590,7 +590,7 @@ the same flush, `kldload dummynet` and os-cake's `dnctl.py`.
 measurable on this firewall at 100 µs and 1.5–1.8 Gbit/s, releases are on
 time, and bursts shrink as modelled. Phase 6 decides what to do with it.
 
-### Phase 6: the package, on by default
+### Phase 6: the package, on by default (off from os-cake 1.4.15)
 
 The fork ships as a third package, `dummynet-st` (`plugin/dummynet-st/`,
 built by `plugin/build.sh` with the others and so by CI): the release

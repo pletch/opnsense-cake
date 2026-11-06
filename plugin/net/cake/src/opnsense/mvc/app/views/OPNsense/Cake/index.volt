@@ -137,8 +137,14 @@
                     $status.addClass("alert-success").text(
                         "{{ lang._('dummynet-st is loaded, releasing packets at most %s us after they are due; %s pipes use its CAKE.') }}"
                         .replace("%s", st.now_release_us).replace("%s", data.schedulers.length) +
+                        (st.builtin ? " {{ lang._('It replaces the CAKE built into this kernel.') }}" : "") +
                         (st.keep_tag && st.keep_tag.on
                             ? " {{ lang._('Traffic shaped inbound skips ipfw on output.') }}" : "")
+                    );
+                } else if (data.usable && data.builtin) {
+                    $status.addClass("alert-success").text(
+                        "{{ lang._('CAKE is built into this kernel, %s pipes use it.') }}"
+                        .replace("%s", data.schedulers.length)
                     );
                 } else if (data.usable) {
                     $status.addClass("alert-success").text(
@@ -198,9 +204,21 @@
             }
         );
 
+        /**
+         * these settings act through dummynet-st: shown only with sub-tick release ticked
+         */
+        function showSubtickSettings() {
+            let on = document.getElementById("cake.general.subtick").checked;
+            ["subtick_scope", "release_us", "keep_tag"].forEach(function(name) {
+                $(document.getElementById("row_cake.general." + name)).toggle(on);
+            });
+        }
+        $(document.getElementById("cake.general.subtick")).change(showSubtickSettings);
+
         mapDataToFormUI({'frm_general': "/api/cake/settings/get"}).done(function() {
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
+            showSubtickSettings();
         });
 
         $("#reconfigureAct").SimpleActionButton({

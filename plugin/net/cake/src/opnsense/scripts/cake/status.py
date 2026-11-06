@@ -31,9 +31,8 @@
 import json
 import subprocess
 import xml.etree.ElementTree as ET
-from lib import cake_enabled, cake_pipes, keep_tag_blockers, keep_tag_wanted, kmod_status, \
-    rules_on_cake_pipes, set_active, shaper_pipes, st_status, subtick_settings, CONFIG, DNCTL, \
-    RELEASE_DEFAULT
+from lib import cake_enabled, cake_pipes, dnctl_path, keep_tag_blockers, keep_tag_wanted, kmod_status, \
+    rules_on_cake_pipes, set_active, shaper_pipes, st_status, subtick_settings, CONFIG, RELEASE_DEFAULT
 
 # the shaper rules rc.d/dnctl hands the wrapper
 SHAPER_RULES = '/usr/local/etc/dnctl.conf'
@@ -108,7 +107,7 @@ def subtick_status():
     try:
         result['enabled'], result['release_us'], result['scope'] = subtick_settings()
     except (OSError, ET.ParseError):
-        result['enabled'], result['release_us'], result['scope'] = True, RELEASE_DEFAULT, 'cake'
+        result['enabled'], result['release_us'], result['scope'] = False, RELEASE_DEFAULT, 'cake'
     if result['loaded']:
         for name in ['release_us', 'release_wakeups', 'release_pkts', 'release_late_us',
                      'release_late_max', 'release_catchups', 'release_keep_tag']:
@@ -159,8 +158,9 @@ if __name__ == '__main__':
     # the page offers the retry action for a crash that keeps it out
     st['retry'] = st_needed and st['enabled'] and st['held']
     if st_needed and st['enabled'] and not st['loaded']:
-        result['warnings'].append('dummynet-st is not in use: %s; the stock dummynet and dn_cake.ko are used '
-                                  'instead (see the system log)' % (st['reason'] or 'it did not load'))
+        result['warnings'].append('dummynet-st is not in use: %s; %s used instead (see the system log)' % (
+            st['reason'] or 'it did not load',
+            "the kernel's built-in CAKE is" if st['builtin'] else 'the stock dummynet and dn_cake.ko are'))
     kt = st['keep_tag']
     if st['loaded'] and kt['wanted'] and not kt['on']:
         for blocker in kt['blockers'] or ['Apply has not run since it was ticked']:
@@ -180,7 +180,7 @@ if __name__ == '__main__':
     cake_loaded = result['loaded'] or st['loaded']
     if cake_loaded:
         sched = None
-        for line in subprocess.run([DNCTL, 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):
+        for line in subprocess.run([dnctl_path(), 'sched', 'show'], capture_output=True, text=True).stdout.split('\n'):
             parts = line.split()
             if len(parts) > 3 and parts[0] == 'sched' and parts[2] == 'type':
                 sched = parts[1] if parts[3] == 'CAKE' else None

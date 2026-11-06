@@ -9,7 +9,7 @@ OPNsense machine of the series they are for:
 | package | contents |
 |---|---|
 | `cake-kmod` | `/boot/modules/dn_cake.ko`, a CAKE capable dnctl in `/usr/local/libexec/cake/`, and the FreeBSD release and `dummynet.ko` (SHA256) they are built for |
-| `dummynet-st` | `/boot/modules/dummynet_st.ko`, dummynet with CAKE built in and sub-tick release ([SUBTICK.md](../SUBTICK.md)), and the FreeBSD release and stock `dummynet.ko` it replaces |
+| `dummynet-st` | `/boot/modules/dummynet_st.ko`, off by default, dummynet with CAKE built in and sub-tick release ([SUBTICK.md](../SUBTICK.md)), and the FreeBSD release and stock `dummynet.ko` it replaces |
 | `os-cake` | the Firewall → Shaper → CAKE page and the dnctl wrapper; depends on `cake-kmod` and `dummynet-st` |
 
 Neither changes a file of OPNsense itself, so they survive its updates. If the

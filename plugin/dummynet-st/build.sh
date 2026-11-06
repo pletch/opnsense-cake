@@ -61,6 +61,10 @@ echo "${KERNEL_VERSION}" | awk '{ print $2 }' | cut -d- -f1 \
 echo "${KERNEL_VERSION}" > "${STAGE}/usr/local/libexec/dummynet-st/kernel.version"
 sha256 -q "${DUMMYNET:-/boot/kernel/dummynet.ko}" \
     > "${STAGE}/usr/local/libexec/dummynet-st/dummynet.sha256"
+# and any others it is tested on (build.conf)
+for D in ${ST_ALSO_DUMMYNET:-}; do
+	echo "${D}" >> "${STAGE}/usr/local/libexec/dummynet-st/dummynet.sha256"
+done
 # dummynet's licence (its sources' first header) and CAKE's
 {
 	sed -n '/^\/\*-/,/^ \*\//p' "${SRCDIR}/sys/netpfil/ipfw/ip_dummynet.c"
