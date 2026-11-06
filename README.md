@@ -144,8 +144,10 @@ files moves over to the repository with
 
 ```sh
 cd /tmp
-R=https://github.com/pletch/opnsense-cake/releases/download/v1.5.14
-fetch $R/cake-kmod-1.5.14.pkg $R/dummynet-st-1.0.14.pkg $R/os-cake-1.4.14.pkg $R/SHA256SUMS
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.14/cake-kmod-1.5.14.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.14/dummynet-st-1.0.14.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.14/os-cake-1.4.14.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.14/SHA256SUMS
 sha256sum -c SHA256SUMS
 pkg add cake-kmod-1.5.14.pkg
 pkg add dummynet-st-1.0.14.pkg
