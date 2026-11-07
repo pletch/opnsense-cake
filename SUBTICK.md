@@ -1442,6 +1442,43 @@ option solves the same problem by looking up conntrack; pf would need
 the state's original address passed to dummynet. Until then pf "out" is
 no use for upload behind NAT with host isolation.
 
+**Dummynet's thread** (2026-11-07; the i5 at 860 Mbit/s each way, ipfw
+"in", no RSS, and the Z8350 at 200 with RSS). On the i5 that thread is
+the busiest, at 61-66% of a CPU whatever the NIC's queue count, while
+each receive thread does 3-16%. Little of it is dummynet's: timing each
+function on that thread with DTrace (`bench-kit/dntime.d`, which counts
+only calls under `dummynet_task()` and `dummynet_fine_task()`;
+`results/dnthr-time-in-900.txt`), CAKE's dequeue is about 0.4 µs a
+packet, pf about 0.6 and ipfw's output pass about 0.4. Almost all the
+rest is `dummynet_send()`'s: IP input and forwarding for "in" packets,
+and iflib's transmit, about half the thread. Dummynet releases a batch
+but sends it one packet at a time, so each finds the transmit ring idle
+and the thread drains it itself: a DMA mapping, a doorbell write and a
+reclaim per packet (Linux defers the doorbell with `xmit_more`; FreeBSD
+has no equivalent). DTrace's stack sampling put half the thread on one
+instruction in iflib's ring and impossible callers on others: that is
+skid, as hwpmc showed, and its leaf breakdown is not to be trusted.
+
+iflib's `tx_abdicate` (the sender only enqueues; iflib's transmit task
+drains the ring) takes the drain off dummynet's thread, 66% to 22% at
+860, but costs more than it moves: busy 100 to 143 of 400 at 860, 53 to
+70-86 at 470, a half more context switches, RTT the same
+(`results/dn-abd.txt`, 3 runs each). Like RSS, it is for a box where one
+CPU runs out, and iflib only.
+
+On the Z8350 with RSS, released "in" packets go to netisr's threads, and
+dummynet's thread is not the limit: the Realtek driver's receive thread
+is at 69% of a CPU, netisr's at 14-47% and dummynet's at 25%
+(`results/z-dnthr.txt`). There most of dummynet's thread is CAKE, its
+dequeue and the enqueue of packets staged while the lock was held
+(0008), but that is about 7% of a CPU, some 3% of the box's busy time.
+
+So the CPU left to save is in FreeBSD's forwarding and drivers, not in
+dummynet or CAKE: dummynet can only move that work to other threads, and
+RSS, the send threads of 0009 and `tx_abdicate` all cost more than they
+move. What dummynet can still do is configuration: "out" rules with RSS,
+and skipping ipfw's output pass.
+
 Also open from the Z8350: the two single pings of about 0.95 s in
 otherwise normal runs (stock and 0008, not reproduced); what makes
 FreeBSD's `re(4)` stop transmitting (every hang had either one saturated
