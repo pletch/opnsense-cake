@@ -31,7 +31,7 @@ What it adds over FQ-CoDel:
 **Status:** tested on OPNsense 26.7 (FreeBSD 15.1) in a VM with the test
 suites in [VERIFICATION.md](VERIFICATION.md), on bare metal on a small
 Intel Atom box with a Realtek NIC (see
-[Small multi-core firewalls](#small-multi-core-firewalls-turn-on-receive-side-scaling)),
+[Small multi-core firewalls](#small-multi-core-firewalls-receive-side-scaling-if-one-cpu-runs-out)),
 and in use on one OPNsense 26.7 router (a Proxmox VM) on a 2 Gbit/s
 symmetric fiber link. **Running
 OPNsense in a VM? Set `kern.hz=1000`**
@@ -289,7 +289,7 @@ compare the change in `net.inet.ip.dummynet.tick_diff` over a minute with
 few percent or less on an idle host. The bench scripts in `test/` print it
 with their results (`test/ticks.sh`).
 
-### Small multi-core firewalls: turn on receive side scaling
+### Small multi-core firewalls: receive side scaling, if one CPU runs out
 
 A NIC with a single receive queue, as most Realtek and many small boxes'
 NICs have, hands every packet it receives to one thread: pf, ipfw and the
@@ -300,7 +300,11 @@ to tens of milliseconds while CAKE's own queues stay short.
 
 OPNsense's kernel has software receive side scaling (RSS): it hashes the
 packets itself and spreads that work over one netisr thread per CPU. It
-is off by default. "CPU" here means a logical CPU, as `sysctl hw.ncpu`
+is off by default, and it costs CPU, so turn it on only if one CPU is
+really running out: `top -HS` shows one thread near 100% while latency
+under load climbs. At 200 Mbit/s each way, the box below used 161 points
+of busy CPU out of 400 without RSS and 254 with it, at the same latency.
+"CPU" here means a logical CPU, as `sysctl hw.ncpu`
 counts them: a core, or each of its threads with hyperthreading (SMT).
 That is what netisr and RSS count. On **System → Settings → Tunables**,
 add:
@@ -335,22 +339,36 @@ netisr threads then queue into the pipes at once, and before it they
 waited on dummynet's lock.
 
 NICs with several receive queues of their own (most Intel ones: `igb`,
-`igc`, `ix`) already spread the receiving work over the CPUs without RSS.
-RSS can still help them on a small CPU with "in" rules: the packets
-dummynet releases go back into the input path from dummynet's one
-thread, and only RSS spreads that work over the netisr threads (not
-measured on such a NIC). With CPU to spare, it makes little difference.
+`igc`, `ix`) already spread the receiving work over the CPUs: **leave RSS
+off on those**. On an i5-4690 with Intel `igb` NICs on two ports, with NAT,
+RSS brought no lower latency up to 860 Mbit/s each way and cost "in" rules
+about 50 more points (152 against 102, of 400; the link was the limit
+there, not the CPU).
 
-With RSS, shape on the **in** direction where you can (download on WAN in,
-as usual). A packet released from an "in" rule goes on through the input
-path, which RSS spreads over the netisr threads; one from an "out" rule
-goes straight out from dummynet's own thread. On the Z8350 at 300 Mbit/s
-each way, latency was about the same (1.2–1.7 ms with dummynet-st), but
-dummynet's thread was at 50% of a CPU with "in" rules and 95% with
-"out" ones.
+**If you do turn on RSS, shape on the out direction**: download on LAN out,
+upload on WAN out. A packet released from an "in" rule goes back through
+the input path, which RSS spreads over the netisr threads at some cost; one
+from an "out" rule goes straight out from dummynet's own thread. Busy CPU
+out of 400, ping RTT median:
 
-With only "in" rules, also tick **Skip ipfw on output for traffic shaped
-inbound** on the CAKE page (dummynet-st 1.0.11 on). A packet released
+| box, each way, with RSS | "in" rules | "out" rules |
+|---|---|---|
+| Z8350, one port, 200 Mbit/s | 254, 0.99 ms | 192, 0.97 ms |
+| Z8350, one port, 300 Mbit/s | 314, 1.25 ms | 251, 1.21 ms |
+| i5, two ports, 860 Mbit/s | 152, 2.01 ms | 99, 1.98 ms |
+
+The limit of "out" rules is dummynet's one thread: on the Z8350 at
+300 Mbit/s each way it reached 88% of a CPU, and 2 of 5 runs fell short of
+the rate. If yours gets there, "in" rules spread the load and hold the rate
+at the higher cost. Without RSS, on the i5, the direction made no
+difference to CPU.
+The host isolation of CAKE is not affected: ipfw runs before pf's NAT on
+output, so an "out" rule on WAN still sees LAN addresses (with NAT on two
+ports, 1 flow against 8, each host got its half both ways, with "in" and
+with "out" rules).
+
+If you keep only "in" rules, also tick **Skip ipfw on output for traffic
+shaped inbound** on the CAKE page (dummynet-st 1.0.11 on). A packet released
 from an "in" rule then passes the shaper's rules (ipfw) on its way out at
 once, instead of being checked against every rule again, none of which
 would act on it: about a tenth of a CPU less at 200 Mbit/s each way on
@@ -364,7 +382,8 @@ every few seconds until a reboot): without RSS at 200–250 Mbit/s each
 way, with the stock dummynet as well as the fork, and with RSS once, with
 the stock dummynet and "out" rules at 300 Mbit/s each way. With RSS and
 "in" rules it ran 20 runs up to 300 Mbit/s each way without one.
-Realtek's driver, the **os-realtek-re** plugin, did not stop in any run.
+Realtek's driver, the **os-realtek-re** plugin, did not stop in any run:
+use it if you run a Realtek NIC without RSS, or with "out" rules.
 
 ## Upgrade, roll back and remove
 

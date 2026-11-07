@@ -983,6 +983,11 @@ logging) does more than seven lines of nftables, and dummynet's thread
 hand-offs, the second pass through the input path and through pf for
 "in" rules cost the rest. None of it is in CAKE.
 
+(Remeasured 2026-11-06, 5 runs each; see *Measured again* at the end of
+this file. RPS at 200 Mbit/s each way came to 41% of the box, not 71%,
+for no reason found, and the GRO result, a single run with RPS on, now
+holds with RPS on and off.)
+
 **FQ-CoDel against CAKE** (1.5.9 release packages, Realtek's driver,
 RSS, "in" rules; `SCHED=fq_codel test/hw-subtick.sh threads off 250`,
 which turns the CAKE entries off, puts the pipes on FQ-CoDel with its
@@ -1026,7 +1031,8 @@ was at 36 ms from 250; with RSS the box still had about a CPU spare at
 
 On the Z8350 the fork with 0008 and RSS needs about three CPUs for what
 Linux and CAKE do on one. The items were first ranked by expectation;
-the whole-box profile below has since measured them.
+the whole-box profile below has since measured them. *Measured again*,
+at the end of this section, supersedes parts of this.
 
 **Whole-box profile** (2026-10-30; 1.5.9 with Realtek's driver, RSS,
 "in" rules, 300 Mbit/s each way; kernel stacks at 997 Hz on all four
@@ -1139,7 +1145,9 @@ per-packet counters 3.5%, and synproxy, syncookie, dummynet-route and
 rule-to-action checks that run for every packet though unused here 3%.
 
 The same traffic paced by the senders (180 Mbit/s each way, under the
-200 Mbit/s pipes, so that every variant carries the same packets):
+200 Mbit/s pipes, so that every variant carries the same data; not quite
+the same packets: shaped traffic turned out to carry about 23% more,
+46k against 37k a second, see *Measured again*):
 
 | | busy CPU (of 400%) | ping RTT |
 |---|---|---|
@@ -1213,9 +1221,229 @@ Some of the gap stays whatever is done here: pf's per-packet engine,
 FreeBSD's forwarding with a single-queue NIC, and the hand-off that a
 queue in dummynet implies.
 
+**Measured again** (2026-11-06; 1.5.14, Realtek's driver, sub-tick at
+250 µs, the hairpin, no NAT; greedy TCP unless paced, medians of 5 runs,
+3 where noted, `bench-kit` scripts `pmu2.sh`, `lxrun.sh`, `wakes.sh`,
+`irq.sh`, results in `bench-kit/results`). `hwpmc` does not know this
+CPU (model 0x4C) and offers only software counters, so the hardware
+counters were programmed directly through `cpuctl(4)`. On FreeBSD the
+"in" runs had the skip option of patch 0010 on; "out" rules cannot have
+it. Everything here is one box with one port, so it says nothing yet
+about NAT or two interfaces.
+
+How packets reach CAKE, and RSS, at 200 Mbit/s each way (Linux: Debian
+13 live, 6.12, `r8169`, nftables; busy from `mpstat`, cycles per packet
+worked out from busy, clock and packet rate):
+
+| | busy, of 400 | clock | busy cycles per packet | switches/s | RTT median / p90 |
+|---|---|---|---|---|---|
+| ipfw "in", RSS (the default so far) | 254 | 1.44 GHz | 72k | 119k | 0.99 / 1.20 ms |
+| ipfw "out", RSS | 192 | 1.44 GHz | 55k | 94k | 0.97 / 1.24 ms |
+| pf "out", RSS | 156 | 1.44 GHz | 44k | 85k | 0.94 / 1.13 ms |
+| ipfw "in", no RSS | 161 | 1.44 GHz | 46k | 38k | 0.93 / 1.23 ms |
+| pf "out", no RSS | 117 | 1.44 GHz | 33k | 34k | 0.92 / 1.08 ms |
+| Linux, RPS | 165 | 1.68 GHz | 54k | 25k | 0.71 / 0.93 ms |
+| Linux, no RPS | 76 | 1.84 GHz | 28k | 430 | 0.70 / 0.87 ms |
+
+At 300 Mbit/s each way:
+
+| | busy, of 400 | RTT median / p90 | retransmits | dummynet's thread |
+|---|---|---|---|---|
+| ipfw "in", RSS | 314 | 1.25 / 1.86 ms | 439 | 31% |
+| ipfw "out", RSS | 251 | 1.21 / 2.11 ms | 48 | 88% |
+| pf "out", RSS | 222 | 1.10 / 1.34 ms | 0 | 61% |
+| Linux, RPS | 209 | 0.92 / 1.20 ms | 0 | – |
+| Linux, no RPS | 92 | 0.87 / 1.08 ms | 20 | – |
+
+pf "out" and ipfw "in" ran as pairs, and pf "out" used less CPU in all
+10 pairs (by 18 to 166 points at 200, 36 to 100 at 300). ipfw "out" ran
+in a block of its own, and 2 of its 5 runs at 300 fell short of the rate
+(212 and 265 Mbit/s against about 285). dummynet's thread is from one
+profile of each.
+
+- **pf "out"** is `ipfw` off and `match` rules in pf: `match out on re0
+  from A to B dnqueue(Q)` for the packets to shape, and `match in on
+  re0 from A to B dnqueue(0, R)`, because replies leaving by the other
+  side match the state made on input, not the rule. Without the second
+  form one direction ran unshaped at 711 Mbit/s with nothing to say so.
+  It is cheaper than ipfw "out" as there is no `ipfw_chk()` and pf lets
+  the released packet through at once (`PF_MTAG_FLAG_DUMMYNET`), where
+  ipfw "out" pays a further pf pass; and cheaper than either "in" as the
+  released packet does not go back through netisr and only one thread
+  transmits (spinning 41–47 points down to 13–16). Rules were written by
+  hand on the box: nothing generates them, and a change of queue would
+  reach only new states. It loses host fairness on upload behind NAT
+  (see *Two ports* below). Not tested: IPv6, the suites, built-in CAKE.
+- **pf "in" does not work** here: throughput fell to almost nothing (one
+  clean run). `M_PASSIN` skips pf's input pass on release, so the output
+  pass is the one that consumes `PF_MTAG_FLAG_DUMMYNET`, and no outbound
+  state is made for the replies to match. FreeBSD's dummynet has no
+  `M_PASSIN`, so this looks particular to OPNsense's. On two ports with
+  NAT, one run with one-way rules, it did not stop traffic (states were
+  made both ways) but did not shape properly either, 262/938 Mbit/s
+  through 200 Mbit/s pipes; that test settles nothing, so nothing is
+  reported yet.
+- **No RSS** saves 40–90 points at 200 Mbit/s each way, as much as any
+  change here, and latency there is no worse. But one CPU is then at
+  about 95% of its cycles, and at 300 it overloads, ipfw and pf alike:
+  RTT 6–28 ms and 785–2955 retransmits (3 runs each; the box's CPU
+  figures in those runs are not usable, its packet counters read near
+  zero; RTT and retransmits come from the hosts). RSS buys the ceiling,
+  as RPS does on Linux, and costs about the same to do it. 250 Mbit/s
+  was not retried with pf "out". The README now says to turn RSS on
+  only if one CPU runs out.
+- **Why the shaper path costs more.** Per packet, with the idle thread's
+  spinning off (`kern.sched.ule.idlespins=0`, as it otherwise fills the
+  counters), paced at 180 Mbit/s each way, 3 runs:
+
+  | | cycles | instructions | L2 references | L2 misses |
+  |---|---|---|---|---|
+  | no pf, no ipfw | 29.7k | 8.9k | 508 | 70 |
+  | pf only | 41.3k | 13.0k | 868 | 64 |
+  | pf, ipfw, dummynet-st and CAKE | 82.8k | 21.9k | 2013 | 111 |
+
+  Instructions per cycle are low throughout (0.27–0.33). Most L2 load
+  misses, about 60–70%, are served from another module's modified line.
+  So the path runs longer and it churns the L1 caches more, rather than
+  any one thing being slow. pf "out" comes down to about 1240 L2
+  references, Linux with no RPS is at about 1090.
+- **Clock.** FreeBSD stays at 1440 MHz, with a 1441 (turbo) level unused
+  as `powerd` is off. Linux runs this CPU at 1.84 GHz on one busy core
+  and 1.68 on four, so part of the gap in the first table is that.
+  `dev.cpu.0.freq=1441` gave 1.68 GHz: ipfw "in" 254 to 233 at 200 and
+  329 to 280 at 300 (3 pairs, with 1444 retransmits against 38 and some
+  lost throughput, perhaps noise), pf "out" 163 to 151 and 197 to 188;
+  RTT about the same. Whether a passively cooled box holds it is
+  unknown, and so nothing recommends it yet.
+- **Tried, and no use:**
+  - Placing `re0 taskq` and dummynet's thread (the same module, across
+    modules): no change in L2 misses, CPU within the noise. On one CPU
+    they lost rate (165 and 173 Mbit/s).
+  - `net.isr.dispatch=direct` with pf "out" and RSS: worse, 160 to 170
+    at 200, 204 to 229 at 300.
+  - GRO on Linux: 76 against 74 with no RPS, 165 against 158 with RPS,
+    and the same at 300. It is not part of the gap.
+  - Batching netisr's wakeups: about 7 packets per wakeup already
+    (13k wakeups/s, 88k queued packets/s).
+  - `RE_IntrMitigate` at 0x5f5f, written by hand, did not lower the
+    interrupts.
+- **Interrupts** are not the main cost, though they rise: `re0` takes
+  31–34k a second shaped ("in"), 4.5–12k unshaped, 24–26k with pf "out"
+  at far less CPU. Linux's NAPI deferral (`napi_defer_hard_irqs`,
+  `gro_flush_timeout`, on by default on `r8169`) is worth 14 points
+  there: off, 5.9k interrupts a second become 24.5k and busy goes from
+  76 to 90.
+- **What RPS costs Linux:** 16.9% of all samples are in
+  `native_queued_spin_lock_slowpath`, the same convoy as the `re0` locks
+  here.
+- **What is left** between pf "out" with no RSS and Linux with no RPS,
+  33k and 28k cycles a packet, is small, and OPNsense's ruleset is much
+  larger than seven lines of nftables. The switches are not: 34k a
+  second against 430, as FreeBSD's receive task and dummynet's thread
+  remain two threads where Linux's softirq runs to completion.
+
+**Two ports** (2026-11-06; i5-4690 at 3.5 GHz, 4 cores, Intel 82576
+`igb` with 4 hardware queues per port, OPNsense 26.7.8_2, 1.5.15, no
+RSS, sub-tick 250 µs; a host on LAN through NAT to a host on WAN, busy of
+400; results `bench-kit/results/i5-batch*.txt`). Medians of 3, and two
+sets where given, as busy varied by a few points between sets:
+
+| each way | ipfw "in" | ipfw "out" | ipfw down "out", up "in" | pf "out" |
+|---|---|---|---|---|
+| 200 Mbit/s | 30, 37 | 31 | 33 | 30 |
+| 470 Mbit/s (447 achieved) | 73, 77 | 72 | 71 | 71 |
+
+Latency was the same across them (0.8–0.9 ms at 200, 1.1 ms at 470, 0–19
+retransmits), and so where the rules sit makes almost no difference on
+this box, against 254, 192 and 156 on the Z8350's one port (with RSS,
+see below). These rates are far from this box's CPU limit, whose ceiling,
+and that of dummynet's thread, is not measured: unshaped, it stopped at
+about 600 Mbit/s each way with the CPUs and both hosts mostly idle. The
+card had trained to PCIe x1 at 2.5 GT/s (it can do x4), shared by both
+ports, with `missed_packets` and pause frames sent during the runs.
+
+Software RSS on top of the hardware queues (`bits` 2, as on the Z8350;
+`bench-kit/results/i5-rss.txt`, medians of 3):
+
+| each way | ipfw "in" | ipfw "out" | pf "out" |
+|---|---|---|---|
+| 200 Mbit/s | 48 | 34 | 33 |
+| 470 Mbit/s | 127 | 73 | 72 |
+
+Latency did not change (1.1 ms at 470). So with "in" rules software RSS
+costs this box about 50 points at 470 for nothing that shows at these
+rates, as released packets go back through netisr's threads, and with
+"out" rules, where they do not, it costs nothing. The README's old advice of
+RSS for the release path on multi-queue NICs did not hold up at these
+rates, nor near the link's limit (below), and has been changed.
+
+The same box as a hairpin on one port (`igb1`, no NAT, the Z8350's
+setup; `bench-kit/results/i5-hair.txt`, medians of 3, the "in" runs with
+the skip option on):
+
+| each way | | ipfw "in" | ipfw "out" | pf "out" |
+|---|---|---|---|---|
+| 200 Mbit/s | no RSS | 26 | 28 | 26 |
+| | software RSS | 49 | 28 | 28 |
+| 380 Mbit/s | no RSS | 51 | 54 | 53 |
+| | software RSS | 108 | 55 | 54 |
+
+So one port does not cause the gap between "in" and "out": without RSS
+there is none, and with RSS it is the same as on two ports. It is RSS
+and "in" rules together. On the Z8350 some of it remains without RSS
+(ipfw "in" 161, pf "out" 117; ipfw "out" was not run without RSS), and
+RSS is what that box needs to reach 300 Mbit/s each way, so there "out"
+rules are the way to have both.
+
+**Near 1 Gbit/s each way** (`bench-kit/results/i5-ceil.txt`, medians of
+3). The first card would not train wider than x1 in either slot, so
+LAN moved to an Intel I210 (`igb`, 4 queues, its own lane) and WAN stayed
+on the 82576 with its other port idle; no pause frames or missed packets
+after that. The figures above were taken on the shared lane, and these
+run lower at the same rate. Busy, of 400:
+
+| rate each way | | ipfw "in" | ipfw "out" | down "out", up "in" | pf "out" |
+|---|---|---|---|---|---|
+| 470 Mbit/s | no RSS | 52 | 51 | 60 | 51 |
+| | software RSS | 71 | 52 | 75 | 59 |
+| 900 Mbit/s (860 achieved) | no RSS | 102 | 99 | 104 | 98 |
+| | software RSS | 152 | 99 | 146 | 104 |
+
+Latency was the same across these at each rate (about 0.95 ms at 470,
+2.0–2.2 ms at 860, with 96–188 retransmits) and no better with RSS.
+Mixing the directions costs like "in" under RSS, as half its traffic
+takes that path. The link was the limit, not this CPU: about a quarter
+of the box was busy at 860 Mbit/s each way. Profiles at 900, one each:
+dummynet's thread at 59–65% of a CPU with no RSS, and at 60% for "out"
+with RSS, 34% for "in" with RSS, as netisr's threads then do that work
+at 92%; spinning under 0.1%. So `dn_uh` is no limit up to 1 Gbit/s on a
+CPU like this, and locks per scheduler (item 4 above) would gain nothing
+here. Software RSS did nothing here but raise the cost of "in" rules.
+Dummynet's single thread would come first above about 1.3 Gbit/s each
+way, if it scales in a straight line, which is not measured.
+
+Host fairness on two ports with NAT, one host with 1 flow and one with
+8, to one server, through 200 Mbit/s pipes (`dual-srchost` up,
+`dual-dsthost` down; `triple-isolate` falls back to flows when all go
+to one destination, as it counts destinations too; 3 runs each, all
+alike), Mbit/s:
+
+| | upload, 1-flow / 8-flow host | download |
+|---|---|---|
+| ipfw "in" | 96 / 96 | 96 / 96 |
+| ipfw "out" | 96 / 96 | 96 / 96 |
+| ipfw down "out", up "in" | 96 / 96 | 96 / 96 |
+| pf "out" | **22 / 171** | 96 / 96 |
+
+ipfw runs before pf on output (`pfilctl`), so an "out" rule on WAN sees
+the LAN address and CAKE keeps its hosts apart. pf queues after its own
+NAT, so with pf "out" the upload shows one host. Linux's CAKE `nat`
+option solves the same problem by looking up conntrack; pf would need
+the state's original address passed to dummynet. Until then pf "out" is
+no use for upload behind NAT with host isolation.
+
 Also open from the Z8350: the two single pings of about 0.95 s in
 otherwise normal runs (stock and 0008, not reproduced); what makes
 FreeBSD's `re(4)` stop transmitting (every hang had either one saturated
 thread transmitting, "out" rules or the old fork's contention, or
-neither RSS nor 0008); and RSS on a multi-queue Intel NIC, which the
-README recommends for the release path without a measurement.
+neither RSS nor 0008).
