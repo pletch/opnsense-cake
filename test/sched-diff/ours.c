@@ -17,15 +17,17 @@ static void
 o_init(const struct sd_config *c)
 {
 	sched.s.link.bandwidth = (uint32_t)c->rate;
-	sched.c.cfg = cake_sysctl;
+	sched.c.cfg = cake_defaults;
 	sched.c.cfg.diffserv = c->diffserv;
 	sched.c.cfg.flow_mode = c->flow_mode;
 	sched.c.cfg.flows_cnt = 1024;	/* sch_cake's CAKE_QUEUES */
 	sched.c.cfg.overhead = c->overhead;
 	sched.c.cfg.mpu = c->mpu;
 	sched.c.cfg.atm = c->atm;
+#ifndef CAKE_UPSTREAM
 	if (c->ingress)
 		sched.c.cfg.flags |= CAKE_INGRESS;
+#endif
 	if (c->ack_filter)
 		sched.c.cfg.flags |= CAKE_ACK_FILTER;
 	if (c->ack_filter == 2)

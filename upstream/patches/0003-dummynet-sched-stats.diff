@@ -1,0 +1,145 @@
+diff --git a/sys/netpfil/ipfw/dn_sched.h b/sys/netpfil/ipfw/dn_sched.h
+index fb2fc23..855afd5 100644
+--- a/sys/netpfil/ipfw/dn_sched.h
++++ b/sys/netpfil/ipfw/dn_sched.h
+@@ -35,9 +35,12 @@
+ 
+ #include <sys/ck.h>
+ 
++struct sbuf;
++
+ #define	DN_MULTIQUEUE	0x01
+ #define	DN_WIRE_LEN	0x02	/* wire_len method is present */
+ #define	DN_KEEP_IDLE	0x04	/* do not expire an idle instance */
++#define	DN_STATS	0x08	/* stats method is present */
+ /*
+  * Descriptor for a scheduling algorithm.
+  * Contains all function pointers for a given scheduler
+@@ -153,6 +156,15 @@ struct dn_alg {
+ 	 *	with the scheduler lock held.
+ 	 */
+ 	uint32_t (*wire_len)(struct dn_sch_inst *, struct mbuf *);
++
++	/*
++	 * stats	optional, called only if flags has DN_STATS: print
++	 *	the statistics of a scheduler instance that struct dn_flow
++	 *	has no room for (e.g. per traffic class), as text lines,
++	 *	for the net.inet.ip.dummynet.sched_stats sysctl. Called
++	 *	with the scheduler lock held; the sbuf does not sleep.
++	 */
++	void (*stats)(struct dn_sch_inst *, struct sbuf *);
+ };
+ 
+ /* MSVC does not support initializers so we need this ugly macro */
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index 1e06ca1..fa8785e 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -47,6 +47,7 @@
+ #include <sys/socket.h>
+ #include <sys/time.h>
+ #include <sys/sysctl.h>
++#include <sys/sbuf.h>
+ 
+ #include <net/if.h>	/* IFNAMSIZ, struct ifaddr, ifq head, lock.h mutex.h */
+ #include <net/if_var.h>	/* NET_EPOCH_... */
+@@ -140,6 +141,28 @@ sysctl_limits(SYSCTL_HANDLER_ARGS)
+ 	return (0);
+ }
+ 
++/*
++ * What the schedulers with a stats method report about their instances.
++ * The buffer is wired, so that it can be filled with the lock held.
++ */
++static int
++sysctl_sched_stats(SYSCTL_HANDLER_ARGS)
++{
++	struct sbuf sb;
++	int error;
++
++	error = sysctl_wire_old_buffer(req, 0);
++	if (error != 0)
++		return (error);
++	sbuf_new_for_sysctl(&sb, NULL, 1024, req);
++	DN_BH_WLOCK();
++	dn_sched_stats(&sb);
++	DN_BH_WUNLOCK();
++	error = sbuf_finish(&sb);
++	sbuf_delete(&sb);
++	return (error);
++}
++
+ SYSBEGIN(f4)
+ 
+ SYSCTL_DECL(_net_inet);
+@@ -223,6 +246,11 @@ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, io_pkt_drop,
+     CTLFLAG_RD | CTLFLAG_VNET, DC(io_pkt_drop), 0,
+     "Number of packets dropped by dummynet.");
+ #undef DC
++SYSCTL_PROC(_net_inet_ip_dummynet, OID_AUTO, sched_stats,
++    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_VNET | CTLFLAG_MPSAFE,
++    NULL, 0, sysctl_sched_stats, "A",
++    "Statistics of the scheduler instances that report any");
++
+ SYSEND
+ 
+ #endif
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 8de0608..ae97317 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -443,6 +443,7 @@ int do_config(void *p, size_t l);
+ /* function to drain idle object */
+ void dn_drain_scheduler(void);
+ void dn_drain_queue(void);
++void dn_sched_stats(struct sbuf *);
+ 
+ #ifdef NEW_AQM
+ int ecn_mark(struct mbuf* m);
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index a4f0452..5c2e8d3 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -2406,6 +2406,42 @@ drain_scheduler_sch_cb(void *_s, void *arg)
+ 	return 0;
+ }
+ 
++/* Callback called on scheduler instance to print its statistics */
++static int
++stats_si_cb(void *_si, void *arg)
++{
++	struct dn_sch_inst *si = _si;
++
++	si->sched->fp->stats(si, arg);
++	return (0);
++}
++
++/* Callback called on scheduler to print its instances' statistics */
++static int
++stats_sch_cb(void *_s, void *arg)
++{
++	struct dn_schk *s = _s;
++
++	if (s->fp == NULL || (s->fp->flags & DN_STATS) == 0)
++		return (0);
++	if (s->sch.flags & DN_HAVE_MASK)
++		dn_ht_scan(s->siht, stats_si_cb, arg);
++	else if (s->siht != NULL)
++		stats_si_cb(s->siht, arg);
++	return (0);
++}
++
++/*
++ * The statistics of the schedulers that have a stats method, for the
++ * sched_stats sysctl.
++ */
++void
++dn_sched_stats(struct sbuf *sb)
++{
++	DN_BH_LOCK_ASSERT();
++	dn_ht_scan(V_dn_cfg.schedhash, stats_sch_cb, sb);
++}
++
+ /* Called every tick, try to delete a 'bucket' of scheduler */
+ void
+ dn_drain_scheduler(void)

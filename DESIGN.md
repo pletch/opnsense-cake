@@ -11,7 +11,7 @@ tests and their results are in [VERIFICATION.md](VERIFICATION.md).
 | Tins: `besteffort`, `diffserv3` (default), `diffserv4`, `diffserv8`, `precedence` | yes, DSCP maps and shares match `sch_cake.c`; `diffserv8` and `precedence` are experimental (see design notes) |
 | Tin rate thresholds: priority within share (Bulk 1/16, Video 1/2, Voice 1/4), rate-proportional above | yes, as sch_cake shaped mode; needs pipe `bw` |
 | WDRR between tins when the pipe has no `bw` (sch_cake unlimited mode) | yes |
-| 8-way set-associative flow hash per tin (5-tuple, perturbed Jenkins) | yes |
+| 8-way set-associative flow hash per tin (5-tuple, perturbed Jenkins) | yes; IPv6 extension headers in the first mbuf are skipped to reach the ports |
 | DRR between flows, sparse (new) flows served first | yes |
 | COBALT: CoDel with ECN marking + BLUE on overflow | yes, ported from sch_cake |
 | Per-tin target/interval stretched for slow tin rates (`cake_set_rate`) | yes, from pipe `bw` |
@@ -24,7 +24,7 @@ tests and their results are in [VERIFICATION.md](VERIFICATION.md).
 | Integrated shaper with sub-tick release timing | no: the pipe still releases packets once per tick |
 | Flow isolation modes `flowblind`, `srchost`, `dsthost`, `hosts`, `flows`, `dual-srchost`, `dual-dsthost`, `triple-isolate` (default) | yes, host bulk-flow counts and quantum split as sch_cake |
 | NAT-aware hashing via pf states | not needed on OPNsense: ipfw sees pre-NAT addresses (see below) |
-| GSO splitting | not needed: OPNsense turns off TSO/LRO, so dummynet sees no super-packets |
+| GSO splitting | no. OPNsense turns off TSO/LRO, so dummynet sees no super-packets; where it does (a host shaping its own traffic), a packet to be segmented is charged as its segments, each with the headers and the overhead, as `cake_overhead()` does, but queued and dropped whole |
 | `fwmark` tin override | no; ipfw's `setdscp` action can mark packets for a tin instead |
 | `autorate-ingress` | no (experimental in Linux too) |
 
@@ -406,3 +406,30 @@ tests and their results are in [VERIFICATION.md](VERIFICATION.md).
     *Release bursts on real hardware*); it matters for 10 Gbit/s NICs
     feeding much slower links.
 12. ~~A heap for fattest-flow selection.~~ Done in 1.4, as sch_cake's.
+
+### Possible features
+
+Not planned. These go beyond `sch_cake`, so each would be this port's own
+behaviour and would need its own option and documentation. They come from
+the CAKE authors' wish list,
+[The CakeMQ project (phase V)](https://docs.google.com/document/d/1tTYBPeaRdCO9AGTGQCpoiuLORQzN_bG3TAkEolJPh28/edit),
+and each fits inside dummynet.
+
+- **FQ tracking counter.** Count how often dequeue moves from one flow to
+  another, and report it in `net.inet.ip.dummynet.cake.stats`. It shows
+  whether flows were actually competing (a low count: one flow had the
+  link). For diagnosis only; no change to behaviour, one comparison per
+  dequeued packet. The cheapest of the three and the most useful for
+  support.
+- **NQB mapping.** Put DSCP 45 (NQB, non-queue-building) in the Voice tin in
+  `diffserv3` and the Video tin in `diffserv4`, instead of Best Effort. It
+  gets priority within the tin's capped share, so a mislabelled bulk flow
+  can't take the link. Small gain: CAKE already serves sparse flows first,
+  few applications mark NQB and many ISPs wash it. Mainly parity with the
+  IETF draft. A change to the DSCP tables.
+- **BANG on rate cuts.** When the pipe's `bw` is lowered by a large step,
+  drop the backlog above the target at the new rate at once, instead of
+  waiting about an interval (100 ms) for COBALT to start. Only useful with
+  an autorate-style script changing `bw` on a variable link (LTE/5G,
+  Starlink); with a fixed rate it does nothing. Untried anywhere: dropping
+  many packets at once may push TCP back into slow start.

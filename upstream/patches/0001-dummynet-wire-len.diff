@@ -1,0 +1,48 @@
+--- a/sys/netpfil/ipfw/dn_sched.h
++++ b/sys/netpfil/ipfw/dn_sched.h
+@@ -36,6 +36,7 @@
+ #include <sys/ck.h>
+ 
+ #define	DN_MULTIQUEUE	0x01
++#define	DN_WIRE_LEN	0x02	/* wire_len method is present */
+ /*
+  * Descriptor for a scheduling algorithm.
+  * Contains all function pointers for a given scheduler
+@@ -45,7 +46,7 @@
+ struct dn_alg {
+ 	uint32_t type;           /* the scheduler type */
+ 	const char *name;   /* scheduler name */
+-	uint32_t flags;	/* DN_MULTIQUEUE if supports multiple queues */
++	uint32_t flags;	/* DN_MULTIQUEUE if supports multiple queues, ... */
+ 
+ 	/*
+ 	 * The following define the size of 3 optional data structures
+@@ -142,6 +143,15 @@ struct dn_alg {
+ 	/* run-time fields */
+ 	int ref_count;      /* XXX number of instances in the system */
+ 	CK_LIST_ENTRY(dn_alg) next; /* Next scheduler in the list */
++
++	/*
++	 * wire_len	optional, called only if flags has DN_WIRE_LEN:
++	 *	the bytes to charge against the link rate for a packet the
++	 *	scheduler has just dequeued, where they differ from the
++	 *	packet's length (link-layer overhead compensation). Called
++	 *	with the scheduler lock held.
++	 */
++	uint32_t (*wire_len)(struct dn_sch_inst *, struct mbuf *);
+ };
+ 
+ /* MSVC does not support initializers so we need this ugly macro */
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -615,7 +615,9 @@ serve_sched(struct mq *q, struct dn_sch_
+ 
+ 		done++;
+ 		len_scaled = (bw == 0) ? 0 : hz *
+-			(m->m_pkthdr.len * 8 + extra_bits(m, s));
++			((uint64_t)((s->fp->flags & DN_WIRE_LEN) ?
++			s->fp->wire_len(si, m) : m->m_pkthdr.len) * 8 +
++			extra_bits(m, s));
+ 		si->credit -= len_scaled;
+ 		/* Move packet in the delay line */
+ 		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;

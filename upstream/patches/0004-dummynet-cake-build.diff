@@ -1,0 +1,25 @@
+diff --git a/sys/conf/files b/sys/conf/files
+index a769d30..1ed4d25 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -4634,6 +4634,7 @@ netlink/route/rt.c		optional netlink
+ netpfil/ipfw/dn_aqm_codel.c	optional inet dummynet
+ netpfil/ipfw/dn_aqm_pie.c	optional inet dummynet
+ netpfil/ipfw/dn_heap.c		optional inet dummynet
++netpfil/ipfw/dn_sched_cake.c	optional inet dummynet
+ netpfil/ipfw/dn_sched_fifo.c	optional inet dummynet
+ netpfil/ipfw/dn_sched_fq_codel.c	optional inet dummynet
+ netpfil/ipfw/dn_sched_fq_pie.c	optional inet dummynet
+diff --git a/sys/modules/dummynet/Makefile b/sys/modules/dummynet/Makefile
+index a645c16..1db5cde 100644
+--- a/sys/modules/dummynet/Makefile
++++ b/sys/modules/dummynet/Makefile
+@@ -3,7 +3,7 @@ KMOD=   dummynet
+ SRCS=   ip_dummynet.c ip_dn_io.c
+ SRCS+= dn_aqm_codel.c dn_aqm_pie.c
+ SRCS+= dn_heap.c dn_sched_fifo.c dn_sched_qfq.c dn_sched_rr.c dn_sched_wf2q.c 
+-SRCS+= dn_sched_prio.c dn_sched_fq_codel.c dn_sched_fq_pie.c
++SRCS+= dn_sched_prio.c dn_sched_fq_codel.c dn_sched_fq_pie.c dn_sched_cake.c
+ SRCS+=	opt_inet6.h
+ 
+ .include <bsd.kmod.mk>

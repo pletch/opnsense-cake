@@ -1,0 +1,95 @@
+diff --git a/tests/sys/netpfil/common/dummynet.sh b/tests/sys/netpfil/common/dummynet.sh
+index 66736fb..9237dbe 100644
+--- a/tests/sys/netpfil/common/dummynet.sh
++++ b/tests/sys/netpfil/common/dummynet.sh
+@@ -202,6 +202,80 @@ codel_cleanup()
+ 	firewall_cleanup $1
+ }
+ 
++cake_head()
++{
++	atf_set descr 'CAKE basic test'
++	atf_set require.user root
++}
++
++cake_body()
++{
++	fw=$1
++	firewall_init $fw
++	dummynet_init $fw
++
++	epair=$(vnet_mkepair)
++	vnet_mkjail alcatraz ${epair}b
++
++	ifconfig ${epair}a 192.0.2.1/24 up
++	jexec alcatraz ifconfig ${epair}b 192.0.2.2/24 up
++
++	# Sanity check
++	atf_check -s exit:0 -o ignore ping -i .1 -c 3 -s 1200 192.0.2.2
++
++	jexec alcatraz dnctl pipe 1 config bw 10Mb
++	jexec alcatraz dnctl sched 1 config pipe 1 type cake
++	jexec alcatraz dnctl queue 1 config sched 1
++
++	# The defaults, as sch_cake's
++	atf_check -s exit:0 \
++	    -o match:'CAKE diffserv3 triple-isolate target 5ms interval 100ms flows 1024 ECN$' \
++	    jexec alcatraz dnctl sched show
++
++	firewall_config alcatraz ${fw} \
++		"ipfw"	\
++			"ipfw add 1000 queue 1 ip from any to any" \
++		"pf"	\
++			"pass dnqueue 1"
++
++	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
++	atf_check -s exit:0 -o ignore ping -i .1 -c 3 -s 1200 192.0.2.2
++
++	# Every parameter is set and shown back
++	jexec alcatraz dnctl sched 1 config pipe 1 type cake target 7ms \
++	    interval 120ms noecn diffserv8 dual-dsthost flows 64 memlimit 2m \
++	    wash ack-filter-aggressive docsis overhead 22 mpu 70 ptm
++	atf_check -s exit:0 \
++	    -o match:'CAKE diffserv8 dual-dsthost target 7ms interval 120ms flows 64 NoECN wash ack-filter-aggressive memlimit 2048K overhead 22 mpu 70 ptm$' \
++	    jexec alcatraz dnctl sched show
++
++	# Reconfigured with packets going through: new tables (the number of
++	# tins and flows), then in place (diffserv8 and precedence both have
++	# eight tins, with another DSCP map)
++	ping -i .01 -c 300 -z 0xb8 192.0.2.2 > /dev/null &
++	for mode in "diffserv4 flows 1024" "diffserv8" "precedence" \
++	    "besteffort flowblind" "diffserv3 triple-isolate"
++	do
++		jexec alcatraz dnctl sched 1 config pipe 1 type cake ${mode}
++		sleep .5
++	done
++	wait
++	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
++
++	# An idle scheduler keeps its instance
++	sleep 2
++	atf_check -s exit:0 -o match:'type CAKE .* 1 active' \
++	    jexec alcatraz dnctl sched show
++
++	jexec alcatraz dnctl sched 1 config pipe 1 type fifo
++	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
++}
++
++cake_cleanup()
++{
++	firewall_cleanup $1
++}
++
+ wf2q_heap_head()
+ {
+ 	atf_set descr 'Test WF2Q+, attempting to provoke use-after-free'
+@@ -623,6 +697,9 @@ setup_tests		\
+ 	codel		\
+ 		ipfw	\
+ 		pf	\
++	cake		\
++		ipfw	\
++		pf	\
+ 	wf2q_heap	\
+ 		pf	\
+ 	queue		\

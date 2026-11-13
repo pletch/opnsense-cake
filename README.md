@@ -545,6 +545,7 @@ plugin/build.sh                       builds the three packages on an OPNsense m
 patches/dummynet-subtick/             the forked dummynet: patches on opnsense-src-cake.patch, build.sh
 patches/ipfw-cake.patch               ipfw(8)/dnctl(8): "type cake" parameters, display, manual
 patches/opnsense-src-cake.patch       opnsense/src: scheduler in dummynet.ko, wire_len hook, ipfw patch
+upstream/                             the build proposed to FreeBSD: resolve.sh, patches, build.sh
 patches/opnsense-core-cake.patch      opnsense/core: Traffic Shaper support (older option set)
 test/                                 latency, robustness, isolation, overhead, feature, perf and fuzz tests
 docs/cake-page.png                    the CAKE page, shown in the FAQ

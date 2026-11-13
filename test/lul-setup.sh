@@ -21,9 +21,8 @@ KO=${KO:-/root/work/dn_sched_cake/sys/modules/dn_sched_cake/dn_cake.ko}
 
 kldstat -q -m ipfw || kldload ipfw
 kldstat -q -m dummynet || kldload dummynet
-# CAKE may be built into dummynet.ko (opnsense-src-cake.patch)
-sysctl -q net.inet.ip.dummynet.cake.flows >/dev/null ||
-    kldstat -q -n dn_cake.ko || kldload "$KO"
+# CAKE may be built into dummynet.ko (opnsense-src-cake.patch, upstream/)
+kldstat -q -m dn_cake || kldload "$KO"
 
 # manual ipfw + dummynet reinjection stalls with pf enabled; see README
 pfctl -d >/dev/null 2>&1 || true

@@ -19,16 +19,23 @@ if [ -z "${SCH_CAKE:-}" ]; then
 	    "https://raw.githubusercontent.com/torvalds/linux/$LINUX_COMMIT/net/sched/sch_cake.c"
 fi
 
+# the scheduler with its build conditionals resolved: the plugin's module,
+# or with CAKE_VARIANT=upstream the build proposed to FreeBSD
+CAKE_VARIANT=${CAKE_VARIANT:-plugin}
+SRCDIR=$WRK/src
+"$TOP/upstream/resolve.sh" "$CAKE_VARIANT" "$SRCDIR"
+VDEF=
+[ "$CAKE_VARIANT" = upstream ] && VDEF=-DCAKE_UPSTREAM
 # ours: the structs, the 1/sqrt cache and the functions from the Newton
 # step to cobalt_should_drop()
 {
 	sed -n '/^struct cobalt_params {/,/^};/p;/^struct cobalt_vars {/,/^};/p' \
-	    "$TOP/sys/netpfil/ipfw/dn_sched_cake.h"
-	grep '^#define COBALT_CACHE' "$TOP/sys/netpfil/ipfw/dn_sched_cake.c"
+	    "$SRCDIR/dn_sched_cake.h"
+	grep '^#define COBALT_CACHE' "$SRCDIR/dn_sched_cake.c"
 	sed -n '/^static const uint32_t cobalt_rec_inv_sqrt_cache/,/^};/p' \
-	    "$TOP/sys/netpfil/ipfw/dn_sched_cake.c"
-	sed -n '/^\/\* one Newton-Raphson step/,/^\/\* Helper function to update flow/p' \
-	    "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" | sed '$d'
+	    "$SRCDIR/dn_sched_cake.c"
+	sed -n '/^\/\* one Newton-Raphson step/,/^ \* Helper function to update flow/p' \
+	    "$SRCDIR/dn_sched_cake.c" | sed '$d' | sed '$d'
 } > "$WRK/ours-cobalt.inc"
 
 # sch_cake: its structs and everything from the 1/sqrt cache to
@@ -44,8 +51,8 @@ for f in "$WRK/ours-cobalt.inc" "$WRK/linux-cobalt.inc"; do
 done
 
 cp "$TOP"/test/cobalt-diff/*.c "$TOP"/test/cobalt-diff/*.h "$WRK/"
-${CC:-cc} -O2 -Wall -Wno-unused-function -o "$WRK/cobalt-diff" \
+${CC:-cc} -O2 $VDEF -Wall -Wno-unused-function -o "$WRK/cobalt-diff" \
     "$WRK/main.c" "$WRK/ours.c" "$WRK/linux.c"
 echo "dn_sched_cake $(git -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo '?')" \
-    "vs sch_cake ${LINUX_COMMIT%"${LINUX_COMMIT#????????????}"}"
+    "($CAKE_VARIANT) vs sch_cake ${LINUX_COMMIT%"${LINUX_COMMIT#????????????}"}"
 "$WRK/cobalt-diff" "$@"

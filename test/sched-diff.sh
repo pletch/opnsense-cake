@@ -29,9 +29,16 @@ if [ -z "${PKT_SCHED:-}" ]; then
 	curl -fsSL --retry 5 --retry-delay 10 -o "$PKT_SCHED" "$RAW/include/uapi/linux/pkt_sched.h"
 fi
 
+# the scheduler with its build conditionals resolved: the plugin's module,
+# or with CAKE_VARIANT=upstream the build proposed to FreeBSD
+CAKE_VARIANT=${CAKE_VARIANT:-plugin}
+SRCDIR=$WRK/src
+"$TOP/upstream/resolve.sh" "$CAKE_VARIANT" "$SRCDIR"
+VDEF=
+[ "$CAKE_VARIANT" = upstream ] && VDEF=-DCAKE_UPSTREAM
 "$TOP/test/sched-diff/extract-linux.sh" "$SCH_CAKE" "$PKT_SCHED" >"$WRK/linux-cake.inc"
 python3 -I "$TOP/test/sched-diff/extract-ours.py" \
-    "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" >"$WRK/ours-cake.inc"
+    "$SRCDIR/dn_sched_cake.c" >"$WRK/ours-cake.inc"
 
 # How much of each implementation is its production source: every line
 # of the extracted code not matched, in order, to the source (a line
@@ -40,7 +47,7 @@ python3 -I "$TOP/test/sched-diff/extract-ours.py" \
 # instead of parsing it; dn_sched_cake: cake_hash_flow() renamed, its
 # replacement in ours_shim.h returning the trace's hashes); any other
 # line fails the comparison before it runs.
-python3 -I - "$SCH_CAKE" "$WRK/linux-cake.inc" "$TOP/sys/netpfil/ipfw/dn_sched_cake.c" \
+python3 -I - "$SCH_CAKE" "$WRK/linux-cake.inc" "$SRCDIR/dn_sched_cake.c" \
     "$WRK/ours-cake.inc" "$PKT_SCHED" <<'EOF'
 import difflib, sys
 lsrc, linc, osrc, oinc, uapi = sys.argv[1:6]
@@ -73,11 +80,11 @@ EOF
 
 # the ACK filter's scan cap is a deliberate addition: lift it, so that
 # the comparison holds at any queue depth
-${CC:-cc} -O2 -DCAKE_DEBUG -DCAKE_ACK_SCAN=1000000 -I"$TOP/test/sched-diff" -I"$WRK" \
-    -I"$TOP/sys/netpfil/ipfw" -Wall -Wno-unused-function \
+${CC:-cc} -O2 -DCAKE_DEBUG $VDEF -DCAKE_ACK_SCAN=1000000 -I"$TOP/test/sched-diff" -I"$WRK" \
+    -I"$SRCDIR" -Wall -Wno-unused-function \
     -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable \
     -o "$WRK/sched-diff" "$TOP/test/sched-diff/main.c" \
     "$TOP/test/sched-diff/linux.c" "$TOP/test/sched-diff/ours.c" -lm
 echo "dn_sched_cake $(git -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo '?')" \
-    "(working tree) vs sch_cake ${LINUX_COMMIT%"${LINUX_COMMIT#????????????}"}"
+    "(working tree, $CAKE_VARIANT) vs sch_cake ${LINUX_COMMIT%"${LINUX_COMMIT#????????????}"}"
 "$WRK/sched-diff" "$@"

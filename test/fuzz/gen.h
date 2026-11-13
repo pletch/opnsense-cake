@@ -176,6 +176,22 @@ build(uint8_t *p, int off)
 		memcpy(p + off + 8, c->src, 16);
 		memcpy(p + off + 24, c->dst, 16);
 		off += 40;
+		/* sometimes behind extension headers of 8 or 16 bytes */
+		if (kind != 13 && rnd(4) == 0) {
+			uint8_t *nxt = &p[off - 40 + 6];
+
+			for (int i = 1 + rnd(3); i > 0 && off + 16 + 80 <= PKT_MAX; i--) {
+				int l = rnd(2);
+
+				*nxt = (uint8_t[]){IPPROTO_HOPOPTS, IPPROTO_DSTOPTS,
+				    IPPROTO_ROUTING}[rnd(3)];
+				memset(p + off, 0, 8 * (l + 1));
+				p[off] = proto;
+				p[off + 1] = l;
+				nxt = &p[off];
+				off += 8 * (l + 1);
+			}
+		}
 	}
 
 	if (proto == IPPROTO_TCP) {

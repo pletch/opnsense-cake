@@ -54,14 +54,38 @@
  *    isolation (flows, srchost, dsthost, hosts, dual-*, triple-isolate)
  *  - DRR between flows with sparse (new) / bulk (old) flow lists
  *  - COBALT AQM (CoDel + BLUE) per flow, ECN aware
+#ifndef CAKE_UPSTREAM
  *  - drop from the fattest flow over the packet or byte limit
  *  - link-layer overhead compensation (overhead, mpu, ATM, PTM)
  *  - ACK filter, DSCP wash and ingress mode
+#else
+ *  - drop from the fattest flow over the byte limit
+ *  - link-layer overhead compensation (overhead, mpu, ATM, PTM)
+ *  - ACK filter and DSCP wash
+#endif
  *
  * Rate limiting is still done by the dummynet pipe the scheduler is
  * attached to; its bandwidth is used for the tin rate shares and per-tin
  * AQM parameters.
  */
+
+#ifndef CAKE_UPSTREAM
+/*
+ * One source, two builds (upstream/resolve.sh). CAKE_UPSTREAM is the one
+ * proposed to FreeBSD: sch_cake's options only (no ingress mode, packet
+ * limit or quantum), COBALT started as sch_cake starts it, no sysctl
+ * defaults or statistics, and idle instances kept by dummynet itself
+ * (DN_KEEP_IDLE) rather than by the scheduler. Without it, this is the
+ * module the OPNsense plugin ships, for a stock dummynet as well.
+ * CAKE_KNOBS: the sysctl node exists (always in the plugin's build, in
+ * the upstream one only with CAKE_DEBUG).
+ */
+#define	CAKE_KNOBS
+#else
+#ifdef CAKE_DEBUG
+#define	CAKE_KNOBS
+#endif
+#endif
 
 #ifdef _KERNEL
 #include <sys/malloc.h>
@@ -71,8 +95,10 @@
 #include <sys/module.h>
 #include <sys/time.h>
 #include <sys/sbuf.h>
+#ifndef CAKE_UPSTREAM
 #include <sys/ucred.h>
 #include <sys/jail.h>		/* TD_TO_VNET */
+#endif
 #include <net/vnet.h>
 #include <sys/libkern.h>
 #include <sys/endian.h>
@@ -88,7 +114,9 @@
 #include <sys/rwlock.h>
 
 #include <netpfil/ipfw/ip_fw_private.h>
+#ifdef CAKE_KNOBS
 #include <sys/sysctl.h>
+#endif
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
@@ -115,14 +143,17 @@
  * tick; a dummynet with a finer release clock defines them.
  */
 #ifndef DN_CREDIT_HZ
+#ifndef CAKE_UPSTREAM
 #define DN_CREDIT_HZ		hz
+#endif
 #define DN_RELEASE_NS		(1000000000ULL / hz)
 #endif
 /* how far apart its releases can be, which widens a tin's target */
 #ifndef DN_RELEASE_GRAIN_NS
 #define DN_RELEASE_GRAIN_NS	((uint64_t)tick * 1000)
 #endif
-#define CAKE_TIN_QUANTUM_SHIFT	4	/* tin quantum = quantum << 4 >> weight */
+/* tin quantum = quantum << 4 >> weight */
+#define CAKE_TIN_QUANTUM_SHIFT	4
 #define COBALT_CACHE		16	/* cached 1/sqrt(count) values */
 
 static struct dn_alg cake_desc;
@@ -136,19 +167,27 @@ static void cake_reconfig(struct cake_si *si, struct cake_schk *schk);
 	(si)->bw != (si)->_si.sched->link.bandwidth)
 static int cake_ecn_mark(struct mbuf *m);
 static void cake_heapify(struct cake_si *si, uint32_t i);
+static const void *cake_hdr(struct mbuf *m, int off, int len, void *buf);
+#ifndef CAKE_UPSTREAM
 static __inline void cake_charge_tin(struct cake_tin *tin, int len,
     uint64_t now);
-static __inline uint64_t cake_link_now(struct cake_si *si, uint64_t now,
-    int decide);
 static __inline uint64_t cake_link_dur(struct cake_si *si, uint32_t len);
+#endif
+static __inline uint64_t cake_link_now(struct cake_si *si, uint64_t now);
 
 /* cake default parameters */
+#ifdef CAKE_UPSTREAM
+static const struct dn_sch_cake_parms
+#else
 static struct dn_sch_cake_parms
-cake_sysctl = {5000, 100000, CAKE_ECN_ENABLED, CAKE_DIFFSERV_DIFFSERV3,
+#endif
+cake_defaults = {5000, 100000, CAKE_ECN_ENABLED, CAKE_DIFFSERV_DIFFSERV3,
 	1514, 10240, 1024, CAKE_FLOW_TRIPLE, 0, 0, CAKE_ATM_NONE, 0};
 
-/* host isolation within flow isolation: share a source/destination host's
- * quantum between its bulk flows */
+/*
+ * host isolation within flow isolation: share a source/destination host's
+ * quantum between its bulk flows
+ */
 #define	cake_dsrc(mode)	(((mode) & CAKE_FLOW_DUAL_SRC) == CAKE_FLOW_DUAL_SRC)
 #define	cake_ddst(mode)	(((mode) & CAKE_FLOW_DUAL_DST) == CAKE_FLOW_DUAL_DST)
 
@@ -237,19 +276,20 @@ static const uint32_t cobalt_rec_inv_sqrt_cache[COBALT_CACHE] = {
 	1239850263, 1191209601, 1147878294, 1108955788
 };
 
+#ifndef CAKE_UPSTREAM
 static int
 cake_sysctl_interval_handler(SYSCTL_HANDLER_ARGS)
 {
 	int error;
 	long  value;
 
-	value = cake_sysctl.interval;
+	value = cake_defaults.interval;
 	error = sysctl_handle_long(oidp, &value, 0, req);
 	if (error != 0 || req->newptr == NULL)
 		return (error);
 	if (value < 1 || value > 100 * AQM_TIME_1S)
 		return (EINVAL);
-	cake_sysctl.interval = value;
+	cake_defaults.interval = value;
 
 	return (0);
 }
@@ -260,17 +300,19 @@ cake_sysctl_target_handler(SYSCTL_HANDLER_ARGS)
 	int error;
 	long  value;
 
-	value = cake_sysctl.target;
+	value = cake_defaults.target;
 	error = sysctl_handle_long(oidp, &value, 0, req);
 	if (error != 0 || req->newptr == NULL)
 		return (error);
 	if (value < 1 || value > 5 * AQM_TIME_1S)
 		return (EINVAL);
-	cake_sysctl.target = value;
+	cake_defaults.target = value;
 
 	return (0);
 }
+#endif /* !CAKE_UPSTREAM */
 
+#ifdef CAKE_KNOBS
 SYSBEGIN(f4)
 
 SYSCTL_DECL(_net_inet);
@@ -279,49 +321,52 @@ SYSCTL_DECL(_net_inet_ip_dummynet);
 static SYSCTL_NODE(_net_inet_ip_dummynet, OID_AUTO, cake,
     CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "CAKE");
+#endif
 
+#ifndef CAKE_UPSTREAM
 #ifdef SYSCTL_NODE
 
 SYSCTL_PROC(_net_inet_ip_dummynet_cake, OID_AUTO, target,
-    CTLTYPE_LONG | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    CTLTYPE_LONG | CTLFLAG_RW | CTLFLAG_MPSAFE,
     NULL, 0, cake_sysctl_target_handler, "L",
     "CAKE target in microsecond");
 SYSCTL_PROC(_net_inet_ip_dummynet_cake, OID_AUTO, interval,
-    CTLTYPE_LONG | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    CTLTYPE_LONG | CTLFLAG_RW | CTLFLAG_MPSAFE,
     NULL, 0, cake_sysctl_interval_handler, "L",
     "CAKE interval in microsecond");
 
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, diffserv,
-	CTLFLAG_RW, &cake_sysctl.diffserv, CAKE_DIFFSERV_DIFFSERV3,
+	CTLFLAG_RW, &cake_defaults.diffserv, CAKE_DIFFSERV_DIFFSERV3,
 	"CAKE diffserv mode (0 besteffort, 1 diffserv3, 2 diffserv4, "
 	"3 diffserv8, 4 precedence)");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, flags,
-	CTLFLAG_RW, &cake_sysctl.flags, CAKE_ECN_ENABLED,
+	CTLFLAG_RW, &cake_defaults.flags, CAKE_ECN_ENABLED,
 	"CAKE flags (1 ecn, 2 wash, 4 ack-filter, 8 aggressive, 16 ingress)");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, memlimit,
-	CTLFLAG_RW, &cake_sysctl.memlimit, 0,
+	CTLFLAG_RW, &cake_defaults.memlimit, 0,
 	"CAKE byte limit in KB, 0 for 4 x rate x interval, at least 4 MB");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, quantum,
-	CTLFLAG_RW, &cake_sysctl.quantum, 1514, "CAKE quantum");
+	CTLFLAG_RW, &cake_defaults.quantum, 1514, "CAKE quantum");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, flows,
-	CTLFLAG_RW, &cake_sysctl.flows_cnt, 1024,
+	CTLFLAG_RW, &cake_defaults.flows_cnt, 1024,
 	"Number of queues per tin for CAKE");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, limit,
-	CTLFLAG_RW, &cake_sysctl.limit, 10240, "CAKE queues size limit");
+	CTLFLAG_RW, &cake_defaults.limit, 10240, "CAKE queues size limit");
 SYSCTL_INT(_net_inet_ip_dummynet_cake, OID_AUTO, overhead,
-	CTLFLAG_RW, &cake_sysctl.overhead, 0,
+	CTLFLAG_RW, &cake_defaults.overhead, 0,
 	"CAKE bytes added to each packet for the link layer (-64 to 256)");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, mpu,
-	CTLFLAG_RW, &cake_sysctl.mpu, 0,
+	CTLFLAG_RW, &cake_defaults.mpu, 0,
 	"CAKE minimum packet size on the link, bytes");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, atm,
-	CTLFLAG_RW, &cake_sysctl.atm, CAKE_ATM_NONE,
+	CTLFLAG_RW, &cake_defaults.atm, CAKE_ATM_NONE,
 	"CAKE link framing (0 none, 1 ATM cells, 2 PTM 64b/65b)");
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, flowmode,
-	CTLFLAG_RW, &cake_sysctl.flow_mode, CAKE_FLOW_TRIPLE,
+	CTLFLAG_RW, &cake_defaults.flow_mode, CAKE_FLOW_TRIPLE,
 	"CAKE flow isolation (0 flowblind, 1 srchost, 2 dsthost, 3 hosts, "
 	"4 flows, 5 dual-srchost, 6 dual-dsthost, 7 triple-isolate)");
 #endif
+#endif /* !CAKE_UPSTREAM */
 
 /*
  * dummynet only advances its clock once per tick, which is too coarse
@@ -339,16 +384,18 @@ cake_now_ns(void)
  * an unpredictable one: arc4random(), ChaCha20 per call, took about 12% of
  * a CPU at 300 Mbit/s each way on an Atom. sch_cake has the per-CPU
  * get_random_u16()/u32(); here a 64-bit LCG (Knuth's MMIX constants),
- * its high half, seeded from arc4random() by each new instance. Callers
- * hold dn_uh; a lost update between vnets only repeats a number.
+ * its high half, seeded from arc4random() by each new instance. Its state
+ * is the vnet's, as dn_uh is, which the callers hold.
  */
-static uint64_t cake_rng;
+VNET_DEFINE_STATIC(uint64_t, cake_rng);
+#define	V_cake_rng	VNET(cake_rng)
 
 static __inline uint32_t
 cake_random(void)
 {
-	cake_rng = cake_rng * 6364136223846793005ULL + 1442695040888963407ULL;
-	return (cake_rng >> 32);
+	V_cake_rng = V_cake_rng * 6364136223846793005ULL +
+	    1442695040888963407ULL;
+	return (V_cake_rng >> 32);
 }
 
 /*
@@ -397,6 +444,7 @@ static void
 cobalt_vars_init(struct cobalt_vars *v)
 {
 	memset(v, 0, sizeof(*v));
+#ifndef CAKE_UPSTREAM
 	/*
 	 * Start at 1/sqrt(1), so the first signal is one interval after the
 	 * flow first exceeds the target, as sch_cake's comments intend. Its
@@ -404,6 +452,7 @@ cobalt_vars_init(struct cobalt_vars *v)
 	 * signalled is signalled on its second packet over the target.
 	 */
 	v->rec_inv_sqrt = ~0U;
+#endif
 }
 
 /*
@@ -476,7 +525,11 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 	*marked = 0;
 	sojourn = now > enq_ts ? now - enq_ts : 0;
 	schedule = (int64_t)(now - v->drop_next);
+#ifndef CAKE_UPSTREAM
 	/* in ingress mode, bulk flows share the link before the queue */
+#else
+	/* bulk_flows is sch_cake's, for its ingress mode: always 0 here */
+#endif
 	over_target = sojourn > p->target &&
 	    sojourn > p->mtu_time * bulk_flows * 2 &&
 	    sojourn > p->mtu_time * 4;
@@ -532,7 +585,8 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 	return (drop);
 }
 
-/* Helper function to update flow, tin, main-queue and scheduler statistics.
+/*
+ * Helper function to update flow, tin, main-queue and scheduler statistics.
  * negative len + drop -> drop
  * negative len -> dequeue
  * positive len -> enqueue
@@ -550,11 +604,11 @@ cake_update_stats(struct cake_flow *q, struct cake_si *si, int len,
 		inc = 1;
 
 	if (drop) {
-		si->main_q.ni.drops ++;
-		q->stats.drops ++;
-		si->_si.ni.drops ++;
-		si->tins[q->tin].drops ++;
-		V_dn_cfg.io_pkt_drop ++;
+		si->main_q.ni.drops++;
+		q->stats.drops++;
+		si->_si.ni.drops++;
+		si->tins[q->tin].drops++;
+		V_dn_cfg.io_pkt_drop++;
 	}
 
 	if (!drop || (drop && len < 0)) {
@@ -575,31 +629,29 @@ cake_update_stats(struct cake_flow *q, struct cake_si *si, int len,
 
 	if (inc > 0) {
 		si->main_q.ni.tot_bytes += len;
-		si->main_q.ni.tot_pkts ++;
+		si->main_q.ni.tot_pkts++;
 
-		q->stats.tot_bytes +=len;
+		q->stats.tot_bytes += len;
 		q->stats.tot_pkts++;
 
-		si->_si.ni.tot_bytes +=len;
-		si->_si.ni.tot_pkts ++;
+		si->_si.ni.tot_bytes += len;
+		si->_si.ni.tot_pkts++;
 	}
 }
 
 /*
- * Bytes a packet takes on the link, as sch_cake's cake_calc_overhead():
- * the network-layer length plus overhead, at least mpu, then ATM cell or
- * PTM framing. Without compensation configured it is the packet length,
- * as dummynet charges it.
+ * Bytes 'len' bytes from the IP header on take on the link, as sch_cake's
+ * cake_calc_overhead(): plus overhead, at least mpu, then ATM cell or PTM
+ * framing. Without compensation configured it is the length with what
+ * precedes the IP header ('off' bytes), as dummynet charges it.
  */
 static __inline uint32_t
-cake_wire_bytes(const struct dn_sch_cake_parms *cfg, struct mbuf *m)
+cake_adj_len(const struct dn_sch_cake_parms *cfg, int len, int off)
 {
-	int len;
-
 	if (cfg->overhead == 0 && cfg->mpu == 0 && cfg->atm == CAKE_ATM_NONE)
-		return (m->m_pkthdr.len);
+		return (len + off);
 
-	len = m->m_pkthdr.len - dn_tag_get(m)->iphdr_off + cfg->overhead;
+	len += cfg->overhead;
 	len = MAX(len, (int)cfg->mpu);
 	len = MAX(len, 1);
 	if (cfg->atm == CAKE_ATM_ATM)
@@ -607,6 +659,66 @@ cake_wire_bytes(const struct dn_sch_cake_parms *cfg, struct mbuf *m)
 	else if (cfg->atm == CAKE_ATM_PTM)
 		len += (len + 63) / 64;
 	return (len);
+}
+
+/*
+ * The IP and TCP headers' length of a packet the interface is to segment
+ * (TSO), each segment's share of it; 0 if they cannot be found.
+ */
+static int
+cake_tso_hdrlen(struct mbuf *m, int off)
+{
+	struct ip ipb;
+	struct ip6_hdr ip6b;
+	uint8_t thb[sizeof(struct tcphdr)];
+	const struct ip *ip;
+	const struct ip6_hdr *ip6;
+	const uint8_t *th;
+	int hl;
+
+	ip = cake_hdr(m, off, sizeof(ipb), &ipb);
+	if (ip == NULL)
+		return (0);
+	if (ip->ip_v == 4) {
+		if (ip->ip_hl < sizeof(struct ip) >> 2 ||
+		    ip->ip_p != IPPROTO_TCP)
+			return (0);
+		hl = ip->ip_hl << 2;
+	} else if (ip->ip_v == 6) {
+		ip6 = cake_hdr(m, off, sizeof(ip6b), &ip6b);
+		if (ip6 == NULL || ip6->ip6_nxt != IPPROTO_TCP)
+			return (0);
+		hl = sizeof(*ip6);
+	} else
+		return (0);
+	th = cake_hdr(m, off + hl, sizeof(thb), thb);
+	if (th == NULL || (th[12] >> 4) < 5)
+		return (0);
+	return (hl + ((th[12] >> 4) << 2));
+}
+
+/*
+ * Bytes a packet takes on the link. One that the interface is to segment
+ * is charged as the segments it becomes, each with the headers and the
+ * overhead, as sch_cake's cake_overhead() charges a GSO packet.
+ */
+static uint32_t
+cake_wire_bytes(const struct dn_sch_cake_parms *cfg, struct mbuf *m)
+{
+	int off = dn_tag_get(m)->iphdr_off, len = m->m_pkthdr.len - off;
+	int hl, segsz, segs, last;
+
+	if (__predict_true((m->m_pkthdr.csum_flags & CSUM_TSO) == 0))
+		return (cake_adj_len(cfg, len, off));
+
+	segsz = m->m_pkthdr.tso_segsz;
+	hl = cake_tso_hdrlen(m, off);
+	if (segsz <= 0 || hl == 0 || len <= hl + segsz)
+		return (cake_adj_len(cfg, len, off));
+	segs = howmany(len - hl, segsz);
+	last = len - hl - (segs - 1) * segsz;
+	return (cake_adj_len(cfg, hl + segsz, off) * (segs - 1) +
+	    cake_adj_len(cfg, hl + last, off));
 }
 
 #ifdef DN_WIRE_LEN
@@ -618,6 +730,7 @@ cake_wire_len(struct dn_sch_inst *_si, struct mbuf *m)
 }
 #endif
 
+#ifndef CAKE_UPSTREAM
 /*
  * Charge a packet that was dropped after crossing the link (ingress mode)
  * to the tin clock, the link clock and the pipe, as sch_cake does with
@@ -639,27 +752,32 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 		return;
 
 	/* drops only add debt up to the cap, never take any away */
-	link_ns = cake_link_now(si, now_ns, 0);
+	link_ns = cake_link_now(si, now_ns);
 	cake_charge_tin(tin, len, link_ns);
 	if (tin->time_next > link_ns + interval)
 		tin->time_next = MAX(last, link_ns + interval);
 	si->link_time = MAX(si->link_time, link_ns) + cake_link_dur(si, len);
 
-	/* pipe credit is in bits * DN_CREDIT_HZ, gained at bw a second. The failsafe
+	/*
+	 * pipe credit is in bits * DN_CREDIT_HZ, gained at bw a second. The failsafe
 	 * time ahead of now is debt drops may add; behind now, it is credit
 	 * owed to sends, which drops may not take. Up to a second either
-	 * way counts, which keeps the product in range. */
+	 * way counts, which keeps the product in range.
+	 */
 	debt = (int64_t)DN_CREDIT_HZ * si->_si.sched->link.bandwidth / 1000000 *
 	    (interval / 1000);
 	ahead = si->failsafe_time >= now_ns ?
 	    (int64_t)MIN(si->failsafe_time - now_ns, 1000000000ULL) :
 	    -(int64_t)MIN(now_ns - si->failsafe_time, 1000000000ULL);
-	/* |ahead| / 1000 <= 10^6 us, bw / 1000 < 2^32 / 1000,
-	 * DN_CREDIT_HZ <= 10^6: at most 4.3 * 10^18, within int64_t */
+	/*
+	 * |ahead| / 1000 <= 10^6 us, bw / 1000 < 2^32 / 1000,
+	 * DN_CREDIT_HZ <= 10^6: at most 4.3 * 10^18, within int64_t
+	 */
 	failsafe = -(ahead / 1000) * (int64_t)(si->bw / 1000) * DN_CREDIT_HZ / 1000;
 	si->_si.credit = MAX(credit - (int64_t)DN_CREDIT_HZ * 8 * len,
 	    MIN(credit, MAX(-debt, failsafe)));
 }
+#endif /* !CAKE_UPSTREAM */
 
 /*
  * Mark an ECN-capable packet CE for COBALT: 1 if it is marked now or was
@@ -752,8 +870,12 @@ cake_wash(struct mbuf *m)
 /*
  * Packets of a flow the ACK filter looks at, from the head. sch_cake scans
  * the whole flow; a cap keeps the cost of one ACK bounded when an
+#ifndef CAKE_UPSTREAM
  * unresponsive flow has thousands queued. (test/sched-diff.sh lifts it to
  * compare with sch_cake at any queue depth.)
+#else
+ * unresponsive flow has thousands queued.
+#endif
  */
 #ifndef CAKE_ACK_SCAN
 #define	CAKE_ACK_SCAN	128
@@ -829,8 +951,10 @@ tcp:
 		return (0);
 	t->hlen = (t->th[12] >> 4) << 2;
 	t->th = cake_hdr(m, off, t->hlen, t->buf);
-	/* the IP length must cover the TCP header and fit in the packet
-	 * (link layer padding may follow it) */
+	/*
+	 * the IP length must cover the TCP header and fit in the packet
+	 * (link layer padding may follow it)
+	 */
 	return (t->th != NULL && t->seglen >= t->hlen &&
 	    t->seglen <= m->m_pkthdr.len - off);
 }
@@ -985,7 +1109,8 @@ cake_tcp_sack_cmp(const struct cake_tcp *a, const struct cake_tcp *b)
 			end_b = be32dec(st + 4);
 			if (first)
 				bytes_b += end_b - start_b;
-			if (!SEQ_GT(start_b, start_a) && !SEQ_LT(end_b, end_a)) {
+			if (!SEQ_GT(start_b, start_a) &&
+			    !SEQ_LT(end_b, end_a)) {
 				found = 1;
 				if (!first)
 					break;
@@ -1089,7 +1214,8 @@ cake_drop_head(struct cake_flow *q, struct cake_si *si)
 	FREE_PKT(m);
 }
 
-/* Enqueue a packet 'm' to a flow 'q' and add timestamp to that packet.
+/*
+ * Enqueue a packet 'm' to a flow 'q' and add timestamp to that packet.
  * Return 1 when unable to add timestamp, otherwise return 0
  */
 static int
@@ -1100,7 +1226,8 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 
 	len = m->m_pkthdr.len;
 
-	/* Add timestamp to mbuf as MTAG. Reuse one the packet still carries
+	/*
+	 * Add timestamp to mbuf as MTAG. Reuse one the packet still carries
 	 * (prepending it again would corrupt the tag list). It goes after
 	 * dummynet's tag, which dn_tag_get() takes to be the first: in
 	 * front, the ACK filter and the wire length of a queued packet
@@ -1121,12 +1248,12 @@ cake_flow_enqueue(struct cake_flow *q, struct mbuf *m, struct cake_si *si)
 
 	mq_append(&q->mq, m);
 	cake_update_stats(q, si, len, 0);
-	return 0;
+	return (0);
 
 drop:
 	cake_update_stats(q, si, len, 1);
 	m_freem(m);
-	return 1;
+	return (1);
 }
 
 /* extract the head of a flow, with its enqueue timestamp */
@@ -1138,13 +1265,15 @@ cake_extract_head(struct cake_flow *q, struct cake_si *si, uint64_t *pkt_ts)
 
 next:	m = q->mq.head;
 	if (m == NULL)
-		return m;
+		return (m);
 	q->mq.head = m->m_nextpkt;
 	q->mq.count--;
 
 	cake_update_stats(q, si, -m->m_pkthdr.len, 0);
-	/* the flow's backlog shrank: keep a warm heap up to date, as
-	 * cake_dequeue_one() does */
+	/*
+	 * the flow's backlog shrank: keep a warm heap up to date, as
+	 * cake_dequeue_one() does
+	 */
 	if (si->overflow_timeout)
 		cake_heapify(si, q->heap_idx);
 
@@ -1167,34 +1296,43 @@ next:	m = q->mq.head;
 		m_freem(m);
 		goto next;
 	}
-	return m;
+	return (m);
 }
 
 /*
  * Hash a packet with the Jenkins hash and extract its DSCP. The source and
  * destination host hashes go to *srch and *dsth. The flow hash covers the
  * 5-tuple with CAKE_FLOW_FLOWS, otherwise the hosts the mode isolates.
- * All fragments of a datagram hash to the same flow, without ports.
+ * All fragments of a datagram hash to the same flow, without ports. IPv6
+ * extension headers (hop-by-hop, routing, destination options) in the
+ * first mbuf are skipped to reach the protocol and its ports.
  */
+#define	CAKE_IP6_EXT_MAX	8	/* extension headers looked through */
+
 static uint32_t
 cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 	uint8_t *dscp, uint32_t *srch, uint32_t *dsth)
 {
 	struct ip *ip;
 	struct ip6_hdr *ip6;
-	/* 41 bytes hashed, rounded up to whole words: on an aligned key
+	/*
+	 * 41 bytes hashed, rounded up to whole words: on an aligned key
 	 * jenkins_hash() reads the last word whole and masks off the bytes
-	 * past the end, which KASAN reports */
+	 * past the end, which KASAN reports
+	 */
 	uint8_t tuple[44];
-	int off, len, portoff, ports, alen;
+	const uint8_t *ext;
+	int off, len, portoff, ports, alen, i;
 	uint8_t proto;
 	uint32_t h;
 
 	memset(tuple, 0, sizeof(tuple));
 	memcpy(&tuple[1], &perturbation, sizeof(perturbation));
 
-	/* the IP stack makes the header contiguous, but dummynet on layer 2
-	 * can pass anything: short or non-IP packets go to one fixed flow */
+	/*
+	 * the IP stack makes the header contiguous, but dummynet on layer 2
+	 * can pass anything: short or non-IP packets go to one fixed flow
+	 */
 	off = dn_tag_get(m)->iphdr_off;
 	*dscp = 0;
 	*srch = *dsth = 0;
@@ -1217,6 +1355,28 @@ cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 		len = 41;
 		alen = 16;
 		ports = 1;
+		/*
+		 * a fragment header ends the walk, without ports: every
+		 * fragment carries it and the same next header
+		 */
+		for (i = 0; i < CAKE_IP6_EXT_MAX; i++) {
+			if (proto != IPPROTO_HOPOPTS &&
+			    proto != IPPROTO_ROUTING &&
+			    proto != IPPROTO_DSTOPTS &&
+			    proto != IPPROTO_FRAGMENT)
+				break;
+			ports = 0;
+			if (m->m_len < off + 8)
+				break;
+			ext = mtodo(m, off);
+			if (proto == IPPROTO_FRAGMENT) {
+				proto = ext[0];
+				break;
+			}
+			proto = ext[0];
+			off += (ext[1] + 1) << 3;
+			ports = 1;
+		}
 	} else {
 		*dscp = ip->ip_tos >> 2;
 		proto = ip->ip_p;
@@ -1361,7 +1521,9 @@ cake_lookup_flow(struct cake_si *si, uint8_t tin, uint32_t hash)
 		f = &flows[base + k];
 		if (!f->active) {
 			f->tag = hash;
+#ifndef CAKE_UPSTREAM
 			cobalt_vars_init(&f->cvars);
+#endif
 			return (f);
 		}
 	}
@@ -1477,8 +1639,10 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 		    CAKE_HEAP_FLOW(e)] : NULL;
 		if (fat != NULL && fat->mq.head != NULL)
 			break;
-		/* the heap went wrong (sch_cake rebuilds it on its next
-		 * call): rebuild it now, or give up if nothing is queued */
+		/*
+		 * the heap went wrong (sch_cake rebuilds it on its next
+		 * call): rebuild it now, or give up if nothing is queued
+		 */
 		si->overflow_timeout = 0;
 		if (tries > 0)
 			return (0);
@@ -1487,9 +1651,11 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 	if (cobalt_queue_full(&fat->cvars, &si->tins[fat->tin].cparams,
 	    now_ns))
 		si->tins[fat->tin].unresponsive_flows++;
+#ifndef CAKE_UPSTREAM
 	if (si->cfg.flags & CAKE_INGRESS)
 		cake_charge_link(si, &si->tins[fat->tin],
 		    cake_wire_bytes(&si->cfg, fat->mq.head), now_ns);
+#endif
 	cake_drop_head(fat, si);
 	cake_heapify(si, 0);
 	return (1);
@@ -1525,6 +1691,7 @@ cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now_ns,
 	    delay < tin->base_delay ? 2 : 8);
 }
 
+#ifndef CAKE_UPSTREAM
 /*
  * Dequeue from a flow, applying COBALT. Return NULL if the flow is empty,
  * or, in ingress mode, after a drop with *retry set: the drop used up
@@ -1546,15 +1713,33 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns,
 		drop = cobalt_should_drop(&f->cvars, &tin->cparams,
 		    now_ns, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
 		    &marked, ingress ? tin->bulk_flows : 0);
+#else
+/*
+ * Dequeue from a flow, applying COBALT. Return NULL if the flow is empty.
+ */
+static struct mbuf *
+cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns)
+{
+	struct cake_tin *tin = &si->tins[f->tin];
+	struct mbuf *m;
+	uint64_t pkt_ts;
+	int drop, marked;
+
+	while ((m = cake_extract_head(f, si, &pkt_ts)) != NULL) {
+		drop = cobalt_should_drop(&f->cvars, &tin->cparams,
+		    now_ns, pkt_ts, m, si->cfg.flags & CAKE_ECN_ENABLED,
+		    &marked, 0);
+#endif
 		if (marked)
 			tin->ecn_marks++;
 
 		/* last packet in queue may be marked, shouldn't be dropped */
 		if (!drop || f->mq.head == NULL) {
 			cake_tin_sent(tin, m, now_ns, pkt_ts);
-			return m;
+			return (m);
 		}
 
+#ifndef CAKE_UPSTREAM
 		/* in ingress mode the dropped packet still used the link */
 		if (ingress) {
 			len = cake_wire_bytes(&si->cfg, m);
@@ -1562,14 +1747,17 @@ cake_flow_dequeue(struct cake_flow *f, struct cake_si *si, uint64_t now_ns,
 			f->deficit -= len;
 			tin->tin_deficit -= len;
 		}
+#endif
 		cake_update_stats(f, si, 0, 1);
 		m_freem(m);
+#ifndef CAKE_UPSTREAM
 		if (ingress) {
 			*retry = 1;
-			return NULL;
+			return (NULL);
 		}
+#endif
 	}
-	return NULL;
+	return (NULL);
 }
 
 #ifdef CAKE_DEBUG
@@ -1766,10 +1954,11 @@ cake_alloc(size_t n, size_t size)
 }
 #define	CAKE_COUNT(c)		((c)++)
 #else
-#define	CAKE_CHECK(si, where)	do { } while (0)
-#define	cake_alloc(n, size)	mallocarray(n, size, M_DUMMYNET, M_NOWAIT | M_ZERO)
-#define	CAKE_COUNT(c)		do { } while (0)
-#define	CAKE_LINK_STAT(t, lo, now)	do { } while (0)
+static void *
+cake_alloc(size_t n, size_t size)
+{
+	return (mallocarray(n, size, M_DUMMYNET, M_NOWAIT | M_ZERO));
+}
 #endif
 
 /*
@@ -1789,20 +1978,22 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	uint8_t dscp, t;
 
 	si = (struct cake_si *)_si;
-	schk = (struct cake_schk *)(si->_si.sched+1);
+	schk = (struct cake_schk *)(si->_si.sched + 1);
 	now_ns = cake_now_ns();
 
 	if (__predict_false(CAKE_STALE(si, schk)))
 		cake_reconfig(si, schk);
 
-	/* an empty packet would be queued but not counted, as the counters
-	 * go by the length's sign (dummynet never passes one) */
+	/*
+	 * an empty packet would be queued but not counted, as the counters
+	 * go by the length's sign (dummynet never passes one)
+	 */
 	if (__predict_false(m->m_pkthdr.len <= 0)) {
 		si->main_q.ni.drops++;
 		si->_si.ni.drops++;
 		V_dn_cfg.io_pkt_drop++;
 		FREE_PKT(m);
-		return 1;
+		return (1);
 	}
 
 	hash = cake_hash_flow(m, si->perturbation, si->flow_mode, &dscp,
@@ -1818,13 +2009,17 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	/* as sch_cake's shaper: an idle link without debt starts again now */
 	if (si->main_q.ni.length == 0 && si->link_time < now_ns) {
 		si->link_time = now_ns;
+#ifndef CAKE_UPSTREAM
 		si->failsafe_time = now_ns;
+#endif
 	}
 
-	/* an idle tin's clock is stale: do not let it claim old credit, but
-	 * let it be due on the link clock that cake_dequeue() goes by */
+	/*
+	 * an idle tin's clock is stale: do not let it claim old credit, but
+	 * let it be due on the link clock that cake_dequeue() goes by
+	 */
 	if (si->shaped && tin->backlog == 0) {
-		uint64_t link_ns = cake_link_now(si, now_ns, 0);
+		uint64_t link_ns = cake_link_now(si, now_ns);
 
 		if (tin->time_next < link_ns)
 			tin->time_next = link_ns;
@@ -1832,8 +2027,10 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 
 	/* cake_flow_enqueue() only fails when it cannot timestamp a packet */
 	if (cake_flow_enqueue(f, m, si)) {
+#ifdef CAKE_DEBUG
 		CAKE_CHECK(si, "enqueue drop");
-		return 1;
+#endif
+		return (1);
 	}
 
 	/*
@@ -1864,9 +2061,11 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 		    (si->cfg.flags & CAKE_ACK_AGGRESSIVE) != 0);
 		if (ack != NULL) {
 			tin->ack_drops++;
+#ifndef CAKE_UPSTREAM
 			if (si->cfg.flags & CAKE_INGRESS)
 				cake_charge_link(si, tin,
 				    cake_wire_bytes(&si->cfg, ack), now_ns);
+#endif
 			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
 			FREE_PKT(ack);
 		}
@@ -1876,7 +2075,9 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	if (si->overflow_timeout)
 		cake_heapify_up(si, f->heap_idx);
 
-	/* over the packet or byte limit: drop from the fattest flow, which
+#ifndef CAKE_UPSTREAM
+	/*
+	 * over the packet or byte limit: drop from the fattest flow, which
 	 * is usually not the one this packet went to, so report the enqueue
 	 * as a success.
 	 */
@@ -1884,9 +2085,21 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	    si->main_q.ni.len_bytes > si->buffer_limit)
 		if (!cake_drop_fattest(si, now_ns))
 			break;
+#else
+	/*
+	 * over the byte limit: drop from the fattest flow, which is usually
+	 * not the one this packet went to, so report the enqueue as a
+	 * success.
+	 */
+	while (si->main_q.ni.len_bytes > si->buffer_limit)
+		if (!cake_drop_fattest(si, now_ns))
+			break;
+#endif
 
+#ifdef CAKE_DEBUG
 	CAKE_CHECK(si, "enqueue");
-	return 0;
+#endif
+	return (0);
 }
 
 /*
@@ -1898,19 +2111,30 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
  * waits for the next tick where sch_cake would send it earlier (Bulk
  * against greedy Voice got 13% less at kern.hz=1000). So they use the
  * time each packet would leave a link paced at the pipe's rate: the
+#ifndef CAKE_UPSTREAM
  * previous one's plus its own length at that rate (and in ingress mode
  * the drops', up to the failsafe), never ahead of now and at most one
+#else
+ * previous one's plus its own length at that rate, never ahead of now and
+ * at most one
+#endif
  * release interval (a tick on a stock dummynet, DN_RELEASE_NS) behind
  * it, or, while the queue has been backlogged since the last send, as
  * far back as that send: a release that came late (a late tick) sends
  * what the link would have sent since. COBALT keeps the real time, as a
+#ifdef CAKE_KNOBS
  * packet may have arrived after its slot on the link. link_clock=0 goes
  * back to dummynet's time.
+#else
+ * packet may have arrived after its slot on the link.
+#endif
  */
+#ifdef CAKE_KNOBS
 static u_int cake_link_clock = 1;
 SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_clock,
 	CTLFLAG_RW, &cake_link_clock, 0,
 	"Pace tin selection by the link's time, not dummynet's tick");
+#endif
 
 /* a packet's time on the link, at the pipe's rate, as sch_cake's shaper */
 static __inline uint64_t
@@ -1919,26 +2143,40 @@ cake_link_dur(struct cake_si *si, uint32_t len)
 	return (((uint64_t)len * si->link_rate_ns) >> si->link_rate_shft);
 }
 
-/* decide: a read for cake_dequeue()'s choice of tin, for CAKE_LINK_STAT */
+#ifdef CAKE_DEBUG
+/* set for a read for cake_dequeue()'s choice of tin, for CAKE_LINK_STAT */
+static int cake_link_deciding;
+#endif
+
 static __inline uint64_t
-cake_link_now(struct cake_si *si, uint64_t now, int decide)
+cake_link_now(struct cake_si *si, uint64_t now)
 {
 	uint64_t window = DN_RELEASE_NS, t = si->link_time, lo;
 
+#ifdef CAKE_KNOBS
 	if (!cake_link_clock)
 		return (now);
+#endif
+#ifndef CAKE_UPSTREAM
 	if (si->cfg.flags & CAKE_INGRESS)
 		t = MIN(t, si->failsafe_time);
+#endif
 	lo = now - MIN(now, window);
-	/* backlogged since the pipe's previous release, the link could have
-	 * sent ever since: a late release's batch covers that span */
-	if (si->main_q.ni.length > 0 && si->link_prev != 0 && si->link_prev < lo)
+	/*
+	 * backlogged since the pipe's previous release, the link could have
+	 * sent ever since: a late release's batch covers that span
+	 */
+	if (si->main_q.ni.length > 0 && si->link_prev != 0 &&
+	    si->link_prev < lo)
 		lo = si->link_prev;
-	if (decide)
+#ifdef CAKE_DEBUG
+	if (cake_link_deciding)
 		CAKE_LINK_STAT(t, lo, now);
+#endif
 	return (MIN(MAX(t, lo), now));
 }
 
+#ifndef CAKE_UPSTREAM
 /*
  * sch_cake's failsafe, for ingress mode, where drops charge the link: its
  * shaper sends at the earlier of the time the link is free, drops
@@ -1955,6 +2193,7 @@ cake_failsafe(struct cake_si *si, uint32_t len, uint64_t link_ns)
 
 	si->failsafe_time = MAX(si->failsafe_time, link_ns) + dur + dur / 2;
 }
+#endif /* !CAKE_UPSTREAM */
 
 /*
  * Select a tin when the pipe has a rate, as sch_cake does in shaped mode.
@@ -2021,10 +2260,13 @@ cake_dequeue(struct dn_sch_inst *_si)
 	struct mbuf *m;
 	uint64_t now_ns, link_ns = 0;
 	uint32_t len, idle_tins = 0;
-	int first_flow = 1, retry;
+	int first_flow = 1;
+#ifndef CAKE_UPSTREAM
+	int retry;
+#endif
 
 	si = (struct cake_si *)_si;
-	schk = (struct cake_schk *)(si->_si.sched+1);
+	schk = (struct cake_schk *)(si->_si.sched + 1);
 	now_ns = cake_now_ns();
 
 	/* a rate change reaches a backlog without waiting for new packets */
@@ -2041,18 +2283,28 @@ cake_dequeue(struct dn_sch_inst *_si)
 	for (;;) {
 		/* packets may have been dropped by COBALT on the way */
 		if (si->main_q.ni.length == 0) {
+#ifdef CAKE_DEBUG
 			CAKE_CHECK(si, "dequeue empty");
-			return NULL;
+#endif
+			return (NULL);
 		}
 
 		if (si->shaped) {
-			link_ns = cake_link_now(si, now_ns, 1);
+#ifdef CAKE_DEBUG
+			cake_link_deciding = 1;
+#endif
+			link_ns = cake_link_now(si, now_ns);
+#ifdef CAKE_DEBUG
+			cake_link_deciding = 0;
+#endif
 			si->cur_tin = cake_select_tin(si, link_ns);
 			tin = &si->tins[si->cur_tin];
 		} else {
-			/* WDRR between the tins with flows, as sch_cake's
+			/*
+			 * WDRR between the tins with flows, as sch_cake's
 			 * unlimited mode: skip a tin while its deficit is
-			 * negative, refilling it while not positive */
+			 * negative, refilling it while not positive
+			 */
 			tin = &si->tins[si->cur_tin];
 			if (tin->tin_deficit < 0 ||
 			    tin->sparse_flows + tin->bulk_flows == 0) {
@@ -2061,12 +2313,14 @@ cake_dequeue(struct dn_sch_inst *_si)
 				si->cur_tin = (si->cur_tin + 1) % si->tin_cnt;
 				if (tin->sparse_flows + tin->bulk_flows == 0 &&
 				    ++idle_tins > 2 * si->tin_cnt)
-					return NULL;	/* no tin has flows */
+					return (NULL);	/* no tin has flows */
 				continue;
 			}
 		}
 
+#ifndef CAKE_UPSTREAM
 retry:
+#endif
 		/* select a list to start with */
 		if (first_flow && !TAILQ_EMPTY(&tin->decayingflows))
 			list = &tin->decayingflows;
@@ -2078,14 +2332,17 @@ retry:
 
 		f = TAILQ_FIRST(list);
 		if (f == NULL) {
-			/* packets queued but no flows listed: stats are
-			 * broken */
+			/*
+			 * packets queued but no flows listed: stats are
+			 * broken
+			 */
 			D("tin %u has backlog %u but no flows", si->cur_tin,
 			    tin->backlog);
-			return NULL;
+			return (NULL);
 		}
 
-		/* out of deficit: refill and move to the tail of old flows.
+		/*
+		 * out of deficit: refill and move to the tail of old flows.
 		 * A flow that used up a quantum and still has packets is bulk
 		 * and counts against its hosts' share; one that is empty stays
 		 * counted as sparse until it gets a packet (SPARSE_WAIT).
@@ -2106,11 +2363,16 @@ retry:
 			continue;
 		}
 
+#ifndef CAKE_UPSTREAM
 		m = cake_flow_dequeue(f, si, now_ns, &retry);
 		if (m == NULL && retry)
 			goto retry;
+#else
+		m = cake_flow_dequeue(f, si, now_ns);
+#endif
 		if (m == NULL) {
-			/* The flow is empty. As in sch_cake, it stays on the
+			/*
+			 * The flow is empty. As in sch_cake, it stays on the
 			 * decaying list while its COBALT state is not at rest
 			 * (BLUE active, a drop count, or active within an
 			 * interval), so that state carries over if it gets
@@ -2118,7 +2380,8 @@ retry:
 			 * otherwise it is deactivated. Either way its next
 			 * packet puts it among the new flows.
 			 */
-			if (cobalt_queue_empty(&f->cvars, &tin->cparams, now_ns))
+			if (cobalt_queue_empty(&f->cvars, &tin->cparams,
+			    now_ns))
 				tin->unresponsive_flows--;
 			TAILQ_REMOVE(list, f, flowchain);
 			if (f->set == CAKE_SET_BULK) {
@@ -2155,17 +2418,21 @@ retry:
 			si->_si.credit -= (int64_t)DN_CREDIT_HZ * 8 *
 			    ((int64_t)len - m->m_pkthdr.len);
 #endif
+#ifndef CAKE_UPSTREAM
 		if (si->shaped && (si->cfg.flags & CAKE_INGRESS))
 			cake_failsafe(si, len, link_ns);
+#endif
 		/* a heap untouched for 65535 packets has gone cold */
 		if (si->overflow_timeout)
 			si->overflow_timeout--;
+#ifdef CAKE_DEBUG
 		CAKE_CHECK(si, "dequeue");
-		return m;
+#endif
+		return (m);
 	}
 
 	/* unreachable point */
-	return NULL;
+	return (NULL);
 }
 
 /*
@@ -2228,9 +2495,19 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 		rate = cake_rate_ns(bw, share, &tin->rate_ns, &tin->rate_shft);
 		cp->mtu_time = ((uint64_t)CAKE_MTU * tin->rate_ns) >>
 		    tin->rate_shft;
-		/* the tin's bytes per second over 4096, at least 300 and at
+#ifndef CAKE_UPSTREAM
+		/*
+		 * the tin's bytes per second over 4096, at least 300 and at
 		 * most the configured quantum (sch_cake's is fixed at 1514),
-		 * so slow tins interleave their flows in smaller pieces */
+		 * so slow tins interleave their flows in smaller pieces
+		 */
+#else
+		/*
+		 * the tin's bytes per second over 4096, between 300 and
+		 * 1514, so slow tins interleave their flows in smaller
+		 * pieces
+		 */
+#endif
 		tin->flow_quantum = MIN(MAX(rate >> 12, 300), cfg->quantum);
 	}
 	granularity = MAX(cp->mtu_time, DN_RELEASE_GRAIN_NS);
@@ -2290,7 +2567,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 		free(flows, M_DUMMYNET);
 		free(hosts, M_DUMMYNET);
 		free(heap, M_DUMMYNET);
-		return ENOMEM ;
+		return (ENOMEM);
 	}
 
 	si->flows = flows;
@@ -2329,7 +2606,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 		flows[i].tin = i / si->flows_cnt;
 		cobalt_vars_init(&flows[i].cvars);
 	}
-	/* entry j * CAKE_MAX_TINS + t holds flow j of tin t, as in cake_init() */
+	/* entry j * CAKE_MAX_TINS + t: flow j of tin t, as in cake_init() */
 	for (j = 0; j < si->flows_cnt; j++)
 		for (i = 0; i < CAKE_MAX_TINS; i++) {
 			heap[j * CAKE_MAX_TINS + i] = j << 3 | i;
@@ -2337,7 +2614,7 @@ cake_new_tables(struct cake_si *si, struct cake_schk *schk)
 				flows[i * si->flows_cnt + j].heap_idx =
 				    j * CAKE_MAX_TINS + i;
 		}
-	return 0;
+	return (0);
 }
 
 /*
@@ -2390,7 +2667,8 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 	uint32_t i, n, bw;
 
 	if (cake_tin_cnt[cfg->diffserv] == si->tin_cnt &&
-	    cfg->flows_cnt == si->flows_cnt && cfg->flow_mode == si->flow_mode) {
+	    cfg->flows_cnt == si->flows_cnt &&
+	    cfg->flow_mode == si->flow_mode) {
 		bw = si->_si.sched->link.bandwidth;
 		si->bw = bw;
 		si->shaped = bw != 0;
@@ -2398,6 +2676,11 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 		cake_buffer_limit(si, cfg, bw);
 		for (i = 0; i < si->tin_cnt; i++)
 			cake_tin_params(si, i, cfg, bw);
+		/*
+		 * diffserv8 and precedence have the same tin count, so the
+		 * mode can change without new tables; flows stay in their tins
+		 */
+		si->dscp_map = cake_dscp_maps[cfg->diffserv];
 		si->cfg = *cfg;
 		si->gen = schk->gen;
 		return;
@@ -2405,13 +2688,18 @@ cake_reconfig(struct cake_si *si, struct cake_schk *schk)
 
 	n = si->tin_cnt * si->flows_cnt;
 	if (cake_new_tables(si, schk) != 0) {
+#ifdef CAKE_DEBUG
 		CAKE_COUNT(cake_rebuild_failures);
+#endif
 		return;		/* keep the old tables, try again later */
 	}
 	cake_free_tables(si, flows, hosts, heap, n);
+#ifdef CAKE_DEBUG
 	CAKE_COUNT(cake_rebuilds);
+#endif
 }
 
+#ifndef CAKE_UPSTREAM
 /*
  * Every CAKE instance and kept state, for net.inet.ip.dummynet.cake.stats.
  * The list has its own lock, as it spans every vnet's dummynet. Lock order:
@@ -2513,8 +2801,11 @@ cake_adopt(struct cake_si *si, struct cake_schk *schk)
 	s->flows = NULL;
 	s->hosts = NULL;
 	s->overflow_heap = NULL;
+#ifdef CAKE_DEBUG
 	CAKE_COUNT(cake_adoptions);
+#endif
 }
+#endif /* !CAKE_UPSTREAM */
 
 /*
  * Initialize cake scheduler instance.
@@ -2529,11 +2820,11 @@ cake_new_sched(struct dn_sch_inst *_si)
 	int error;
 
 	si = (struct cake_si *)_si;
-	schk = (struct cake_schk *)(_si->sched+1);
+	schk = (struct cake_schk *)(_si->sched + 1);
 
-	if(si->flows) {
+	if (si->flows) {
 		D("si already configured!");
-		return 0;
+		return (0);
 	}
 
 	/* init the main queue */
@@ -2542,16 +2833,17 @@ cake_new_sched(struct dn_sch_inst *_si)
 	q->_si = _si;
 	q->fs = _si->sched->fs;
 
+#ifndef CAKE_UPSTREAM
 	if (schk->stash.flows != NULL)
 		cake_adopt(si, schk);
 	else {
 		/* init perturbation for this si */
 		si->perturbation = random();
-		cake_rng ^= (uint64_t)arc4random() << 32 | arc4random();
+		V_cake_rng ^= (uint64_t)arc4random() << 32 | arc4random();
 
 		error = cake_new_tables(si, schk);
 		if (error != 0)
-			return error;
+			return (error);
 	}
 
 	si->vnet = curvnet;
@@ -2559,9 +2851,18 @@ cake_new_sched(struct dn_sch_inst *_si)
 	LIST_INSERT_HEAD(&cake_instances, si, all);
 	si->listed = 1;
 	mtx_unlock(&cake_instances_mtx);
+#else
+	/* init perturbation for this si */
+	si->perturbation = arc4random();
+	V_cake_rng ^= (uint64_t)arc4random() << 32 | arc4random();
+
+	error = cake_new_tables(si, schk);
+	if (error != 0)
+		return (error);
+#endif
 
 	cake_desc.ref_count++;
-	return 0;
+	return (0);
 }
 
 /*
@@ -2571,23 +2872,29 @@ static int
 cake_free_sched(struct dn_sch_inst *_si)
 {
 	struct cake_si *si = (struct cake_si *)_si ;
-	struct cake_schk *schk = (struct cake_schk *)(_si->sched+1);
+#ifndef CAKE_UPSTREAM
+	struct cake_schk *schk = (struct cake_schk *)(_si->sched + 1);
+#endif
 	uint32_t i;
 
+#ifndef CAKE_UPSTREAM
 	if (si->listed) {
 		mtx_lock(&cake_instances_mtx);
 		LIST_REMOVE(si, all);
 		si->listed = 0;
 		mtx_unlock(&cake_instances_mtx);
 	}
-	/* an idle instance of a scheduler without a mask, as dummynet
-	 * expires them: keep its state for the next instance */
+	/*
+	 * an idle instance of a scheduler without a mask, as dummynet
+	 * expires them: keep its state for the next instance
+	 */
 	if (si->flows != NULL && si->main_q.ni.length == 0 &&
 	    !(_si->sched->sch.flags & DN_HAVE_MASK) &&
 	    schk->stash.flows == NULL) {
 		cake_stash(si, schk);
 		cake_desc.ref_count--;
 	}
+#endif
 	if (si->flows != NULL) {
 		for (i = 0; i < si->tin_cnt * si->flows_cnt; i++)
 			dn_free_pkts(si->flows[i].mq.head);
@@ -2600,13 +2907,13 @@ cake_free_sched(struct dn_sch_inst *_si)
 		cake_desc.ref_count--;
 	}
 
-	return 0;
+	return (0);
 }
 
 /*
  * Configure cake scheduler.
- * the configurations for the scheduler is passed from userland; an
- * unpatched ipfw(8) passes none, in which case the sysctl defaults apply.
+ * the configurations for the scheduler is passed from userland; what it
+ * does not pass keeps its default.
  */
 static int
 cake_config(struct dn_schk *_schk)
@@ -2614,24 +2921,30 @@ cake_config(struct dn_schk *_schk)
 	struct cake_schk *schk;
 	struct dn_extra_parms *ep;
 	struct dn_sch_cake_parms *cfg;
+#ifndef CAKE_UPSTREAM
 	uint32_t mask;
+#endif
 
-	schk = (struct cake_schk *)(_schk+1);
+	schk = (struct cake_schk *)(_schk + 1);
 	ep = (struct dn_extra_parms *) _schk->cfg;
 	cfg = &schk->cfg;
 
-	/* dummynet refuses to unload a scheduler with references, but only
+	/*
+	 * dummynet refuses to unload a scheduler with references, but only
 	 * instances take one; a configured scheduler without instances
-	 * still points at this module, so it holds one too until destroyed */
+	 * still points at this module, so it holds one too until destroyed
+	 */
 	if (!schk->held) {
 		schk->held = 1;
 		cake_desc.ref_count++;
 	}
 
-	*cfg = cake_sysctl;
+	*cfg = cake_defaults;
 	schk->gen++;		/* instances pick the change up in enqueue */
 
-	/* par array contains cake configuration as follow
+#ifndef CAKE_UPSTREAM
+	/*
+	 * par array contains cake configuration as follow
 	 * 0- target, 1- interval, 2- flags, 3- diffserv,
 	 * 4- quantum, 5- limit, 6- flows, 7- flow mode,
 	 * 8- overhead + 64, 9- mpu | framing << 16
@@ -2643,8 +2956,10 @@ cake_config(struct dn_schk *_schk)
 		if (ep->par[1] >= 0)
 			cfg->interval = ep->par[1];
 		if (ep->par[2] >= 0) {
-			/* only the flags ipfw(8) was given; older ones send
-			 * just ECN, without a mask */
+			/*
+			 * only the flags ipfw(8) was given; older ones send
+			 * just ECN, without a mask
+			 */
 			mask = (ep->par[2] >> CAKE_FLAGS_MASK_SHIFT) &
 			    CAKE_FLAGS_ALL;
 			if (mask == 0)
@@ -2672,6 +2987,37 @@ cake_config(struct dn_schk *_schk)
 			cfg->atm = ep->par[9] >> 16;
 		}
 	}
+#else
+	/*
+	 * par array contains cake configuration as follow
+	 * 0- target, 1- interval, 2- flags, 3- diffserv, 4- flow mode,
+	 * 5- memlimit, 6- flows, 7- overhead + 64, 8- mpu, 9- framing
+	 */
+	if (ep && ep->oid.len == sizeof(*ep) &&
+		ep->oid.subtype == DN_SCH_PARAMS) {
+		if (ep->par[0] >= 0)
+			cfg->target = ep->par[0];
+		if (ep->par[1] >= 0)
+			cfg->interval = ep->par[1];
+		if (ep->par[2] >= 0)
+			cfg->flags = ep->par[2];
+		if (ep->par[3] >= 0)
+			cfg->diffserv = ep->par[3];
+		if (ep->par[4] >= 0)
+			cfg->flow_mode = ep->par[4];
+		if (ep->par[5] >= 0)
+			cfg->memlimit = MIN(ep->par[5], 4 << 20);
+		if (ep->par[6] >= 0)
+			cfg->flows_cnt = MIN(ep->par[6], 65536);
+		if (ep->par[7] >= 0)
+			cfg->overhead = MIN(ep->par[7], CAKE_OVERHEAD_MAX -
+			    CAKE_OVERHEAD_MIN) + CAKE_OVERHEAD_MIN;
+		if (ep->par[8] >= 0)
+			cfg->mpu = MIN(ep->par[8], CAKE_MPU_MAX);
+		if (ep->par[9] >= 0)
+			cfg->atm = MIN(ep->par[9], CAKE_ATM_MAX);
+	}
+#endif
 
 	/* Bound the configurations */
 	cfg->target = BOUND_VAR(cfg->target, 1, 5 * AQM_TIME_1S);
@@ -2686,14 +3032,18 @@ cake_config(struct dn_schk *_schk)
 	if (cfg->flags & CAKE_ACK_AGGRESSIVE)
 		cfg->flags |= CAKE_ACK_FILTER;
 	cfg->memlimit = BOUND_VAR(cfg->memlimit, 0, 4U << 20);	/* 4 GB */
-	/* sch_cake's floor; a tiny quantum makes dequeue spin through
-	 * many refill rounds per packet with the dummynet lock held */
+#ifndef CAKE_UPSTREAM
+	/*
+	 * sch_cake's floor; a tiny quantum makes dequeue spin through
+	 * many refill rounds per packet with the dummynet lock held
+	 */
 	cfg->quantum = BOUND_VAR(cfg->quantum, 300, 9000);
 	cfg->limit = BOUND_VAR(cfg->limit, 1, 65535);
+#endif
 	cfg->flows_cnt = BOUND_VAR(cfg->flows_cnt, CAKE_SET_WAYS, 65536);
 	cfg->flows_cnt = roundup2(cfg->flows_cnt, CAKE_SET_WAYS);
 
-	return 0;
+	return (0);
 }
 
 /*
@@ -2702,8 +3052,9 @@ cake_config(struct dn_schk *_schk)
 static int
 cake_destroy(struct dn_schk *_schk)
 {
-	struct cake_schk *schk = (struct cake_schk *)(_schk+1);
+	struct cake_schk *schk = (struct cake_schk *)(_schk + 1);
 
+#ifndef CAKE_UPSTREAM
 	/* the instances are gone; free the state kept from the last one */
 	if (schk->stash.flows != NULL) {
 		mtx_lock(&cake_instances_mtx);
@@ -2716,13 +3067,15 @@ cake_destroy(struct dn_schk *_schk)
 		schk->stash.hosts = NULL;
 		schk->stash.overflow_heap = NULL;
 	}
+#endif
 	if (schk->held) {
 		schk->held = 0;
 		cake_desc.ref_count--;
 	}
-	return 0;
+	return (0);
 }
 
+#ifndef CAKE_UPSTREAM
 /*
  * net.inet.ip.dummynet.cake.stats: a line per tin of every CAKE instance
  * of the reader's vnet, for the plugin's statistics: the scheduler (pipe)
@@ -2837,14 +3190,16 @@ cake_sysctl_stats(SYSCTL_HANDLER_ARGS)
 SYSCTL_PROC(_net_inet_ip_dummynet_cake, OID_AUTO, stats,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     cake_sysctl_stats, "A", "CAKE per-tin statistics of every instance");
+#endif /* !CAKE_UPSTREAM */
 
 /*
  * Return cake scheduler configurations
  * the configurations for the scheduler is passed to userland.
  */
 static int
-cake_getconfig (struct dn_schk *_schk, struct dn_extra_parms *ep) {
-	struct cake_schk *schk = (struct cake_schk *)(_schk+1);
+cake_getconfig(struct dn_schk *_schk, struct dn_extra_parms *ep)
+{
+	struct cake_schk *schk = (struct cake_schk *)(_schk + 1);
 	struct dn_sch_cake_parms *cfg;
 
 	cfg = &schk->cfg;
@@ -2854,15 +3209,66 @@ cake_getconfig (struct dn_schk *_schk, struct dn_extra_parms *ep) {
 	ep->par[1] = cfg->interval;
 	ep->par[2] = cfg->flags;
 	ep->par[3] = cfg->diffserv;
+#ifndef CAKE_UPSTREAM
 	ep->par[4] = cfg->quantum;
 	ep->par[5] = cfg->limit | (int64_t)cfg->memlimit << 32;
 	ep->par[6] = cfg->flows_cnt;
 	ep->par[7] = cfg->flow_mode;
 	ep->par[8] = cfg->overhead - CAKE_OVERHEAD_MIN;
 	ep->par[9] = cfg->mpu | cfg->atm << 16;
+#else
+	ep->par[4] = cfg->flow_mode;
+	ep->par[5] = cfg->memlimit;
+	ep->par[6] = cfg->flows_cnt;
+	ep->par[7] = cfg->overhead - CAKE_OVERHEAD_MIN;
+	ep->par[8] = cfg->mpu;
+	ep->par[9] = cfg->atm;
+#endif
 
-	return 0;
+	return (0);
 }
+
+#ifdef CAKE_UPSTREAM
+/*
+ * dn_alg stats, for net.inet.ip.dummynet.sched_stats: a line per tin of
+ * the instance, with the scheduler's number, the diffserv mode and the
+ * tin, then the tin's rate threshold (bit/s, 0 without a pipe rate), its
+ * AQM parameters and its counters as "name value" pairs; times in us.
+ */
+static void
+cake_stats(struct dn_sch_inst *_si, struct sbuf *sb)
+{
+	struct cake_si *si = (struct cake_si *)_si;
+	struct cake_tin *b;
+	uint32_t t;
+
+	if (si->flows == NULL)
+		return;
+	for (t = 0; t < si->tin_cnt; t++) {
+		b = &si->tins[t];
+		sbuf_printf(sb, "sched %u diffserv %u tin %u "
+		    "rate %ju target %ju interval %ju pkts %ju bytes %ju "
+		    "drops %ju marks %ju ack_drops %ju backlog %u "
+		    "backlog_bytes %ju sparse %u bulk %u decaying %u "
+		    "unresponsive %u collisions %ju peak_delay %ju "
+		    "avg_delay %ju base_delay %ju\n",
+		    _si->sched->sch.sched_nr, si->cfg.diffserv, t,
+		    (uintmax_t)(((uint64_t)si->bw *
+		    cake_tin_share[si->cfg.diffserv][t]) >> 16),
+		    (uintmax_t)b->cparams.target / 1000,
+		    (uintmax_t)b->cparams.interval / 1000,
+		    (uintmax_t)b->tx_pkts, (uintmax_t)b->tx_bytes,
+		    (uintmax_t)b->drops, (uintmax_t)b->ecn_marks,
+		    (uintmax_t)b->ack_drops, b->backlog,
+		    (uintmax_t)b->backlog_bytes, b->sparse_flows,
+		    b->bulk_flows, b->decaying_flows, b->unresponsive_flows,
+		    (uintmax_t)b->way_collisions,
+		    (uintmax_t)b->peak_delay / 1000,
+		    (uintmax_t)b->avg_delay / 1000,
+		    (uintmax_t)b->base_delay / 1000);
+	}
+}
+#endif
 
 /*
  * cake scheduler descriptor
@@ -2872,14 +3278,20 @@ cake_getconfig (struct dn_schk *_schk, struct dn_extra_parms *ep) {
 static struct dn_alg cake_desc = {
 	_SI( .type = )  DN_SCHED_CAKE,
 	_SI( .name = ) "CAKE",
+#ifdef CAKE_UPSTREAM
+	/* wire_len and stats methods; dummynet keeps an idle instance */
+	_SI( .flags = ) DN_WIRE_LEN | DN_KEEP_IDLE | DN_STATS,
+#else
 #ifdef DN_WIRE_LEN
 	_SI( .flags = ) DN_WIRE_LEN,	/* overhead compensation */
 #else
 	_SI( .flags = ) 0,		/* dummynet without wire_len */
 #endif
+#endif
 
 	_SI( .schk_datalen = ) sizeof(struct cake_schk),
-	_SI( .si_datalen = ) sizeof(struct cake_si) - sizeof(struct dn_sch_inst),
+	_SI( .si_datalen = ) sizeof(struct cake_si) -
+	    sizeof(struct dn_sch_inst),
 	_SI( .q_datalen = ) 0,
 
 	_SI( .enqueue = ) cake_enqueue,
@@ -2896,6 +3308,9 @@ static struct dn_alg cake_desc = {
 	_SI( .ref_count = ) 0,
 #ifdef DN_WIRE_LEN
 	_SI( .wire_len = ) cake_wire_len,
+#endif
+#ifdef CAKE_UPSTREAM
+	_SI( .stats = ) cake_stats,
 #endif
 };
 

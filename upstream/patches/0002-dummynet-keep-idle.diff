@@ -1,0 +1,32 @@
+diff --git a/sys/netpfil/ipfw/dn_sched.h b/sys/netpfil/ipfw/dn_sched.h
+index 06663b7..1ceadb0 100644
+--- a/sys/netpfil/ipfw/dn_sched.h
++++ b/sys/netpfil/ipfw/dn_sched.h
+@@ -37,6 +37,7 @@
+ 
+ #define	DN_MULTIQUEUE	0x01
+ #define	DN_WIRE_LEN	0x02	/* wire_len method is present */
++#define	DN_KEEP_IDLE	0x04	/* do not expire an idle instance */
+ /*
+  * Descriptor for a scheduling algorithm.
+  * Contains all function pointers for a given scheduler
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index f834fb2..a4f0452 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -2390,7 +2390,14 @@ drain_scheduler_sch_cb(void *_s, void *arg)
+ 		dn_ht_scan_bucket(s->siht, &s->drain_bucket,
+ 				drain_scheduler_cb, NULL);
+ 		s->drain_bucket++;
+-	} else {
++	} else if ((s->fp->flags & DN_KEEP_IDLE) == 0) {
++		/*
++		 * The only instance of a scheduler without a mask is the
++		 * next packet's too. A scheduler that keeps state between
++		 * packets (flow tables, AQM state) sets DN_KEEP_IDLE to be
++		 * spared allocating it again for every packet of a quiet
++		 * link; the instance goes with the scheduler.
++		 */
+ 		if (s->siht) {
+ 			if (drain_scheduler_cb(s->siht, NULL) == DNHT_SCAN_DEL)
+ 				s->siht = NULL;

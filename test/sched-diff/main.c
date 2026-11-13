@@ -332,6 +332,9 @@ run(uint64_t seed, int secs, struct totals *t, int verbose)
 		c.mpu = (int)range(0, 96);
 	}
 	c.ingress = range(0, 9) < 3;
+#ifdef CAKE_UPSTREAM
+	c.ingress = 0;		/* the upstream build has no ingress mode */
+#endif
 	run_ingress = c.ingress;
 	t->ingress_runs += c.ingress;
 	c.ack_filter = (int)range(0, 2);

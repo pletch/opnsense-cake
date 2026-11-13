@@ -22,6 +22,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: fuzz.sh, 3 seeds of a million packets
         run: for seed in 1 2 3; do test/fuzz.sh 1000000 $seed; done
+      - name: fuzz.sh, the build proposed to FreeBSD
+        run: CAKE_VARIANT=upstream test/fuzz.sh 1000000 1
 
   sch-cake:
     runs-on: ubuntu-24.04
@@ -43,6 +45,18 @@ jobs:
         run: test/sched-diff.sh link
       - name: cobalt-diff.sh
         run: test/cobalt-diff.sh
+      # the build proposed to FreeBSD (upstream/resolve.sh): the same
+      # comparisons, COBALT against sch_cake's own start
+      - name: sched-diff.sh, lockstep, upstream build
+        run: CAKE_VARIANT=upstream test/sched-diff.sh
+      - name: sched-diff.sh, link clock, upstream build
+        run: CAKE_VARIANT=upstream test/sched-diff.sh link
+      - name: cobalt-diff.sh, upstream build
+        run: CAKE_VARIANT=upstream test/cobalt-diff.sh
+      - name: the FreeBSD files have no build conditionals left
+        run: |
+          upstream/resolve.sh freebsd "$RUNNER_TEMP/fb"
+          ! grep -nE 'CAKE_(UPSTREAM|KNOBS|DEBUG)|^#(else|endif)' "$RUNNER_TEMP/fb/dn_sched_cake.c"
 
   plugin:
     runs-on: ubuntu-24.04

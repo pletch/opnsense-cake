@@ -54,20 +54,30 @@
 
 #define DN_CAKE_MTAG_TS	55346	/* uint64_t enqueue timestamp, ns */
 
+#ifndef CAKE_UPSTREAM
 /*
  * flags, par[2]. ipfw(8) sends the bits it was given in the low 16 bits
  * and which bits those are in the next 16, so that e.g. "wash" alone
  * leaves ECN at its default; a mask of 0 is the older ECN-only form.
  */
+#else
+/* flags, par[2] */
+#endif
 enum {
 	CAKE_ECN_ENABLED = 0x01,	/* ecn / noecn */
 	CAKE_WASH = 0x02,		/* clear DSCP after classifying */
 	CAKE_ACK_FILTER = 0x04,		/* drop redundant pure TCP ACKs */
 	CAKE_ACK_AGGRESSIVE = 0x08,	/* ... also a lone redundant one */
+#ifndef CAKE_UPSTREAM
 	CAKE_INGRESS = 0x10,		/* drops still used the link */
 	CAKE_FLAGS_ALL = 0x1f
+#else
+	CAKE_FLAGS_ALL = 0x0f
+#endif
 };
+#ifndef CAKE_UPSTREAM
 #define	CAKE_FLAGS_MASK_SHIFT	16
+#endif
 
 /* diffserv modes, par[3] */
 enum {
@@ -80,7 +90,7 @@ enum {
 };
 
 /*
- * flow isolation modes, par[7]; values and names as in sch_cake.
+ * flow isolation modes; values and names as in sch_cake.
  * FLOWS hashes the 5-tuple, SRC_IP/DST_IP the hosts. With FLOWS, the host
  * bits instead share each host's quantum between its bulk flows.
  */
@@ -108,6 +118,7 @@ enum {
 #define	CAKE_OVERHEAD_MAX	256
 #define	CAKE_MPU_MAX		256
 
+#ifndef CAKE_UPSTREAM
 /*
  * cake parameters, passed in dn_extra_parms.par[] as:
  * 0- target (us), 1- interval (us), 2- flags, 3- diffserv mode,
@@ -116,14 +127,29 @@ enum {
  * 8- overhead + 64 (bytes, so -1 can still mean unset),
  * 9- mpu (bytes) | framing << 16
  */
+#else
+/*
+ * cake parameters, passed in dn_extra_parms.par[] as:
+ * 0- target (us), 1- interval (us), 2- flags, 3- diffserv mode,
+ * 4- flow mode, 5- memlimit (KB, 0 auto), 6- flows per tin,
+ * 7- overhead + 64 (bytes: a negative parameter means unset),
+ * 8- mpu (bytes), 9- framing.
+ * quantum and limit are sch_cake's constants, 1514 and 10240.
+ */
+#endif
 struct dn_sch_cake_parms {
 	uint64_t	target;		/* CoDel target, us */
 	uint64_t	interval;	/* CoDel interval, us */
 	uint32_t	flags;
 	uint32_t	diffserv;
+#ifndef CAKE_UPSTREAM
 	uint32_t	quantum;
 	uint32_t	limit;		/* hard limit, packets, all tins */
-	uint32_t	flows_cnt;	/* flows per tin, multiple of SET_WAYS */
+#else
+	uint32_t	quantum;	/* 1514, as sch_cake's */
+	uint32_t	limit;		/* 10240 packets: caps the bytes */
+#endif
+	uint32_t	flows_cnt;	/* per tin, multiple of SET_WAYS */
 	uint32_t	flow_mode;	/* CAKE_FLOW_* */
 	int32_t		overhead;	/* bytes added per packet */
 	uint32_t	mpu;		/* minimum packet size on the wire */
@@ -162,7 +188,7 @@ struct cake_flow_stats {
 /* flow states, as sch_cake's */
 enum {
 	CAKE_SET_NONE = 0,	/* inactive */
-	CAKE_SET_SPARSE,	/* active, has not used up a quantum backlogged */
+	CAKE_SET_SPARSE,	/* active, no quantum used up backlogged */
 	CAKE_SET_SPARSE_WAIT,	/* sparse, but empty in the old rotation */
 	CAKE_SET_BULK,		/* active, counted in its hosts' bulk counts */
 	CAKE_SET_DECAYING	/* empty, COBALT state not yet at rest */
@@ -189,7 +215,7 @@ struct cake_host {
 	uint32_t	srchost_tag;
 	uint32_t	dsthost_tag;
 	uint32_t	srchost_bulk;	/* bulk flows from this source host */
-	uint32_t	dsthost_bulk;	/* bulk flows to this destination host */
+	uint32_t	dsthost_bulk;	/* bulk flows to this host */
 };
 
 /* list of flows */
@@ -201,8 +227,8 @@ struct cake_tin {
 	struct cake_flow_list oldflows;	/* bulk flows */
 	struct cake_flow_list decayingflows; /* empty, COBALT decaying */
 	struct cobalt_params cparams;
-	uint64_t	time_next;	/* ns, virtual clock at the tin's rate */
-	uint64_t	rate_ns;	/* ns per byte at the tin's rate share, */
+	uint64_t	time_next;	/* ns, clock at the tin's rate */
+	uint64_t	rate_ns;	/* ns per byte at the tin's rate, */
 	uint8_t		rate_shft;	/* shifted left by rate_shft */
 	int32_t		tin_deficit;	/* WDRR, only used without a rate */
 	uint32_t	tin_quantum;	/* WDRR weight between tins */
@@ -225,6 +251,7 @@ struct cake_tin {
 	uint64_t	base_delay;
 };
 
+#ifndef CAKE_UPSTREAM
 /*
  * The CAKE state of an instance dummynet expired, kept with its scheduler
  * for the next instance to adopt (only without a mask): dummynet destroys
@@ -252,13 +279,16 @@ struct cake_stash {
 	struct vnet	*vnet;
 	LIST_ENTRY(cake_stash) all;
 };
+#endif
 
 /* extra cake scheduler configurations */
 struct cake_schk {
 	struct dn_sch_cake_parms cfg;
 	uint32_t	gen;		/* bumped by every reconfiguration */
 	uint8_t		held;		/* holds a module reference */
+#ifndef CAKE_UPSTREAM
 	struct cake_stash stash;
+#endif
 };
 
 /* cake scheduler instance */
@@ -268,10 +298,12 @@ struct cake_si {
 
 	struct cake_flow *flows; /* tin_cnt * flows_cnt flows */
 	struct cake_host *hosts; /* tin_cnt * flows_cnt host slots */
-	/* the overflow drop's max-heap of flow backlogs, as sch_cake's: one
+	/*
+	 * the overflow drop's max-heap of flow backlogs, as sch_cake's: one
 	 * entry per flow of each of CAKE_MAX_TINS tins, (flow << 3) | tin,
 	 * kept up to date while it is warm (overflow_timeout dequeues after
-	 * the last overflow) and rebuilt when it is cold */
+	 * the last overflow) and rebuilt when it is cold
+	 */
 	uint32_t *overflow_heap;
 	uint32_t overflow_timeout;
 	struct cake_tin tins[CAKE_MAX_TINS];
@@ -289,13 +321,17 @@ struct cake_si {
 	uint64_t link_prev;	/* before it, 0 before there was one */
 	uint64_t link_rate_ns;	/* ns per byte at the pipe's rate, */
 	uint8_t	link_rate_shft;	/* shifted left by link_rate_shft */
+#ifndef CAKE_UPSTREAM
 	uint64_t failsafe_time;	/* ingress: next send allowed despite drops */
+#endif
 	struct dn_sch_cake_parms cfg; /* configuration of this instance */
 	uint64_t buffer_limit;	/* bytes queued at most, all tins */
 	uint8_t	shaped;		/* pipe has a rate: use tin thresholds */
+#ifndef CAKE_UPSTREAM
 	uint8_t	listed;		/* on cake_instances, for the statistics */
 	struct vnet *vnet;	/* whose dummynet (and lock) it belongs to */
 	LIST_ENTRY(cake_si) all;
+#endif
 };
 
 #endif /* _IP_DN_SCHED_CAKE_H */

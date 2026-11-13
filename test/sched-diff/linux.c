@@ -62,9 +62,12 @@ l_init(const struct sd_config *c)
 
 			INIT_LIST_HEAD(&flow->flowchain);
 			cobalt_vars_init(&flow->cvars);
+#ifndef CAKE_UPSTREAM
 			/* dn_sched_cake's deliberate start at 1/sqrt(1), which
-			 * cobalt-diff measures separately */
+			 * cobalt-diff measures separately; its upstream build
+			 * starts as sch_cake does */
 			flow->cvars.rec_inv_sqrt = ~0U;
+#endif
 			qd->overflow_heap[k].t = i;
 			qd->overflow_heap[k].b = j;
 			b->overflow_idx[j] = k;

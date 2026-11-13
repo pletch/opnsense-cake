@@ -69,9 +69,12 @@ static void
 l_init(int upstream_init)
 {
 	cobalt_vars_init(&v);
-	/* dn_sched_cake starts at 1/sqrt(1); see cobalt_vars_init() there */
+#ifndef CAKE_UPSTREAM
+	/* dn_sched_cake starts at 1/sqrt(1); see cobalt_vars_init() there
+	 * (its upstream build starts as sch_cake does) */
 	if (!upstream_init)
 		v.rec_inv_sqrt = ~0U;
+#endif
 }
 
 static void

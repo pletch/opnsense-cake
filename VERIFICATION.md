@@ -418,6 +418,23 @@ scripts are in [`test/`](test/); the design they test is in
   inbound dummynet traffic stalls while pf is enabled. This happens with every
   scheduler, including fifo. Use `pfctl -d` for bench tests, or go through
   OPNsense's own shaper, which sets ipfw up alongside pf.
+- The build proposed to FreeBSD (2026-11-11, [upstream/](upstream/README.md)):
+  the same source with its `CAKE_UPSTREAM` conditionals resolved. With
+  `CAKE_VARIANT=upstream`, `sched-diff.sh` (lockstep and link clock),
+  `cobalt-diff.sh` and `fuzz.sh` run on it, against `sch_cake` without
+  the 1/√1 start: all in step, and COBALT's first signal at the same
+  event in 2000 of 2000 runs. In the kernel, `test/upstream-bench.sh`
+  (parameters, RRUL, the idle instance kept, overhead compensation,
+  reconfiguration under load, memory after deletion): all pass, 0 check
+  errors. `fuzz.c` also checks, first, that every change of diffserv mode
+  on a live instance puts each DSCP in the new mode's tin (diffserv8 to
+  precedence kept the old map up to 1.5.15), that IPv6 extension
+  headers are looked through for the ports, and that a packet to be
+  segmented (TSO) is charged as its segments. On the bench with TSO on
+  the router's interface, a stream of its own through 50 Mbit/s with
+  `ethernet` ran at 5.90 MB/s (5.88 for 38 bytes and the headers a
+  segment, 6.24 a packet). FreeBSD's own test suite, with the `cake`
+  case added, under kyua: `ipfw_cake` and `pf_cake` pass.
 - Builds and CI (after 1.4.4):
   - `plugin/ci-build.sh` builds both packages from scratch, from the
     `opnsense/src` and `opnsense/plugins` commits in `plugin/build.conf`

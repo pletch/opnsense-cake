@@ -82,7 +82,7 @@ struct mbuf {
 	char		*base;		/* their allocation, from 0-3 bytes before */
 	char		*rest;		/* m_pkthdr.len - m_len bytes */
 	int		writable;
-	struct { int len; void *rcvif; } m_pkthdr;
+	struct { int len; void *rcvif; int csum_flags, tso_segsz; } m_pkthdr;
 	struct m_tag	*tags;
 };
 #define mtod(m, t)	((t)((m)->m_data))
@@ -173,6 +173,7 @@ static inline void m_freem(struct mbuf *m)
 }
 #define FREE_PKT(m)	m_freem(m)
 #define m_rcvif_serialize(m)	do {} while (0)
+#define CSUM_TSO	0x1000		/* any bit will do */
 #define m_rcvif_restore(m)	((m)->m_pkthdr.rcvif)
 static inline uint16_t cksum_adjust(uint16_t s, uint16_t o, uint16_t n)
 { (void)o; (void)n; return s; }
