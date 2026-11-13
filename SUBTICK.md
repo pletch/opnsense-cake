@@ -1207,6 +1207,37 @@ little.
   (one more ipfw pass per released packet, measured). `robustness.sh` and
   `subtick-stress.sh` passed on the normal and KASAN kernels with "in"
   rules and `release_keep_tag` on, 86,680 and 125,936 packets staged.
+- **Patch 0012, from a source review** (2026-11-11). `dn_unlock()` (0008)
+  took `dn_uh` back for as long as more packets had been staged, so with
+  other threads staging as fast as the holder enqueued, a receiving
+  thread could be kept there without bound, the packets it had released
+  waiting in its send list meanwhile. It now does at most four rounds
+  and leaves the rest to dummynet's own thread (`dn_fine_kick()` queues
+  `dn_fine_task`, which sends between its rounds too);
+  `net.inet.ip.dummynet.stage_handoffs` counts those. With CAKE_DEBUG,
+  `stage_rounds` sets the rounds: at 0 a holder enqueues nothing as it
+  leaves, which forces the handoff. On the bench (4 vCPUs, 50/10 Mbit/s)
+  the limit of four was never reached on its own; forced, 30 s of RRUL
+  staged 19,059 packets with 9912 handoffs at 48.0 / 8.6 Mbit/s, ICMP
+  median 1.20 ms, 0 check errors. `subtick-stress.sh` has a `handoff`
+  test for it that needs no client (`subtick-handoff.sh`: load between
+  two vnet jails on the router, 100 Mbit/s each way): 422 handoffs at
+  rounds 0 and none at 4, 96 / 96 Mbit/s both times.
+- **Patch 0013, from the same review.** `ip_dn_vnet_destroy()` freed a
+  vnet's staged packets on the word that `ip_dn_destroy()` had waited for
+  `dummynet_io()`, which holds on unload but not when a jail is removed:
+  a packet could be staged after the list was emptied (a leak), or, as in
+  the stock dummynet, meet the lock destroyed. The vnet's `init_done` is
+  now cleared first, `dummynet_io()` turns packets away without it, and
+  the network epoch is waited for before the flush. Eight removals of two
+  jails with traffic through their own CAKE pipes: no panic, dummynet's
+  memory back to what it was once the jails were gone (a jail with an
+  open TCP connection stays "dying" until TCP gives up, as on a stock
+  kernel).
+- **With 0012 and 0013** (CAKE_DEBUG fork, 2026-11-11): `subtick-stress.sh`
+  (toggle, swap, cycles 8 of 8, bounds, coalesce, handoff; pause skipped
+  without access to the Proxmox host) and `robustness.sh` all pass, 0
+  check errors.
 - **A UMA zone for dummynet's tag**: no gain. Allocation was 0.8% of a
   CPU either way (`malloc(9)` serves small sizes from per-CPU caches),
   and freeing through the zone cost about 1 point more.

@@ -19,6 +19,13 @@
 #           (release_merged), the lateness count from the earliest
 #           (release_late_max at least the hold), and the pipes keep their
 #           rate
+#   handoff  no client needed: load between two vnet jails on the router
+#           (subtick-handoff.sh), 20 s with stage_rounds 0 (CAKE_DEBUG),
+#           so that a holder leaves all that was staged to dummynet's
+#           thread, and 20 s with the fork's own rounds: packets must be
+#           staged and, at 0, handed off (stage_handoffs), both pipes must
+#           carry 60 of their 100 Mbit/s each time, and the jails must go
+#           away cleanly
 #
 # Each must keep RRUL running to its end (or, for swap, cycles and pause,
 # let it finish once the pipes are back), CAKE's check_errors at 0 and
@@ -30,7 +37,7 @@ set -u
 
 . "$(dirname "$0")/bench.sh"
 KO=${KO:?KO: the CAKE_DEBUG dummynet_st.ko on the router}
-TESTS=${TESTS:-toggle swap cycles bounds pause coalesce}
+TESTS=${TESTS:-toggle swap cycles bounds pause coalesce handoff}
 fails=0
 
 want() { case " ${TESTS} " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -176,6 +183,23 @@ opn 'sysctl -q net.inet.ip.dummynet.release_task_delay_us=0' >/dev/null
 [ "$r" = "flent-exit 0" ] && [ "$m" -gt 0 ] && [ "$lm" -ge 2000 ] && [ "$t" -gt 30 ] &&
     [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] && ok=1 || ok=0
 result coalesce $ok "$r, $m wakeups merged, release_late_max $lm us, then $t Mbit/s down, check_errors $(errs)"
+fi
+
+if want handoff; then
+echo "== handoff"
+put "$(dirname "$0")/subtick-handoff.sh" /root/work/ &&
+    opn 'chmod +x /root/work/subtick-handoff.sh' >/dev/null
+hv() { printf '%s\n' "$1" | sed -n "s/^handoff_$2 //p"; }
+h0=$(opn '/root/work/subtick-handoff.sh 20 0' 120)
+h4=$(opn '/root/work/subtick-handoff.sh 20 4' 120)
+[ "$(opn 'echo alive')" = alive ] &&
+    printf '%s\n' "$h0" | grep -q '^handoff_done' &&
+    printf '%s\n' "$h4" | grep -q '^handoff_done' &&
+    [ "$(hv "$h0" staged)" -gt 0 ] && [ "$(hv "$h0" handoffs)" -gt 0 ] &&
+    [ "$(hv "$h0" mbit_ab)" -ge 60 ] && [ "$(hv "$h0" mbit_ba)" -ge 60 ] &&
+    [ "$(hv "$h4" mbit_ab)" -ge 60 ] && [ "$(hv "$h4" mbit_ba)" -ge 60 ] &&
+    [ "$(errs)" = 0 ] && [ "$(bad)" = "$base" ] && ok=1 || ok=0
+result handoff $ok "rounds 0: $(hv "$h0" staged) staged, $(hv "$h0" handoffs) handoffs, $(hv "$h0" mbit_ab) / $(hv "$h0" mbit_ba) Mbit/s, ping $(hv "$h0" ping); rounds 4: $(hv "$h4" staged) staged, $(hv "$h4" handoffs) handoffs, $(hv "$h4" mbit_ab) / $(hv "$h4" mbit_ba) Mbit/s, ping $(hv "$h4" ping); check_errors $(errs)"
 fi
 
 echo

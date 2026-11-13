@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:13:19 -0500
+Subject: [PATCH] dummynet_st: a holder enqueues staged packets for a few
+ rounds only
+
+The twelfth of the sub-tick release series (opnsense-cake SUBTICK.md),
+from a source review.
+
+dn_unlock() (patch 0008) enqueues what was staged while dn_uh was held,
+releases the lock, and takes it back while more has been staged. With
+packets arriving on other threads as fast as the holder enqueues them it
+never got away: a receiving thread did the other threads' work without
+bound, and the packets it had released waited in its send list until
+the staged list was found empty.
+
+Now it does so DN_UNLOCK_ROUNDS (4) times at most, and leaves what is
+staged after that to dummynet's own thread: dn_fine_kick() queues
+dn_fine_task, which takes the lock, enqueues the list and sends, and
+queues itself again if it runs out of rounds too, sending in between.
+The task is queued under dn_fine_mtx and only while dn_gone is unset,
+as the callouts are armed; packets still staged at unload are freed with
+the vnet as before. net.inet.ip.dummynet.stage_handoffs counts the
+holders that ran out of rounds.
+
+With CAKE_DEBUG, net.inet.ip.dummynet.stage_rounds sets the rounds, for
+tests: at 0 a holder enqueues nothing as it leaves, so all that was
+staged while it held the lock goes to dummynet's thread.
+---
+ sys/netpfil/ipfw/ip_dn_io.c      | 40 ++++++++++++++++++++++++++++++++++---
+ sys/netpfil/ipfw/ip_dn_private.h |  1 +
+ sys/netpfil/ipfw/ip_dummynet.c   | 15 +++++++++++++++
+ 3 files changed, 53 insertions(+), 3 deletions(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index d1b793b..c1bbb40 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -152,6 +152,15 @@ static u_long dn_rel_catchups;
+  */
+ static int dn_stage = 1;
+ static u_long dn_staged;
++/* holders that left staged packets to dummynet's thread (dn_unlock()) */
++static u_long dn_stage_handoffs;
++/* the rounds a holder enqueues staged packets for as it leaves (dn_unlock()) */
++#define DN_UNLOCK_ROUNDS	4
++#ifdef CAKE_DEBUG
++static int dn_unlock_rounds = DN_UNLOCK_ROUNDS;
++#else
++#define dn_unlock_rounds	DN_UNLOCK_ROUNDS
++#endif
+ /*
+  * A released "in" packet keeps ipfw's tag while dn_keep_tag is set, so that
+  * under net.inet.ip.fw.one_pass ipfw passes it on output at once instead of
+@@ -237,10 +246,16 @@ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, stage,
+ SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, staged,
+     CTLFLAG_RD, &dn_staged, 0,
+     "Packets left to dummynet's holder (cumulative)");
++SYSCTL_ULONG(_net_inet_ip_dummynet, OID_AUTO, stage_handoffs,
++    CTLFLAG_RD, &dn_stage_handoffs, 0,
++    "Holders that left staged packets to dummynet's thread (cumulative)");
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_keep_tag,
+     CTLFLAG_RWTUN, &dn_keep_tag, 0,
+     "Released in packets pass ipfw on output at once (one_pass)");
+ #ifdef CAKE_DEBUG
++SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, stage_rounds,
++    CTLFLAG_RW, &dn_unlock_rounds, 0,
++    "Rounds a holder enqueues staged packets for as it leaves (debug)");
+ /* for tests: dummynet_fine_task() sleeps first, so that wakeups queue up */
+ static int dn_fine_delay_us;
+ SYSCTL_INT(_net_inet_ip_dummynet, OID_AUTO, release_task_delay_us,
+@@ -965,16 +980,35 @@ dn_drain_staged(struct mq *send)
+  * Only holders that release dn_uh this way empty the list: one that does
+  * not (a configuration change) leaves it to the next packet or the next
+  * tick.
++ *
++ * At most DN_UNLOCK_ROUNDS times: with packets arriving on other threads
++ * as fast as they are enqueued here, the holder would never get away,
++ * and the packets it has released wait in send until it does. What is
++ * staged after the last round is left to dummynet's own thread
++ * (dn_fine_kick()), which sends its packets between its rounds too.
++ * With CAKE_DEBUG, net.inet.ip.dummynet.stage_rounds sets the rounds, for
++ * tests; at 0 a holder enqueues nothing as it leaves, and all that was
++ * staged while it held the lock goes to dummynet's thread.
+  */
+ static void
+ dn_unlock(struct mq *send)
+ {
+-	for (;;) {
+-		dn_drain_staged(send);
++	int rounds;
++
++	for (rounds = 0;; rounds++) {
++		if (rounds < dn_unlock_rounds)
++			dn_drain_staged(send);
+ 		DN_BH_WUNLOCK();
+ 		/* against dummynet_io()'s push then trylock */
+ 		atomic_thread_fence_seq_cst();
+-		if (V_dn_cfg.staged == NULL || !mtx_trylock(&V_dn_cfg.uh_mtx))
++		if (V_dn_cfg.staged == NULL)
++			return;
++		if (rounds + 1 >= dn_unlock_rounds) {
++			atomic_add_long(&dn_stage_handoffs, 1);
++			dn_fine_kick();
++			return;
++		}
++		if (!mtx_trylock(&V_dn_cfg.uh_mtx))
+ 			return;
+ 	}
+ }
+diff --git a/sys/netpfil/ipfw/ip_dn_private.h b/sys/netpfil/ipfw/ip_dn_private.h
+index 48103d1..3b2a582 100644
+--- a/sys/netpfil/ipfw/ip_dn_private.h
++++ b/sys/netpfil/ipfw/ip_dn_private.h
+@@ -445,6 +445,7 @@ void dummynet_fine_task(void *context, int pending);
+ void dn_reschedule(void);
+ void dn_fine_arm(uint64_t);
+ uint64_t dn_fine_take(void);
++void dn_fine_kick(void);
+ #ifdef CAKE_DEBUG
+ extern u_long dn_fine_merged;
+ #endif
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 28b64cb..0d23f88 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -162,6 +162,21 @@ dn_fine_arm(uint64_t key)
+ 	mtx_unlock_spin(&dn_fine_mtx);
+ }
+ 
++/*
++ * Run dn_fine_task now, for packets staged that their holder left behind
++ * (dn_unlock()). Under dn_fine_mtx, as dn_fine_arm(): nothing queues the
++ * task once ip_dn_destroy() has drained it.
++ */
++void
++dn_fine_kick(void)
++{
++
++	mtx_lock_spin(&dn_fine_mtx);
++	if (dn_gone == 0)
++		taskqueue_enqueue(dn_tq, &dn_fine_task);
++	mtx_unlock_spin(&dn_fine_mtx);
++}
++
+ /* the earliest wakeup since the last call (0: none), for its lateness */
+ uint64_t
+ dn_fine_take(void)

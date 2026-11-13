@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pletch <17855860+pletch@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:44:34 -0500
+Subject: [PATCH] dummynet_st: a vnet going away turns packets off first
+
+The thirteenth of the sub-tick release series (opnsense-cake SUBTICK.md),
+from a source review.
+
+ip_dn_vnet_destroy() frees the packets staged for the vnet (patch 0008)
+and then destroys its lock, on the word that ip_dn_destroy() had waited
+for dummynet_io(). That holds when the module is unloaded; when a jail
+with its own vnet is removed nothing had waited, so a packet still in
+dummynet_io() could be staged after the list was emptied, and leak, or
+(as in the stock dummynet) take the lock as it was destroyed.
+
+Now the vnet's init_done is cleared first, under the lock, and
+dummynet_io() frees a packet for a vnet without it; then the network
+epoch is waited for, which packets in dummynet_io() are in, before the
+flush. dummynet's tasks already pass over a vnet without init_done.
+---
+ sys/netpfil/ipfw/ip_dn_io.c    |  6 ++++++
+ sys/netpfil/ipfw/ip_dummynet.c | 14 +++++++++++++-
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/sys/netpfil/ipfw/ip_dn_io.c b/sys/netpfil/ipfw/ip_dn_io.c
+index c1bbb40..42ef6c3 100644
+--- a/sys/netpfil/ipfw/ip_dn_io.c
++++ b/sys/netpfil/ipfw/ip_dn_io.c
+@@ -1327,6 +1327,12 @@ dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
+ 		dir |= PROTO_LAYER2;
+ 	else if (fwa->flags & IPFW_ARGS_IP6)
+ 		dir |= PROTO_IPV6;
++	/* the vnet is going away (ip_dn_vnet_destroy()), its lock with it */
++	if (__predict_false(!V_dn_cfg.init_done)) {
++		FREE_PKT(m);
++		*m0 = NULL;
++		return (ENOBUFS);
++	}
+ 	/* tag outside the lock: m_tag_get() allocates */
+ 	if (tag_mbuf(m, dir, fwa)) {
+ 		DN_BH_WLOCK();
+diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
+index 0d23f88..b7b3d91 100644
+--- a/sys/netpfil/ipfw/ip_dummynet.c
++++ b/sys/netpfil/ipfw/ip_dummynet.c
+@@ -2667,9 +2667,21 @@ ip_dn_vnet_destroy(void)
+ {
+ 	struct mbuf *m, *next;
+ 
++	/*
++	 * Turn packets away from this vnet's dummynet (dummynet_io() checks
++	 * init_done) and wait for those already in it. On unload
++	 * ip_dn_destroy() has done as much for every vnet; when a jail goes
++	 * away nothing had, and a packet could be staged after the list was
++	 * emptied below, or meet the lock destroyed.
++	 */
++	DN_BH_WLOCK();
++	V_dn_cfg.init_done = 0;
++	DN_BH_WUNLOCK();
++	NET_EPOCH_WAIT();
++
+ 	DN_BH_WLOCK();
+ 	dummynet_flush();
+-	/* nothing stages any more (ip_dn_destroy() waited for dummynet_io()) */
++	/* nothing stages any more */
+ 	for (m = V_dn_cfg.staged; m != NULL; m = next) {
+ 		next = m->m_nextpkt;
+ 		m->m_nextpkt = NULL;
