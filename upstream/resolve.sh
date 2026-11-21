@@ -25,7 +25,14 @@ freebsd)  flags="-DCAKE_UPSTREAM -UCAKE_KNOBS -UCAKE_DEBUG -D_KERNEL
 esac
 mkdir -p "$out"
 for f in dn_sched_cake.c dn_sched_cake.h; do
+	# removed blocks leave runs of blank lines: squeeze them, except in
+	# the plugin's copy, which keeps its conditionals
 	# shellcheck disable=SC2086
-	python3 -I "$TOP/upstream/unifdef.py" $flags \
-	    "$TOP/sys/netpfil/ipfw/$f" > "$out/$f"
+	if [ "$variant" = plugin ]; then
+		python3 -I "$TOP/upstream/unifdef.py" $flags \
+		    "$TOP/sys/netpfil/ipfw/$f" > "$out/$f"
+	else
+		python3 -I "$TOP/upstream/unifdef.py" $flags \
+		    "$TOP/sys/netpfil/ipfw/$f" | cat -s > "$out/$f"
+	fi
 done

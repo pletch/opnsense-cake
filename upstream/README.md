@@ -64,6 +64,13 @@ conditionals. `resolve.sh` resolves them:
   packet 6.24; 40
   reconfigurations under RRUL; dummynet's memory back to its start after
   deleting everything; 0 check errors.
+- INVARIANTS + WITNESS kernel (15.1-p5, 2026-11-13): `test/upstream-bench.sh`
+  passes (TSO skipped: the bench's vtnet had checksum offload off), no
+  assertion, and no lock order reversal beyond the 4 logged at boot
+  before dummynet loads.
+- FreeBSD main (6871285f1, 2026-11-15): the patches apply in order;
+  dummynet.ko, a GENERIC kernel with `options DUMMYNET` built in, and
+  `sbin/ipfw` compile with -Werror and no warnings (not booted).
 - Style: `tools/build/checkstyle9.pl` leaves only the `_SI( .x = )`
   initializers, which every in-tree scheduler has.
 
@@ -76,7 +83,6 @@ conditionals. `resolve.sh` resolves them:
   (5.63 against 5.88 MB/s). Turn TSO off on a shaped interface, as
   OPNsense does.
 - NAT: host isolation sees the addresses dummynet sees.
-- `dnctl` does not print `sched_stats`; the sysctl was not run on a
-  WITNESS kernel.
+- `dnctl` does not print `sched_stats`.
 - The pipe still releases once per tick; `sch_cake`'s shaper is the
   sub-tick work in [SUBTICK.md](../SUBTICK.md), a separate proposal.

@@ -137,11 +137,15 @@
 #endif
 
 #define CAKE_MTU		1514	/* used for AQM rate scaling */
+#ifdef CAKE_UPSTREAM
+/* dummynet releases a pipe's packets once per tick. */
+#else
 /*
  * The pipe's clock: its credit is in bits * DN_CREDIT_HZ, and it releases
  * packets at most DN_RELEASE_NS apart. A stock dummynet does both by the
  * tick; a dummynet with a finer release clock defines them.
  */
+#endif
 #ifndef DN_CREDIT_HZ
 #ifndef CAKE_UPSTREAM
 #define DN_CREDIT_HZ		hz
@@ -254,7 +258,7 @@ static const uint32_t cake_tin_cnt[] = { 1, 3, 4, 8, 8 };
 /*
  * Per-tin rate share and WDRR weight, Q16 of the link rate: 1/16 for
  * Bulk, 1/2 for Video and 1/4 for Voice, and for the eight tin modes 7/8
- * of the tin below, as sch_cake computes them.
+ * of the tin below.
  */
 static const uint32_t cake_tin_share[][CAKE_MAX_TINS] = {
 	{ 65536 },
@@ -371,7 +375,7 @@ SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, flowmode,
 /*
  * dummynet only advances its clock once per tick, which is too coarse
  * for sojourn times at the default 5ms target, so COBALT and the tin
- * clocks use the uptime clock, in nanoseconds as sch_cake does.
+ * clocks use the uptime clock, in nanoseconds.
  */
 static __inline uint64_t
 cake_now_ns(void)
@@ -380,12 +384,12 @@ cake_now_ns(void)
 }
 
 /*
- * The deficit dither and BLUE's drop draw need a number per refill, not
- * an unpredictable one: arc4random(), ChaCha20 per call, took about 12% of
- * a CPU at 300 Mbit/s each way on an Atom. sch_cake has the per-CPU
- * get_random_u16()/u32(); here a 64-bit LCG (Knuth's MMIX constants),
- * its high half, seeded from arc4random() by each new instance. Its state
- * is the vnet's, as dn_uh is, which the callers hold.
+ * The deficit dither and BLUE's drop draw need a cheap number for each
+ * refill, not an unpredictable one, and arc4random() is too costly to call
+ * that often on slow CPUs. Use a 64-bit LCG with Knuth's MMIX constants
+ * instead, taking its high half, seeded from arc4random() by each new
+ * instance. Its state is per vnet and protected by the dn_uh lock, which
+ * the callers hold.
  */
 VNET_DEFINE_STATIC(uint64_t, cake_rng);
 #define	V_cake_rng	VNET(cake_rng)
@@ -399,7 +403,7 @@ cake_random(void)
 }
 
 /*
- * COBALT: CoDel and BLUE, as in sch_cake.
+ * COBALT: CoDel and BLUE.
  */
 
 /* one Newton-Raphson step towards 1/sqrt(count), Q0.32 */
@@ -528,7 +532,7 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 #ifndef CAKE_UPSTREAM
 	/* in ingress mode, bulk flows share the link before the queue */
 #else
-	/* bulk_flows is sch_cake's, for its ingress mode: always 0 here */
+	/* bulk_flows only matters in sch_cake's ingress mode: always 0 here */
 #endif
 	over_target = sojourn > p->target &&
 	    sojourn > p->mtu_time * bulk_flows * 2 &&
@@ -586,11 +590,11 @@ cobalt_should_drop(struct cobalt_vars *v, struct cobalt_params *p,
 }
 
 /*
- * Helper function to update flow, tin, main-queue and scheduler statistics.
- * negative len + drop -> drop
- * negative len -> dequeue
- * positive len -> enqueue
- * positive len + drop -> drop during enqueue
+ * Update the flow, tin, main queue and scheduler instance statistics:
+ *   negative len, drop	a drop from the queue
+ *   negative len	a dequeue
+ *   positive len	an enqueue
+ *   positive len, drop	a drop on enqueue
  */
 static __inline void
 cake_update_stats(struct cake_flow *q, struct cake_si *si, int len,
@@ -640,10 +644,11 @@ cake_update_stats(struct cake_flow *q, struct cake_si *si, int len,
 }
 
 /*
- * Bytes 'len' bytes from the IP header on take on the link, as sch_cake's
- * cake_calc_overhead(): plus overhead, at least mpu, then ATM cell or PTM
- * framing. Without compensation configured it is the length with what
- * precedes the IP header ('off' bytes), as dummynet charges it.
+ * The bytes a packet of 'len' bytes from its IP header takes on the link,
+ * as cake_calc_overhead() in sch_cake computes it: add the overhead, raise
+ * it to the mpu, then add ATM cell or PTM framing. Without compensation
+ * configured, return the length including the 'off' bytes before the IP
+ * header, which is what dummynet charges.
  */
 static __inline uint32_t
 cake_adj_len(const struct dn_sch_cake_parms *cfg, int len, int off)
@@ -662,8 +667,8 @@ cake_adj_len(const struct dn_sch_cake_parms *cfg, int len, int off)
 }
 
 /*
- * The IP and TCP headers' length of a packet the interface is to segment
- * (TSO), each segment's share of it; 0 if they cannot be found.
+ * The length of the IP and TCP headers of a packet the interface is to
+ * segment (TSO), which each segment carries; 0 if they cannot be found.
  */
 static int
 cake_tso_hdrlen(struct mbuf *m, int off)
@@ -698,9 +703,9 @@ cake_tso_hdrlen(struct mbuf *m, int off)
 }
 
 /*
- * Bytes a packet takes on the link. One that the interface is to segment
- * is charged as the segments it becomes, each with the headers and the
- * overhead, as sch_cake's cake_overhead() charges a GSO packet.
+ * The bytes a packet takes on the link. A packet the interface is to
+ * segment is charged as the segments it becomes, each with the headers and
+ * the overhead, as cake_overhead() in sch_cake charges a GSO packet.
  */
 static uint32_t
 cake_wire_bytes(const struct dn_sch_cake_parms *cfg, struct mbuf *m)
@@ -780,12 +785,9 @@ cake_charge_link(struct cake_si *si, struct cake_tin *tin, uint32_t len,
 #endif /* !CAKE_UPSTREAM */
 
 /*
- * Mark an ECN-capable packet CE for COBALT: 1 if it is marked now or was
- * already, 0 if it cannot be (not ECN-capable, or its header is not in
- * the first mbuf or not writable), and COBALT drops it instead. Unlike
- * dummynet's ecn_mark(), which writes at the recorded header offset
- * unchecked, so it could change data shared with other copies of the
- * packet; sch_cake's INET_ECN_set_ce() also checks the header bounds.
+ * Mark an ECN-capable packet CE for COBALT. Return 1 if it is marked now or
+ * already was, 0 if it cannot be marked (not ECN-capable, or its header is
+ * not in the first mbuf or not writable), in which case COBALT drops it.
  */
 static int
 cake_ecn_mark(struct mbuf *m)
@@ -854,10 +856,10 @@ cake_wash(struct mbuf *m)
 }
 
 /*
- * ACK filter, as sch_cake's cake_ack_filter(): when a pure TCP ACK is
+ * ACK filter, as cake_ack_filter() in sch_cake: when a pure TCP ACK is
  * queued behind older pure ACKs of the same connection that it makes
- * redundant, drop one of those, so a congested uplink spends less of
- * itself on ACKs.
+ * redundant, drop one of those, so that a congested uplink spends less of
+ * its capacity on ACKs.
  */
 
 /* TCP header flags, in the low 12 bits of header bytes 12-13 */
@@ -1536,10 +1538,10 @@ cake_lookup_flow(struct cake_si *si, uint8_t tin, uint32_t hash)
 }
 
 /*
- * The overflow heap, as sch_cake's: a max-heap of flow byte backlogs with
- * an entry for each flow of all CAKE_MAX_TINS tins, laid out as sch_cake
- * lays out its own (entry j * CAKE_MAX_TINS + t starts as flow j of tin
- * t), so that ties are broken the same way. Tins the diffserv mode does
+ * The overflow heap: a max-heap of flow byte backlogs with an entry for
+ * each flow of all CAKE_MAX_TINS tins, laid out as in sch_cake (entry
+ * j * CAKE_MAX_TINS + t starts as flow j of tin t), so that ties are
+ * broken the same way. Tins the diffserv mode does
  * not use have no flows and count as empty.
  */
 #define	CAKE_HEAP_TIN(e)	((e) & (CAKE_MAX_TINS - 1))
@@ -1617,8 +1619,8 @@ cake_heapify_up(struct cake_si *si, uint32_t i)
 }
 
 /*
- * Drop the head packet of the flow with the largest byte backlog, from
- * the heap as sch_cake's cake_drop(); 0 if nothing is queued.
+ * Drop the head packet of the flow with the largest byte backlog, found
+ * through the heap as in cake_drop(). Return 0 if nothing is queued.
  */
 static int
 cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
@@ -1627,7 +1629,7 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 	uint32_t e, i, tries;
 
 	for (tries = 0;; tries++) {
-		/* as cake_drop(): a heap gone cold is rebuilt first */
+		/* a heap gone cold is rebuilt first */
 		if (si->overflow_timeout == 0)
 			for (i = CAKE_MAX_TINS * si->flows_cnt / 2; i-- > 0;)
 				cake_heapify(si, i);
@@ -1640,8 +1642,8 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 		if (fat != NULL && fat->mq.head != NULL)
 			break;
 		/*
-		 * the heap went wrong (sch_cake rebuilds it on its next
-		 * call): rebuild it now, or give up if nothing is queued
+		 * the heap is out of date: rebuild it, or give up if nothing
+		 * is queued
 		 */
 		si->overflow_timeout = 0;
 		if (tries > 0)
@@ -1661,7 +1663,7 @@ cake_drop_fattest(struct cake_si *si, uint64_t now_ns)
 	return (1);
 }
 
-/* sch_cake's cake_ewma() */
+/* exponentially weighted moving average, as cake_ewma() */
 static __inline uint64_t
 cake_ewma(uint64_t avg, uint64_t sample, int shift)
 {
@@ -1671,9 +1673,9 @@ cake_ewma(uint64_t avg, uint64_t sample, int shift)
 }
 
 /*
- * count a packet the tin sends, and its queue delay as sch_cake does: in
- * ns, as the averages move by 1/256 of a sample, and an average in us
- * would never fall to 255 us or below
+ * Count a packet the tin sends, and its queue delay. The averages are kept
+ * in ns: they move by 1/256 of a sample, so an average kept in us could
+ * never fall to 255 us or below.
  */
 static __inline void
 cake_tin_sent(struct cake_tin *tin, struct mbuf *m, uint64_t now_ns,
@@ -2006,7 +2008,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 	if (cake_dsrc(si->flow_mode) || cake_ddst(si->flow_mode))
 		cake_set_hosts(si, f, srch, dsth);
 
-	/* as sch_cake's shaper: an idle link without debt starts again now */
+	/* an idle link without debt starts again now, as in sch_cake */
 	if (si->main_q.ni.length == 0 && si->link_time < now_ns) {
 		si->link_time = now_ns;
 #ifndef CAKE_UPSTREAM
@@ -2103,30 +2105,34 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 }
 
 /*
- * The link clock: dummynet asks for a tick's worth of packets at once,
- * all at the same time, where sch_cake's shaper asks for each when the
- * link is free. Tin selection and the tin clocks depend on that time:
- * with every tin over its threshold, the earliest clock sends and moves
- * to now plus the packet's time at the tin's rate, so in batches a tin
- * waits for the next tick where sch_cake would send it earlier (Bulk
- * against greedy Voice got 13% less at kern.hz=1000). So they use the
- * time each packet would leave a link paced at the pipe's rate: the
+ * The link clock. dummynet asks the scheduler for a tick's worth of
+ * packets at once, all at the same time, whereas sch_cake's shaper asks
+ * for each packet when the link is free. Tin selection and the tin clocks
+ * depend on that time: when every tin is over its threshold, the tin with
+ * the earliest clock sends, and its clock moves to now plus the packet's
+ * time at the tin's rate. In batches, a tin would then wait for the next
+ * tick where sch_cake would have sent it earlier.
+ *
+ * So they use the time each packet would leave a link paced at the pipe's
 #ifndef CAKE_UPSTREAM
- * previous one's plus its own length at that rate (and in ingress mode
- * the drops', up to the failsafe), never ahead of now and at most one
+ * rate: the previous packet's time plus its own length at that rate (and
+ * in ingress mode the drops', up to the failsafe). That time is never
+ * ahead of now, and at most one release interval (DN_RELEASE_NS, a tick
+ * on a stock dummynet) behind it, unless the queue has been backlogged
+ * since the last send; then it may go back as far as that send, so a
+ * release that came late sends what the link would have sent meanwhile.
 #else
- * previous one's plus its own length at that rate, never ahead of now and
- * at most one
+ * rate: the previous packet's time plus its own length at that rate. That
+ * time is never ahead of now, and at most one tick behind it, unless the
+ * queue has been backlogged since the last send; then it may go back as
+ * far as that send, so a late tick sends what the link would have sent
+ * meanwhile.
 #endif
- * release interval (a tick on a stock dummynet, DN_RELEASE_NS) behind
- * it, or, while the queue has been backlogged since the last send, as
- * far back as that send: a release that came late (a late tick) sends
- * what the link would have sent since. COBALT keeps the real time, as a
+ * COBALT keeps the real time, as a packet may have arrived after its slot
 #ifdef CAKE_KNOBS
- * packet may have arrived after its slot on the link. link_clock=0 goes
- * back to dummynet's time.
+ * on the link. link_clock=0 goes back to dummynet's time.
 #else
- * packet may have arrived after its slot on the link.
+ * on the link.
 #endif
  */
 #ifdef CAKE_KNOBS
@@ -2136,7 +2142,7 @@ SYSCTL_UINT(_net_inet_ip_dummynet_cake, OID_AUTO, link_clock,
 	"Pace tin selection by the link's time, not dummynet's tick");
 #endif
 
-/* a packet's time on the link, at the pipe's rate, as sch_cake's shaper */
+/* a packet's time on the link, at the pipe's rate */
 static __inline uint64_t
 cake_link_dur(struct cake_si *si, uint32_t len)
 {
@@ -2197,13 +2203,13 @@ cake_failsafe(struct cake_si *si, uint32_t len, uint64_t link_ns)
 
 /*
  * Select a tin when the pipe has a rate, as sch_cake does in shaped mode.
- * Tins are numbered in priority order (Best Effort < Bulk < Video < Voice,
- * as in sch_cake), so pick the highest-numbered tin whose virtual clock is
- * due, i.e. that is within its rate share; otherwise the tin with the
- * earliest clock, the last of equal ones. Bulk thus gets priority over
- * Best Effort up to its 1/16 share, and nothing beyond it. As in sch_cake,
- * a tin counts while it has sparse or bulk flows, even empty ones, so that
- * flows that emptied are visited and stop counting as bulk.
+ * Tins are numbered in priority order (Best Effort < Bulk < Video < Voice),
+ * so pick the highest-numbered tin whose virtual clock is due, that is,
+ * one within its rate share; otherwise the tin with the earliest clock,
+ * the last of equal ones. Bulk thus has priority over Best Effort up to
+ * its 1/16 share, and none beyond it. A tin counts while it has sparse or
+ * bulk flows, even empty ones, so that flows that emptied are visited and
+ * stop counting as bulk.
  */
 static uint32_t
 cake_select_tin(struct cake_si *si, uint64_t now)
@@ -2228,8 +2234,8 @@ cake_select_tin(struct cake_si *si, uint64_t now)
 
 /*
  * Advance a tin's virtual clock by a packet's time at the tin's rate, as
- * in sch_cake's cake_advance_shaper(): a clock behind now keeps its credit
- * while the tin stays backlogged, a clock ahead of now moves to at least
+ * cake_advance_shaper() does: a clock behind now keeps its credit while
+ * the tin stays backlogged, and a clock ahead of now moves to at least
  * now + duration. cake_enqueue() resets the clock of a tin that was idle.
  */
 static __inline void
@@ -2246,8 +2252,8 @@ cake_charge_tin(struct cake_tin *tin, int len, uint64_t now)
 /*
  * Dequeue a packet: pick a tin (rate thresholds when the pipe has a rate,
  * WDRR otherwise), then DRR between the flows of that tin, new flows first.
- * As in sch_cake, the first flow visited in each call is a decaying one if
- * there is any, so that empty flows' COBALT state decays to rest.
+ * The first flow visited in each call is a decaying one if there is any,
+ * so that the COBALT state of empty flows decays to rest.
  */
 static struct mbuf *
 cake_dequeue(struct dn_sch_inst *_si)
@@ -2301,7 +2307,7 @@ cake_dequeue(struct dn_sch_inst *_si)
 			tin = &si->tins[si->cur_tin];
 		} else {
 			/*
-			 * WDRR between the tins with flows, as sch_cake's
+			 * WDRR between the tins with flows, as in sch_cake's
 			 * unlimited mode: skip a tin while its deficit is
 			 * negative, refilling it while not positive
 			 */
@@ -2372,13 +2378,13 @@ retry:
 #endif
 		if (m == NULL) {
 			/*
-			 * The flow is empty. As in sch_cake, it stays on the
-			 * decaying list while its COBALT state is not at rest
-			 * (BLUE active, a drop count, or active within an
-			 * interval), so that state carries over if it gets
-			 * packets again and its hash slot is not reused;
-			 * otherwise it is deactivated. Either way its next
-			 * packet puts it among the new flows.
+			 * The flow is empty. It stays on the decaying list
+			 * while its COBALT state is not at rest (BLUE active,
+			 * a drop count, or active within an interval), so
+			 * that state carries over if it gets packets again
+			 * and its hash slot is not reused; otherwise it is
+			 * deactivated. Either way, its next packet puts it
+			 * among the new flows.
 			 */
 			if (cobalt_queue_empty(&f->cvars, &tin->cparams,
 			    now_ns))
@@ -2436,9 +2442,9 @@ retry:
 }
 
 /*
- * A share (of 65536) of the pipe's rate bw, in bit/s, as sch_cake's
- * cake_set_rate() keeps a rate: ns per byte, scaled to stay below 2^34.
- * Returns the rate in bytes per second, as sch_cake's.
+ * Convert a share (of 65536) of the pipe's rate bw, in bit/s, to ns per
+ * byte, scaled to stay below 2^34, as cake_set_rate() keeps a rate.
+ * Return the rate in bytes per second.
  */
 static uint64_t
 cake_rate_ns(uint32_t bw, uint32_t share, uint64_t *ns, uint8_t *shft)
@@ -2454,7 +2460,7 @@ cake_rate_ns(uint32_t bw, uint32_t share, uint64_t *ns, uint8_t *shft)
 	return (rate);
 }
 
-/* the link clock's rate: sch_cake's global shaper's, its full-rate tin's */
+/* the link clock's rate: the pipe's full rate */
 static void
 cake_link_params(struct cake_si *si)
 {
@@ -2467,13 +2473,19 @@ cake_link_params(struct cake_si *si)
 
 /*
  * Set a tin's rate share, WDRR weight and COBALT parameters, at creation
- * and when the scheduler is reconfigured. As in sch_cake's
- * cake_set_rate(), target and interval are stretched when an MTU takes
- * longer than target to send at the tin's share of the link rate.
+ * and when the scheduler is reconfigured. As in cake_set_rate(), target
+ * and interval are stretched when an MTU takes longer than target to send
+ * at the tin's share of the link rate.
+#ifdef CAKE_UPSTREAM
+ * dummynet only releases packets once per tick, so a tick longer than
+ * target (kern.hz=100, for example) is treated the same way; otherwise the
+ * batching delay alone looks like a standing queue to COBALT.
+#else
  * dummynet only releases packets once per tick (DN_RELEASE_GRAIN_NS;
  * a dummynet with a finer release clock sets it), so a tick longer than
- * target (e.g. kern.hz=100 in VMs) is treated the same way; otherwise
+ * target (kern.hz=100, for example) is treated the same way; otherwise
  * the batching delay alone looks like a standing queue to COBALT.
+#endif
  */
 static void
 cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
@@ -2519,7 +2531,7 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 }
 
 /*
- * The byte limit, as sch_cake's cake_reconfigure(): memlimit if set, else
+ * The byte limit, as cake_reconfigure() sets it: memlimit if set, else
  * four times what the link sends in an interval and at least 4 MB, but
  * not beyond what the packet limit allows unless memlimit says so.
  */
@@ -2808,8 +2820,7 @@ cake_adopt(struct cake_si *si, struct cake_schk *schk)
 #endif /* !CAKE_UPSTREAM */
 
 /*
- * Initialize cake scheduler instance.
- * also, allocate memory for flows array.
+ * Initialize a CAKE scheduler instance and allocate its tables.
  */
 static int
 cake_new_sched(struct dn_sch_inst *_si)
@@ -2911,9 +2922,8 @@ cake_free_sched(struct dn_sch_inst *_si)
 }
 
 /*
- * Configure cake scheduler.
- * the configurations for the scheduler is passed from userland; what it
- * does not pass keeps its default.
+ * Configure the scheduler from the parameters passed from userland.
+ * Parameters it does not pass keep their defaults.
  */
 static int
 cake_config(struct dn_schk *_schk)
@@ -3193,8 +3203,7 @@ SYSCTL_PROC(_net_inet_ip_dummynet_cake, OID_AUTO, stats,
 #endif /* !CAKE_UPSTREAM */
 
 /*
- * Return cake scheduler configurations
- * the configurations for the scheduler is passed to userland.
+ * Return the scheduler's configuration to userland.
  */
 static int
 cake_getconfig(struct dn_schk *_schk, struct dn_extra_parms *ep)
@@ -3271,9 +3280,8 @@ cake_stats(struct dn_sch_inst *_si, struct sbuf *sb)
 #endif
 
 /*
- * cake scheduler descriptor
- * contains the type of the scheduler, the name, the size of extra
- * data structures, and function pointers.
+ * The CAKE scheduler descriptor: its type, name, the sizes of its extra
+ * data structures, and its methods.
  */
 static struct dn_alg cake_desc = {
 	_SI( .type = )  DN_SCHED_CAKE,
@@ -3296,10 +3304,10 @@ static struct dn_alg cake_desc = {
 
 	_SI( .enqueue = ) cake_enqueue,
 	_SI( .dequeue = ) cake_dequeue,
-	_SI( .config = ) cake_config, /* new sched i.e. sched X config ...*/
-	_SI( .destroy = ) cake_destroy,  /*sched x delete */
-	_SI( .new_sched = ) cake_new_sched, /* new schd instance */
-	_SI( .free_sched = ) cake_free_sched,	/* delete schd instance */
+	_SI( .config = ) cake_config,		/* sched X config */
+	_SI( .destroy = ) cake_destroy,		/* sched X delete */
+	_SI( .new_sched = ) cake_new_sched,	/* new instance */
+	_SI( .free_sched = ) cake_free_sched,	/* instance deleted */
 	_SI( .new_fsk = ) NULL,
 	_SI( .free_fsk = ) NULL,
 	_SI( .new_queue = ) NULL,

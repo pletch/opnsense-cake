@@ -47,7 +47,7 @@
 #ifndef _IP_DN_SCHED_CAKE_H
 #define _IP_DN_SCHED_CAKE_H
 
-#define DN_SCHED_CAKE	8	/* first type number not used in-tree */
+#define DN_SCHED_CAKE	8
 
 #define CAKE_MAX_TINS	8
 #define CAKE_SET_WAYS	8	/* set-associative flow hash */
@@ -114,7 +114,7 @@ enum {
 	CAKE_ATM_MAX = CAKE_ATM_PTM
 };
 
-#define	CAKE_OVERHEAD_MIN	(-64)	/* as sch_cake */
+#define	CAKE_OVERHEAD_MIN	(-64)
 #define	CAKE_OVERHEAD_MAX	256
 #define	CAKE_MPU_MAX		256
 
@@ -146,7 +146,7 @@ struct dn_sch_cake_parms {
 	uint32_t	quantum;
 	uint32_t	limit;		/* hard limit, packets, all tins */
 #else
-	uint32_t	quantum;	/* 1514, as sch_cake's */
+	uint32_t	quantum;	/* bytes, always 1514 */
 	uint32_t	limit;		/* 10240 packets: caps the bytes */
 #endif
 	uint32_t	flows_cnt;	/* per tin, multiple of SET_WAYS */
@@ -185,7 +185,7 @@ struct cake_flow_stats {
 	uint32_t drops;
 };
 
-/* flow states, as sch_cake's */
+/* flow states */
 enum {
 	CAKE_SET_NONE = 0,	/* inactive */
 	CAKE_SET_SPARSE,	/* active, no quantum used up backlogged */
@@ -245,7 +245,7 @@ struct cake_tin {
 	uint64_t	tx_pkts;	/* dequeued and sent */
 	uint64_t	tx_bytes;
 	uint64_t	way_collisions;	/* flows that had to share a queue */
-	/* queue delay of sent packets, ns, as sch_cake's EWMAs */
+	/* queue delay of sent packets, ns, moving averages */
 	uint64_t	peak_delay;
 	uint64_t	avg_delay;
 	uint64_t	base_delay;
@@ -299,10 +299,10 @@ struct cake_si {
 	struct cake_flow *flows; /* tin_cnt * flows_cnt flows */
 	struct cake_host *hosts; /* tin_cnt * flows_cnt host slots */
 	/*
-	 * the overflow drop's max-heap of flow backlogs, as sch_cake's: one
-	 * entry per flow of each of CAKE_MAX_TINS tins, (flow << 3) | tin,
-	 * kept up to date while it is warm (overflow_timeout dequeues after
-	 * the last overflow) and rebuilt when it is cold
+	 * the overflow drop's max-heap of flow backlogs: one entry per flow
+	 * of each of CAKE_MAX_TINS tins, (flow << 3) | tin, kept up to date
+	 * while it is warm (overflow_timeout dequeues after the last
+	 * overflow) and rebuilt when it is cold
 	 */
 	uint32_t *overflow_heap;
 	uint32_t overflow_timeout;

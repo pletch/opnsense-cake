@@ -34,7 +34,7 @@ VDEF=
 	grep '^#define COBALT_CACHE' "$SRCDIR/dn_sched_cake.c"
 	sed -n '/^static const uint32_t cobalt_rec_inv_sqrt_cache/,/^};/p' \
 	    "$SRCDIR/dn_sched_cake.c"
-	sed -n '/^\/\* one Newton-Raphson step/,/^ \* Helper function to update flow/p' \
+	sed -n '/^\/\* one Newton-Raphson step/,/^ \* Update the flow, tin, main queue/p' \
 	    "$SRCDIR/dn_sched_cake.c" | sed '$d' | sed '$d'
 } > "$WRK/ours-cobalt.inc"
 

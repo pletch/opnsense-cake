@@ -37,6 +37,6 @@ out += part.split('\n')
 # the checker (or its no-op macros), enqueue, dequeue, tables, reconfig
 a = b
 b = find(r'^ \* Every CAKE instance and kept state',
-         r'^ \* Initialize cake scheduler instance') - 1
+         r'^ \* Initialize a CAKE scheduler instance') - 1
 out += lines[a:b]
 print('\n'.join(out))
