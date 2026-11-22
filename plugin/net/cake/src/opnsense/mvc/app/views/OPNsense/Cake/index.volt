@@ -146,10 +146,18 @@
                         "{{ lang._('CAKE is built into this kernel, %s pipes use it.') }}"
                         .replace("%s", data.schedulers.length)
                     );
-                } else if (data.usable) {
+                } else if (data.usable && data.loaded) {
                     $status.addClass("alert-success").text(
                         "{{ lang._('The CAKE kernel module is loaded, %s pipes use it.') }}"
                         .replace("%s", data.schedulers.length)
+                    );
+                } else if (data.usable && data.cake_on) {
+                    $status.addClass("alert-warning").text(
+                        "{{ lang._('The CAKE kernel module is not loaded, so no pipe uses CAKE. Apply on this page loads it.') }}"
+                    );
+                } else if (data.usable) {
+                    $status.addClass("alert-info").text(
+                        "{{ lang._('The CAKE kernel module is installed and loads when a pipe uses CAKE.') }}"
                     );
                 } else if (data.status == "failed") {
                     $status.addClass("alert-warning").text("{{ lang._('Unable to fetch the CAKE status.') }}");

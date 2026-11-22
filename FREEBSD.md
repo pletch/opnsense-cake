@@ -85,7 +85,9 @@ With compensation, the line ends in, for example, `overhead 30 mpu 0 ptm`.
 The flags follow `ECN`, e.g. `wash ack-filter ingress memlimit 32768K`.
 
 Without the ipfw patch, `type cake` still works and uses the defaults
-under `sysctl net.inet.ip.dummynet.cake`:
+under `sysctl net.inet.ip.dummynet.cake`. They apply only to parameters a
+scheduler's configuration leaves out; `dnctl sched show` gives the values
+each scheduler runs with.
 
 ```
 net.inet.ip.dummynet.cake.target    5000    (us)

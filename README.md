@@ -173,13 +173,20 @@ Then:
    rule and **System → Services** shows CAKE stopped. FQ-CoDel's target,
    interval, quantum, limit and flows on the pipe also apply to CAKE; the
    quantum is the most a flow gets per round, and tins with a low rate share
-   get less, as in sch_cake.
+   get less, as in sch_cake. The **FQ-CoDel limit** becomes CAKE's packet
+   limit for the whole pipe, 10240 when empty: a value set for FQ-CoDel,
+   such as 1000, caps the queue at about 13 ms at 900 Mbit/s and may drop
+   in bursts that CAKE's default would absorb. Leave it empty unless you
+   want a smaller queue. FQ-CoDel flows sets CAKE's flows per tin (1024 when
+   empty).
 2. On **Firewall → Shaper → CAKE**, add an entry for each pipe that should use
    CAKE: diffserv mode, isolation, link type (overhead), ACK filter and so on.
    Then **Apply**. The status line at the top says whether the module is in
    use, or why not.
 3. With a link type set, the pipe bandwidth can be close to the line or sync
-   rate; without one, set it 5–15% below.
+   rate; without one, set it 5–15% below. If the WAN carries a VLAN tag, add
+   4 bytes: for Ethernet with a VLAN, set Overhead to 42 (the Ethernet link
+   type's 38 plus 4) and keep its MPU of 84.
 4. **If OPNsense runs in a VM, set `kern.hz` to 1000.** See below.
 
 ### Sub-tick release and OPNsense's CAKE test kernel
@@ -456,6 +463,11 @@ the repository off, and set it back to `yes` once it is reachable:
 sed -i '' 's/enabled: yes/enabled: no/' /usr/local/etc/pkg/repos/cake.conf
 ```
 
+**Why do the `net.inet.ip.dummynet.cake.*` sysctls show other values than
+my pipes?** They are defaults, used only for a parameter that a scheduler's
+configuration leaves out, not the values a pipe runs with. Each pipe's own
+parameters are in `dnctl sched show` and on the CAKE page.
+
 **Which diffserv mode?** `besteffort` if you don't mark traffic, otherwise
 `diffserv3` or `diffserv4`. `diffserv8` and `precedence` are experimental:
 under load, busy higher tins can starve a lower one.
@@ -469,10 +481,12 @@ installed from a file, not from one of the firewall's package
 repositories. That is expected; see *Install the packages*.
 
 **Does it work on real hardware?** It is built for any amd64 OPNsense
-26.7. So far it has been tested in VMs and on one bare-metal box, an
-Intel Atom x5-Z8350 with a Realtek NIC (see *Status*). Reports from
-other hardware, Intel NICs especially, and from cable and DSL links are
-welcome.
+26.7. It has been tested in VMs and on a bare-metal Intel Atom x5-Z8350
+with a Realtek NIC (see *Status*), and a user runs it in production on
+bare metal with Intel `em` and `igb` NICs on gigabit fibre
+([test reports](https://github.com/pletch/opnsense-cake/discussions/10)).
+Reports from other hardware, and from cable and DSL links, are welcome
+there.
 
 **Where do I report a problem?** Bugs in the GitHub issues, with the
 OPNsense version, the CAKE settings and the status line. Vulnerabilities

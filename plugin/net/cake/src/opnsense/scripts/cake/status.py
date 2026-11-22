@@ -153,6 +153,8 @@ if __name__ == '__main__':
         cake_on = cake_enabled() > 0
     except (OSError, ET.ParseError):
         cake_on = False
+    # whether a CAKE entry is enabled: the page tells a module not loaded yet from one missing
+    result['cake_on'] = cake_on
     # the fork is wanted for the CAKE pipes, or for all pipes if the shaper has any
     st_needed = cake_on or (st['scope'] == 'all' and shaper_pipes(SHAPER_RULES))
     # the page offers the retry action for a crash that keeps it out
