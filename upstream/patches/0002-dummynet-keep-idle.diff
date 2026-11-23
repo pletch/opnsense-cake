@@ -1,20 +1,29 @@
 diff --git a/sys/netpfil/ipfw/dn_sched.h b/sys/netpfil/ipfw/dn_sched.h
-index 06663b7..1ceadb0 100644
+index 4e458c166..25c5ea2d1 100644
 --- a/sys/netpfil/ipfw/dn_sched.h
 +++ b/sys/netpfil/ipfw/dn_sched.h
-@@ -37,6 +37,7 @@
+@@ -36,6 +36,7 @@
+ #include <sys/ck.h>
  
  #define	DN_MULTIQUEUE	0x01
- #define	DN_WIRE_LEN	0x02	/* wire_len method is present */
-+#define	DN_KEEP_IDLE	0x04	/* do not expire an idle instance */
++#define	DN_KEEP_IDLE	0x02	/* do not expire an idle instance */
  /*
   * Descriptor for a scheduling algorithm.
   * Contains all function pointers for a given scheduler
+@@ -45,7 +46,7 @@
+ struct dn_alg {
+ 	uint32_t type;           /* the scheduler type */
+ 	const char *name;   /* scheduler name */
+-	uint32_t flags;	/* DN_MULTIQUEUE if supports multiple queues */
++	uint32_t flags;	/* DN_MULTIQUEUE, DN_KEEP_IDLE */
+ 
+ 	/*
+ 	 * The following define the size of 3 optional data structures
 diff --git a/sys/netpfil/ipfw/ip_dummynet.c b/sys/netpfil/ipfw/ip_dummynet.c
-index f834fb2..a4f0452 100644
+index 7c0f4bd10..9d3e68bf2 100644
 --- a/sys/netpfil/ipfw/ip_dummynet.c
 +++ b/sys/netpfil/ipfw/ip_dummynet.c
-@@ -2390,7 +2390,14 @@ drain_scheduler_sch_cb(void *_s, void *arg)
+@@ -2406,7 +2406,14 @@ drain_scheduler_sch_cb(void *_s, void *arg)
  		dn_ht_scan_bucket(s->siht, &s->drain_bucket,
  				drain_scheduler_cb, NULL);
  		s->drain_bucket++;
@@ -30,3 +39,18 @@ index f834fb2..a4f0452 100644
  		if (s->siht) {
  			if (drain_scheduler_cb(s->siht, NULL) == DNHT_SCAN_DEL)
  				s->siht = NULL;
+@@ -2708,6 +2715,14 @@ dn_sched_modevent(module_t mod, int cmd, void *arg)
+ {
+ 	struct dn_alg *sch = arg;
+ 
++	/*
++	 * A scheduler with instances (one kept with DN_KEEP_IDLE, say)
++	 * refuses in MOD_QUIESCE, before any module of the file is
++	 * unloaded: dummynet goes first, and a refusal in MOD_UNLOAD would
++	 * come after it had torn itself down.
++	 */
++	if (cmd == MOD_QUIESCE)
++		return (sch->ref_count != 0 ? EBUSY : 0);
+ 	if (cmd == MOD_LOAD)
+ 		return load_dn_sched(sch);
+ 	else if (cmd == MOD_UNLOAD)

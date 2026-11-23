@@ -56,7 +56,9 @@ jobs:
       - name: the FreeBSD files have no build conditionals left
         run: |
           upstream/resolve.sh freebsd "$RUNNER_TEMP/fb"
-          ! grep -nE 'CAKE_(UPSTREAM|KNOBS|DEBUG)|^#(else|endif)' "$RUNNER_TEMP/fb/dn_sched_cake.c"
+          ! grep -nE 'CAKE_(UPSTREAM|KNOBS|DEBUG)' "$RUNNER_TEMP/fb/dn_sched_cake.c"
+          # only the kernel's own INET6 option may still be tested
+          ! grep -nE '^#(if|ifdef|ifndef|elif)' "$RUNNER_TEMP/fb/dn_sched_cake.c" | grep -v INET6
 
   plugin:
     runs-on: ubuntu-24.04

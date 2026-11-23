@@ -9,8 +9,8 @@
  * used under the BSD-3-Clause option of its GPL-2.0 OR BSD-3-Clause
  * license:
  * Copyright (C) 2014-2018 Jonathan Morton <chromatix99@gmail.com>
- * Copyright (C) 2015-2018 Toke Hoiland-Jorgensen <toke@toke.dk>
- * Copyright (C) 2014-2018 Dave Taht <dave.taht@gmail.com>
+ * Copyright (C) 2015-2018 Toke Høiland-Jørgensen <toke@toke.dk>
+ * Copyright (C) 2014-2018 Dave Täht <dave.taht@gmail.com>
  * Copyright (C) 2015-2018 Sebastian Moeller <moeller0@gmx.de>
  * (C) 2015-2018 Kevin Darbyshire-Bryant <kevin@darbyshire-bryant.me.uk>
  * Copyright (C) 2017-2018 Ryan Mounce <ryan@mounce.com.au>
@@ -135,7 +135,8 @@ enum {
  * 4- flow mode, 5- memlimit (KB, 0 auto), 6- flows per tin,
  * 7- overhead + 64 (bytes: a negative parameter means unset),
  * 8- mpu (bytes), 9- framing.
- * quantum and limit are sch_cake's constants, 1514 and 10240.
+ * quantum and limit are sch_cake's constants, 1514 and 10240; limit
+ * caps the packets as well as scaling the byte limit.
  */
 #endif
 struct dn_sch_cake_parms {
@@ -148,7 +149,7 @@ struct dn_sch_cake_parms {
 	uint32_t	limit;		/* hard limit, packets, all tins */
 #else
 	uint32_t	quantum;	/* bytes, always 1514 */
-	uint32_t	limit;		/* 10240 packets: caps the bytes */
+	uint32_t	limit;		/* packets, all tins: always 10240 */
 #endif
 	uint32_t	flows_cnt;	/* per tin, multiple of SET_WAYS */
 	uint32_t	flow_mode;	/* CAKE_FLOW_* */
@@ -286,8 +287,8 @@ struct cake_stash {
 struct cake_schk {
 	struct dn_sch_cake_parms cfg;
 	uint32_t	gen;		/* bumped by every reconfiguration */
-	uint8_t		held;		/* holds a module reference */
 #ifndef CAKE_UPSTREAM
+	uint8_t		held;		/* holds a module reference */
 	struct cake_stash stash;
 #endif
 };
