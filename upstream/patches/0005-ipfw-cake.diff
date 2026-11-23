@@ -1,5 +1,5 @@
 diff --git a/sbin/ipfw/dummynet.c b/sbin/ipfw/dummynet.c
-index 3cf9a18..b43e632 100644
+index 3cf9a1854..5e8097a56 100644
 --- a/sbin/ipfw/dummynet.c
 +++ b/sbin/ipfw/dummynet.c
 @@ -75,6 +75,7 @@ static struct _s_x dummynet_params[] = {
@@ -94,14 +94,14 @@ index 3cf9a18..b43e632 100644
  /* PIE flags, from PIE kernel module */
  enum {
  	PIE_ECN_ENABLED = 1,
-@@ -307,6 +378,40 @@ get_extra_parms(uint32_t nr, char *out, int subtype)
+@@ -307,6 +378,41 @@ get_extra_parms(uint32_t nr, char *out, int subtype)
  			else
  				l += sprintf(out + l, " NoECN");
  			l += sprintf(out + l, "\n");
-+		} else 	if (!strcasecmp(ep->name,"CAKE")) {
++		} else if (!strcasecmp(ep->name, "CAKE")) {
 +			us_to_time(ep->par[0], strt1);
 +			us_to_time(ep->par[1], strt2);
-+			l = sprintf(out," CAKE %s %s target %s interval %s"
++			l = sprintf(out, " CAKE %s %s target %s interval %s"
 +				" flows %jd",
 +				(ep->par[3] >= 0 && ep->par[3] <= 4) ?
 +				    cake_diffserv_names[ep->par[3]] : "?",
@@ -124,9 +124,10 @@ index 3cf9a18..b43e632 100644
 +				l += sprintf(out + l, " memlimit %jdK",
 +				    (intmax_t)ep->par[5]);
 +			/* overhead compensation, if any */
-+			if (ep->par[7] != CAKE_OVERHEAD_BIAS || ep->par[8] != 0 ||
-+			    ep->par[9] != 0)
-+				l += sprintf(out + l, " overhead %jd mpu %jd %s",
++			if (ep->par[7] != CAKE_OVERHEAD_BIAS ||
++			    ep->par[8] != 0 || ep->par[9] != 0)
++				l += sprintf(out + l,
++				    " overhead %jd mpu %jd %s",
 +				    (intmax_t)(ep->par[7] - CAKE_OVERHEAD_BIAS),
 +				    (intmax_t)ep->par[8],
 +				    (ep->par[9] >= 0 && ep->par[9] <= 2) ?
@@ -135,7 +136,7 @@ index 3cf9a18..b43e632 100644
  		} else 	if (!strcasecmp(ep->name,"FQ_PIE")) {
  			us_to_time(ep->par[0], strt1);
  			us_to_time(ep->par[1], strt2);
-@@ -603,7 +708,7 @@ list_pipes(struct dn_id *oid, struct dn_id *end)
+@@ -603,7 +709,7 @@ list_pipes(struct dn_id *oid, struct dn_id *end)
  			s->sched_nr,
  			s->name, s->flags, s->buckets, s->oid.id);
  #ifdef NEW_AQM
@@ -144,24 +145,27 @@ index 3cf9a18..b43e632 100644
  		get_extra_parms(s->sched_nr, parms, DN_SCH_PARAMS);
  		printf("%s",parms);
  #endif
-@@ -1109,6 +1214,188 @@ process_extra_parms(int *ac, char **av, struct dn_extra_parms *ep,
+@@ -1109,6 +1215,207 @@ process_extra_parms(int *ac, char **av, struct dn_extra_parms *ep,
  			}
  		}
  		break;
 +	case TOK_CAKE: {
-+		/* CAKE
++		/*
++		 * CAKE
 +		 * 0- target, 1- interval, 2- flags, 3- diffserv,
 +		 * 4- flow mode, 5- memlimit (KB), 6- flows,
 +		 * 7- overhead + 64, 8- mpu, 9- framing
 +		 */
 +		int ovh = INT_MIN, flags = CAKE_ECN_ENABLED, fset = 0;
++		const char *errstr;
 +		double mem;
 +		char *end;
++		long l;
 +
 +		while (*ac > 0) {
 +			int tok = match_token(aqm_params, *av);
 +			(*ac)--; av++;
-+			switch(tok) {
++			switch (tok) {
 +			case TOK_TARGET:
 +				if (*ac <= 0 || time_to_us(av[0]) < 0)
 +					errx(EX_DATAERR, "target needs time\n");
@@ -172,7 +176,8 @@ index 3cf9a18..b43e632 100644
 +
 +			case TOK_INTERVAL:
 +				if (*ac <= 0 || time_to_us(av[0]) < 0)
-+					errx(EX_DATAERR, "interval needs time\n");
++					errx(EX_DATAERR,
++					    "interval needs time\n");
 +
 +				ep->par[1] = time_to_us(av[0]);
 +				(*ac)--; av++;
@@ -204,7 +209,8 @@ index 3cf9a18..b43e632 100644
 +				fset = 1;
 +				break;
 +			case TOK_NO_ACK_FILTER:
-+				flags &= ~(CAKE_ACK_FILTER | CAKE_ACK_AGGRESSIVE);
++				flags &= ~(CAKE_ACK_FILTER |
++				    CAKE_ACK_AGGRESSIVE);
 +				fset = 1;
 +				break;
 +
@@ -224,9 +230,10 @@ index 3cf9a18..b43e632 100644
 +				ep->par[3] = 4;
 +				break;
 +
-+			case TOK_MEMLIMIT:	/* bytes, k/m/g suffix as in tc */
++			case TOK_MEMLIMIT:	/* bytes; k, m, g suffix */
 +				if (*ac <= 0)
-+					errx(EX_DATAERR, "memlimit needs size\n");
++					errx(EX_DATAERR,
++					    "memlimit needs size\n");
 +				mem = strtod(av[0], &end);
 +				if (*end == 'k' || *end == 'K')
 +					mem *= 1024, end++;
@@ -234,22 +241,27 @@ index 3cf9a18..b43e632 100644
 +					mem *= 1024 * 1024, end++;
 +				else if (*end == 'g' || *end == 'G')
 +					mem *= 1024 * 1024 * 1024, end++;
-+				if (*av[0] == '\0' || *end != '\0' || mem < 1024 ||
-+				    mem > 4.0 * 1024 * 1024 * 1024)
++				if (*av[0] == '\0' || *end != '\0' ||
++				    mem < 1024 || mem > 4.0 * (1 << 30))
 +					errx(EX_DATAERR,
 +					    "memlimit must be 1k to 4g\n");
 +				ep->par[5] = (int64_t)((mem + 1023) / 1024);
 +				(*ac)--; av++;
 +				break;
 +
-+			/* "flows N" sets the flow count; a bare "flows" is
-+			 * the flow isolation mode, as in tc-cake(8) */
++			/*
++			 * "flows N" sets the flow count; a bare "flows" is
++			 * the flow isolation mode, as in tc-cake(8)
++			 */
 +			case TOK_FLOWS:
 +				if (*ac <= 0 || !is_valid_number(av[0])) {
 +					ep->par[4] = 4;
 +					break;
 +				}
-+				ep->par[6] = atoi(av[0]);
++				ep->par[6] = strtonum(av[0], 1, 1024, &errstr);
++				if (errstr != NULL)
++					errx(EX_DATAERR,
++					    "flows must be 1 to 1024\n");
 +				(*ac)--; av++;
 +				break;
 +
@@ -277,20 +289,24 @@ index 3cf9a18..b43e632 100644
 +
 +			case TOK_OVERHEAD:
 +				if (*ac <= 0)
-+					errx(EX_DATAERR, "overhead needs number\n");
-+				ovh = strtol(av[0], &end, 10);
++					errx(EX_DATAERR,
++					    "overhead needs number\n");
++				l = strtol(av[0], &end, 10);
 +				if (*av[0] == '\0' || *end != '\0' ||
-+				    ovh < -64 || ovh > 256)
++				    l < -64 || l > 256)
 +					errx(EX_DATAERR,
 +					    "overhead must be -64 to 256\n");
++				ovh = l;
 +				(*ac)--; av++;
 +				break;
 +
 +			case TOK_MPU:
-+				if (*ac <= 0 || !is_valid_number(av[0]) ||
-+				    atoi(av[0]) > 256)
-+					errx(EX_DATAERR, "mpu must be 0 to 256\n");
-+				ep->par[8] = atoi(av[0]);
++				if (*ac <= 0)
++					errx(EX_DATAERR, "mpu needs number\n");
++				ep->par[8] = strtonum(av[0], 0, 256, &errstr);
++				if (errstr != NULL)
++					errx(EX_DATAERR,
++					    "mpu must be 0 to 256\n");
 +				(*ac)--; av++;
 +				break;
 +
@@ -306,11 +322,15 @@ index 3cf9a18..b43e632 100644
 +
 +			case TOK_ETHER_VLAN:	/* adds a VLAN tag */
 +				ovh = (ovh == INT_MIN ? 0 : ovh) + 4;
++				if (ovh > 256)
++					errx(EX_DATAERR,
++					    "overhead must be -64 to 256\n");
 +				break;
 +
 +			default:
 +				for (i = 0; cake_presets[i].name != NULL; i++)
-+					if (!strcmp(av[-1], cake_presets[i].name))
++					if (strcmp(av[-1],
++					    cake_presets[i].name) == 0)
 +						break;
 +				if (cake_presets[i].name == NULL) {
 +					printf("%s is invalid parameter\n",
@@ -333,34 +353,43 @@ index 3cf9a18..b43e632 100644
  	case TOK_PIE:
  	case TOK_FQ_PIE:
  		/* PIE
-@@ -1604,10 +1891,11 @@ ipfw_config_pipe(int ac, char **av)
+@@ -1604,10 +1911,12 @@ ipfw_config_pipe(int ac, char **av)
  
  		case TOK_FQ_CODEL:
  		case TOK_FQ_PIE:
 +		case TOK_CAKE:
  			if (!strcmp(av[-1],"type"))
 -				errx(EX_DATAERR, "use type before fq_codel/fq_pie");
-+				errx(EX_DATAERR, "use type before fq_codel/fq_pie/cake");
++				errx(EX_DATAERR,
++				    "use type before fq_codel/fq_pie/cake");
  
 -			NEED(sch, "fq_codel/fq_pie is only for schd");
 +			NEED(sch, "fq_codel/fq_pie/cake is only for schd");
  			strlcpy(sch_extra->name, av[-1],
  			    sizeof(sch_extra->name));
  			sch_extra->oid.subtype = DN_SCH_PARAMS;
-@@ -1684,7 +1972,8 @@ ipfw_config_pipe(int ac, char **av)
+@@ -1684,7 +1993,9 @@ ipfw_config_pipe(int ac, char **av)
  			/* if fq_codel is selected, consider all tokens after it
  			 * as parameters
  			 */
 -			if (!strcasecmp(av[0],"fq_codel") || !strcasecmp(av[0],"fq_pie")){
-+			if (!strcasecmp(av[0],"fq_codel") || !strcasecmp(av[0],"fq_pie") ||
-+			    !strcasecmp(av[0],"cake")){
++			if (!strcasecmp(av[0], "fq_codel") ||
++			    !strcasecmp(av[0], "fq_pie") ||
++			    !strcasecmp(av[0], "cake")) {
  				strlcpy(sch_extra->name, av[0],
  				    sizeof(sch_extra->name));
  				sch_extra->oid.subtype = DN_SCH_PARAMS;
 diff --git a/sbin/ipfw/ipfw.8 b/sbin/ipfw/ipfw.8
-index 3336b0d..18b1b10 100644
+index 3336b0d50..73afeaacf 100644
 --- a/sbin/ipfw/ipfw.8
 +++ b/sbin/ipfw/ipfw.8
+@@ -1,5 +1,5 @@
+ .\"
+-.Dd September 9, 2026
++.Dd November 23, 2026
+ .Dt IPFW 8
+ .Os
+ .Sh NAME
 @@ -2998,7 +2998,7 @@ The following case-insensitive parameters can be configured for a
  scheduler:
  .Pp
@@ -390,7 +419,7 @@ index 3336b0d..18b1b10 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3087,6 +3100,125 @@ So, ensure all scheduler
+@@ -3087,6 +3100,131 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -422,7 +451,7 @@ index 3336b0d..18b1b10 100644
 +Voice (CS4, CS5, VA, EF, CS6, CS7) tins.
 +.It Cm diffserv8
 +eight tins: Background (LE), High Throughput (AF1x, CS1), Best Effort,
-+Low Latency (AF2x), Video (AF3x, AF4x, CS3), Interactive (CS2), Minimum
++Video (AF3x, AF4x, CS3), Low Latency (AF2x), Interactive (CS2), Minimum
 +Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.
@@ -459,9 +488,12 @@ index 3336b0d..18b1b10 100644
 +sets the number of flow queues per tin, a multiple of 8 up to 1024, the
 +default, as in sch_cake.
 +Host isolation looks at the addresses dummynet sees, so on a NAT gateway
-+the scheduler has to run where they are not yet translated: before
-+.Xr pf 4
-+for outbound packets and after it for inbound packets.
++the scheduler has to see outbound packets before they are translated and
++inbound packets after, whether NAT is done by
++.Xr pf 4 ,
++.Cm ipfw nat
++or
++.Xr natd 8 .
 +.Pp
 +Link-layer overhead compensation makes the pipe charge each packet for the
 +bytes it takes on the bottleneck link rather than its IP length, so the
@@ -477,7 +509,7 @@ index 3336b0d..18b1b10 100644
 +ATM cell framing (48 bytes of payload in each 53 byte cell), PTM 64b/65b
 +encoding (VDSL2), or neither.
 +.It Cm ethernet , docsis , pppoe-ptm , bridged-ptm , conservative , raw
-+presets as in tc-cake(8): Ethernet (overhead 38 mpu 84), DOCSIS cable
++presets as in Linux tc-cake(8): Ethernet (overhead 38 mpu 84), DOCSIS cable
 +(overhead 18 mpu 64), VDSL2 with PPPoE (overhead 30 ptm) or bridged (22
 +ptm), worst-case ATM (overhead 48 atm), or no compensation.
 +.It Cm pppoa-vcmux , pppoa-llc , pppoe-vcmux , pppoe-llcsnap , bridged-vcmux , bridged-llcsnap , ipoa-vcmux , ipoa-llcsnap
@@ -500,8 +532,11 @@ index 3336b0d..18b1b10 100644
 +download pipe of a link whose markings are not to be trusted.
 +.It Cm memlimit Ar size
 +byte limit of all queues, with an optional k, m or g suffix.
-+By default it is four times what the pipe sends in an interval, and at
-+least 4 MB.
++By default it is four times what the pipe sends in an interval, at least
++4 MB and at most 10240 full-size packets (about 15 MB); without a pipe
++.Cm bw
++it is the latter.
++The queues also hold at most 10240 packets.
 +.El
 +.Pp
 +The scheduler follows a change of the pipe
@@ -516,7 +551,22 @@ index 3336b0d..18b1b10 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -5002,6 +5134,15 @@ to 10ms, we do:
+@@ -4284,6 +4422,14 @@ These limits prevent accidental exhaustion of resources such as mbufs.
+ If you raise these limits,
+ you should make sure the system is configured so that sufficient resources
+ are available.
++.It Va net.inet.ip.dummynet.sched_stats
++Statistics of scheduler instances beyond those
++.Cm sched show
++prints, as text lines, for the schedulers that report any (read-only;
++reading it needs the same privilege as configuring dummynet).
++.Cm cake
++gives a line per tin of each instance, with the tin's counters as name and
++value pairs.
+ .It Va net.inet.ip.fw.autoinc_step : No 100
+ Delta between rule numbers when auto-generating them.
+ The value must be in the range 1..1000.
+@@ -5002,6 +5148,15 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp
@@ -533,7 +583,7 @@ index 3336b0d..18b1b10 100644
  .Cm fq_codel ,
  to configure
 diff --git a/sbin/ipfw/ipfw2.h b/sbin/ipfw/ipfw2.h
-index f19ea59..8e54723 100644
+index f19ea59c1..8e5472371 100644
 --- a/sbin/ipfw/ipfw2.h
 +++ b/sbin/ipfw/ipfw2.h
 @@ -215,6 +215,31 @@ enum tokens {

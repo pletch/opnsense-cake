@@ -52,6 +52,11 @@ packet(void)
 	memset(p, 0, sizeof(p));
 	for (int i = 0; i < off; i++)
 		p[i] = rnd(256);
+	/* mostly an IP or IPv6 ethertype right before it, as on layer 2 */
+	if (off >= 2 && rnd(8) != 0) {
+		p[off - 2] = rnd(2) ? 0x08 : 0x86;
+		p[off - 1] = p[off - 2] == 0x08 ? 0x00 : 0xdd;
+	}
 	len = build(p, off);
 	if (rnd(3) == 0)
 		len = mutate(p, len, off);

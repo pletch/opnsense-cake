@@ -253,7 +253,7 @@ static const uint8_t cake_diffserv4[64] = {
 
 /*
  * 0- Background (LE), 1- High Throughput (AF1x, TOS2, CS1), 2- Best
- * Effort, 3- Low Latency (AF2x, TOS4), 4- Video (AF4x, AF3x, CS3),
+ * Effort, 3- Video (AF4x, AF3x, CS3), 4- Low Latency (AF2x, TOS4),
  * 5- Interactive (CS2), 6- Minimum Latency (EF, VA, CS5, CS4),
  * 7- Network Control (CS6, CS7); the table is sch_cake's diffserv8[]
  */
@@ -735,6 +735,28 @@ cake_tso_hdrlen(struct mbuf *m, int off)
 }
 
 /*
+ * Offset of the IP header, or -1 if there is none: dummynet on layer 2
+ * passes frames of every ethertype, whose payload is not to be parsed,
+ * filtered or rewritten as IP. The ethertype ends where the IP header
+ * would begin.
+ */
+static int
+cake_ip_off(struct mbuf *m)
+{
+	const uint8_t *p;
+	int off = dn_tag_get(m)->iphdr_off;
+	uint16_t type;
+
+	if (off == 0)
+		return (0);
+	if (off < 2 || m->m_len < off)
+		return (-1);
+	p = mtod(m, const uint8_t *);
+	type = p[off - 2] << 8 | p[off - 1];
+	return (type == 0x0800 || type == 0x86dd ? off : -1);	/* IP, IPv6 */
+}
+
+/*
  * The bytes a packet takes on the link. A packet the interface is to
  * segment is charged as the segments it becomes, each with the headers and
  * the overhead, as cake_overhead() in sch_cake charges a GSO packet.
@@ -830,8 +852,8 @@ cake_ecn_mark(struct mbuf *m)
 	uint16_t old;
 	int off;
 
-	off = dn_tag_get(m)->iphdr_off;
-	if (m->m_len < off + (int)sizeof(struct ip))
+	off = cake_ip_off(m);
+	if (off < 0 || m->m_len < off + (int)sizeof(struct ip))
 		return (0);
 	ip = mtodo(m, off);
 	if (ip->ip_v == 4) {
@@ -872,8 +894,9 @@ cake_wash(struct mbuf *m)
 	uint16_t old;
 	int off;
 
-	off = dn_tag_get(m)->iphdr_off;
-	if (!M_WRITABLE(m) || m->m_len < off + (int)sizeof(struct ip))
+	off = cake_ip_off(m);
+	if (off < 0 || !M_WRITABLE(m) ||
+	    m->m_len < off + (int)sizeof(struct ip))
 		return;
 	ip = mtodo(m, off);
 	if (ip->ip_v == 4) {
@@ -950,7 +973,9 @@ cake_get_tcp(struct mbuf *m, struct cake_tcp *t)
 	const struct ip6_hdr *ip6;
 	int off;
 
-	off = dn_tag_get(m)->iphdr_off;
+	off = cake_ip_off(m);
+	if (off < 0)
+		return (0);
 	ip = cake_hdr(m, off, sizeof(ipb), &ipb);
 	if (ip == NULL)
 		return (0);
@@ -1367,10 +1392,10 @@ cake_hash_flow(struct mbuf *m, uint32_t perturbation, uint32_t mode,
 	 * the IP stack makes the header contiguous, but dummynet on layer 2
 	 * can pass anything: short or non-IP packets go to one fixed flow
 	 */
-	off = dn_tag_get(m)->iphdr_off;
+	off = cake_ip_off(m);
 	*dscp = 0;
 	*srch = *dsth = 0;
-	if (m->m_len < off + (int)sizeof(struct ip))
+	if (off < 0 || m->m_len < off + (int)sizeof(struct ip))
 		return (0);
 	ip = (struct ip *)mtodo(m, off);
 	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 4 &&
@@ -2101,6 +2126,8 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 				    cake_wire_bytes(&si->cfg, ack), now_ns);
 #endif
 			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
+			/* sch_cake counts it in ack_drops, not the tin's drops */
+			tin->drops--;
 			FREE_PKT(ack);
 		}
 	}
@@ -2282,6 +2309,8 @@ cake_charge_tin(struct cake_tin *tin, int len, uint64_t now)
 static struct mbuf *
 cake_dequeue(struct dn_sch_inst *_si)
 {
+	static struct timeval lastwarn;
+	static int warnpps;
 	struct cake_si *si;
 	struct cake_schk *schk;
 	struct cake_tin *tin;
@@ -2366,8 +2395,9 @@ retry:
 			 * packets queued but no flows listed: stats are
 			 * broken
 			 */
-			D("tin %u has backlog %u but no flows", si->cur_tin,
-			    tin->backlog);
+			if (ppsratecheck(&lastwarn, &warnpps, 1))
+				D("tin %u has backlog %u but no flows",
+				    si->cur_tin, tin->backlog);
 			return (NULL);
 		}
 

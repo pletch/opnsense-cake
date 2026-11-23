@@ -474,7 +474,7 @@ index e295f8a..7b9f44d 100644
 +Voice (CS4, CS5, VA, EF, CS6, CS7) tins.
 +.It Cm diffserv8
 +eight tins: Background (LE), High Throughput (AF1x, CS1), Best Effort,
-+Low Latency (AF2x), Video (AF3x, AF4x, CS3), Interactive (CS2), Minimum
++Video (AF3x, AF4x, CS3), Low Latency (AF2x), Interactive (CS2), Minimum
 +Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.

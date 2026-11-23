@@ -477,7 +477,7 @@ index e295f8a..7b9f44d 100644
 +Voice (CS4, CS5, VA, EF, CS6, CS7) tins.
 +.It Cm diffserv8
 +eight tins: Background (LE), High Throughput (AF1x, CS1), Best Effort,
-+Low Latency (AF2x), Video (AF3x, AF4x, CS3), Interactive (CS2), Minimum
++Video (AF3x, AF4x, CS3), Low Latency (AF2x), Interactive (CS2), Minimum
 +Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.
@@ -708,12 +708,12 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..f6021be
+index 0000000..a021ee4
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,3331 @@
+@@ -0,0 +1,3413 @@
 +/*-
-+ * SPDX-License-Identifier: BSD-3-Clause
++ * SPDX-License-Identifier: BSD-3-Clause AND BSD-2-Clause
 + *
 + * CAKE - Common Applications Kept Enhanced, for dummynet
 + *
@@ -723,16 +723,11 @@ index 0000000..f6021be
 + * used under the BSD-3-Clause option of its GPL-2.0 OR BSD-3-Clause
 + * license:
 + * Copyright (C) 2014-2018 Jonathan Morton <chromatix99@gmail.com>
-+ * Copyright (C) 2015-2018 Toke Hoiland-Jorgensen <toke@toke.dk>
-+ * Copyright (C) 2014-2018 Dave Taht <dave.taht@gmail.com>
++ * Copyright (C) 2015-2018 Toke Høiland-Jørgensen <toke@toke.dk>
++ * Copyright (C) 2014-2018 Dave Täht <dave.taht@gmail.com>
 + * Copyright (C) 2015-2018 Sebastian Moeller <moeller0@gmx.de>
 + * (C) 2015-2018 Kevin Darbyshire-Bryant <kevin@darbyshire-bryant.me.uk>
 + * Copyright (C) 2017-2018 Ryan Mounce <ryan@mounce.com.au>
-+ *
-+ * The dummynet scheduler glue follows dn_sched_fq_codel.c:
-+ * Copyright (C) 2016 Centre for Advanced Internet Architectures,
-+ *  Swinburne University of Technology, Melbourne, Australia.
-+ * Implemented by Rasool Al-Saadi <ralsaadi@swin.edu.au>
 + *
 + * Redistribution and use in source and binary forms, with or without
 + * modification, are permitted provided that the following conditions
@@ -757,6 +752,37 @@ index 0000000..f6021be
 + * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 + * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 + * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * The dummynet scheduler glue (instance statistics, the enqueue
++ * timestamp tag, the scheduler descriptor) follows dn_sched_fq_codel.c,
++ * under its terms:
++ *
++ * Copyright (C) 2016 Centre for Advanced Internet Architectures,
++ *  Swinburne University of Technology, Melbourne, Australia.
++ * Portions of this code were made possible in part by a gift from
++ *  The Comcast Innovation Fund.
++ * Implemented by Rasool Al-Saadi <ralsaadi@swin.edu.au>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
 + */
 +
 +/*
@@ -802,6 +828,12 @@ index 0000000..f6021be
 +#endif
 +
 +#ifdef _KERNEL
++#ifdef CAKE_UPSTREAM
++#include "opt_inet6.h"
++
++#endif
++#include <sys/param.h>
++#include <sys/systm.h>
 +#include <sys/malloc.h>
 +#include <sys/socket.h>
 +#include <sys/kernel.h>
@@ -935,7 +967,7 @@ index 0000000..f6021be
 +
 +/*
 + * 0- Background (LE), 1- High Throughput (AF1x, TOS2, CS1), 2- Best
-+ * Effort, 3- Low Latency (AF2x, TOS4), 4- Video (AF4x, AF3x, CS3),
++ * Effort, 3- Video (AF4x, AF3x, CS3), 4- Low Latency (AF2x, TOS4),
 + * 5- Interactive (CS2), 6- Minimum Latency (EF, VA, CS5, CS4),
 + * 7- Network Control (CS6, CS7); the table is sch_cake's diffserv8[]
 + */
@@ -1417,6 +1449,28 @@ index 0000000..f6021be
 +}
 +
 +/*
++ * Offset of the IP header, or -1 if there is none: dummynet on layer 2
++ * passes frames of every ethertype, whose payload is not to be parsed,
++ * filtered or rewritten as IP. The ethertype ends where the IP header
++ * would begin.
++ */
++static int
++cake_ip_off(struct mbuf *m)
++{
++	const uint8_t *p;
++	int off = dn_tag_get(m)->iphdr_off;
++	uint16_t type;
++
++	if (off == 0)
++		return (0);
++	if (off < 2 || m->m_len < off)
++		return (-1);
++	p = mtod(m, const uint8_t *);
++	type = p[off - 2] << 8 | p[off - 1];
++	return (type == 0x0800 || type == 0x86dd ? off : -1);	/* IP, IPv6 */
++}
++
++/*
 + * The bytes a packet takes on the link. A packet the interface is to
 + * segment is charged as the segments it becomes, each with the headers and
 + * the overhead, as cake_overhead() in sch_cake charges a GSO packet.
@@ -1512,8 +1566,8 @@ index 0000000..f6021be
 +	uint16_t old;
 +	int off;
 +
-+	off = dn_tag_get(m)->iphdr_off;
-+	if (m->m_len < off + (int)sizeof(struct ip))
++	off = cake_ip_off(m);
++	if (off < 0 || m->m_len < off + (int)sizeof(struct ip))
 +		return (0);
 +	ip = mtodo(m, off);
 +	if (ip->ip_v == 4) {
@@ -1554,8 +1608,9 @@ index 0000000..f6021be
 +	uint16_t old;
 +	int off;
 +
-+	off = dn_tag_get(m)->iphdr_off;
-+	if (!M_WRITABLE(m) || m->m_len < off + (int)sizeof(struct ip))
++	off = cake_ip_off(m);
++	if (off < 0 || !M_WRITABLE(m) ||
++	    m->m_len < off + (int)sizeof(struct ip))
 +		return;
 +	ip = mtodo(m, off);
 +	if (ip->ip_v == 4) {
@@ -1632,7 +1687,9 @@ index 0000000..f6021be
 +	const struct ip6_hdr *ip6;
 +	int off;
 +
-+	off = dn_tag_get(m)->iphdr_off;
++	off = cake_ip_off(m);
++	if (off < 0)
++		return (0);
 +	ip = cake_hdr(m, off, sizeof(ipb), &ipb);
 +	if (ip == NULL)
 +		return (0);
@@ -2049,10 +2106,10 @@ index 0000000..f6021be
 +	 * the IP stack makes the header contiguous, but dummynet on layer 2
 +	 * can pass anything: short or non-IP packets go to one fixed flow
 +	 */
-+	off = dn_tag_get(m)->iphdr_off;
++	off = cake_ip_off(m);
 +	*dscp = 0;
 +	*srch = *dsth = 0;
-+	if (m->m_len < off + (int)sizeof(struct ip))
++	if (off < 0 || m->m_len < off + (int)sizeof(struct ip))
 +		return (0);
 +	ip = (struct ip *)mtodo(m, off);
 +	if ((ip->ip_v != 4 && ip->ip_v != 6) || (ip->ip_v == 4 &&
@@ -2783,6 +2840,8 @@ index 0000000..f6021be
 +				    cake_wire_bytes(&si->cfg, ack), now_ns);
 +#endif
 +			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
++			/* sch_cake counts it in ack_drops, not the tin's drops */
++			tin->drops--;
 +			FREE_PKT(ack);
 +		}
 +	}
@@ -2791,26 +2850,18 @@ index 0000000..f6021be
 +	if (si->overflow_timeout)
 +		cake_heapify_up(si, f->heap_idx);
 +
-+#ifndef CAKE_UPSTREAM
 +	/*
 +	 * over the packet or byte limit: drop from the fattest flow, which
 +	 * is usually not the one this packet went to, so report the enqueue
-+	 * as a success.
++	 * as a success. sch_cake has only the byte limit, but charges it
++	 * with each packet's buffer memory (truesize); the bytes here are
++	 * the packets' lengths, so small packets need the packet limit to
++	 * bound the mbufs held.
 +	 */
 +	while (si->main_q.ni.length > si->cfg.limit ||
 +	    si->main_q.ni.len_bytes > si->buffer_limit)
 +		if (!cake_drop_fattest(si, now_ns))
 +			break;
-+#else
-+	/*
-+	 * over the byte limit: drop from the fattest flow, which is usually
-+	 * not the one this packet went to, so report the enqueue as a
-+	 * success.
-+	 */
-+	while (si->main_q.ni.len_bytes > si->buffer_limit)
-+		if (!cake_drop_fattest(si, now_ns))
-+			break;
-+#endif
 +
 +#ifdef CAKE_DEBUG
 +	CAKE_CHECK(si, "enqueue");
@@ -2972,6 +3023,8 @@ index 0000000..f6021be
 +static struct mbuf *
 +cake_dequeue(struct dn_sch_inst *_si)
 +{
++	static struct timeval lastwarn;
++	static int warnpps;
 +	struct cake_si *si;
 +	struct cake_schk *schk;
 +	struct cake_tin *tin;
@@ -3056,8 +3109,9 @@ index 0000000..f6021be
 +			 * packets queued but no flows listed: stats are
 +			 * broken
 +			 */
-+			D("tin %u has backlog %u but no flows", si->cur_tin,
-+			    tin->backlog);
++			if (ppsratecheck(&lastwarn, &warnpps, 1))
++				D("tin %u has backlog %u but no flows",
++				    si->cur_tin, tin->backlog);
 +			return (NULL);
 +		}
 +
@@ -3653,6 +3707,7 @@ index 0000000..f6021be
 +	ep = (struct dn_extra_parms *) _schk->cfg;
 +	cfg = &schk->cfg;
 +
++#ifndef CAKE_UPSTREAM
 +	/*
 +	 * dummynet refuses to unload a scheduler with references, but only
 +	 * instances take one; a configured scheduler without instances
@@ -3662,6 +3717,7 @@ index 0000000..f6021be
 +		schk->held = 1;
 +		cake_desc.ref_count++;
 +	}
++#endif
 +
 +	*cfg = cake_defaults;
 +	schk->gen++;		/* instances pick the change up in enqueue */
@@ -3776,6 +3832,7 @@ index 0000000..f6021be
 +	return (0);
 +}
 +
++#ifndef CAKE_UPSTREAM
 +/*
 + * The scheduler is deleted, or changes type: drop its module reference.
 + */
@@ -3784,7 +3841,6 @@ index 0000000..f6021be
 +{
 +	struct cake_schk *schk = (struct cake_schk *)(_schk + 1);
 +
-+#ifndef CAKE_UPSTREAM
 +	/* the instances are gone; free the state kept from the last one */
 +	if (schk->stash.flows != NULL) {
 +		mtx_lock(&cake_instances_mtx);
@@ -3797,13 +3853,13 @@ index 0000000..f6021be
 +		schk->stash.hosts = NULL;
 +		schk->stash.overflow_heap = NULL;
 +	}
-+#endif
 +	if (schk->held) {
 +		schk->held = 0;
 +		cake_desc.ref_count--;
 +	}
 +	return (0);
 +}
++#endif
 +
 +#ifndef CAKE_UPSTREAM
 +/*
@@ -3960,28 +4016,51 @@ index 0000000..f6021be
 +#ifdef CAKE_UPSTREAM
 +/*
 + * dn_alg stats, for net.inet.ip.dummynet.sched_stats: a line per tin of
-+ * the instance, with the scheduler's number, the diffserv mode and the
-+ * tin, then the tin's rate threshold (bit/s, 0 without a pipe rate), its
-+ * AQM parameters and its counters as "name value" pairs; times in us.
++ * the instance, with the scheduler's number, for a scheduler with a mask
++ * the instance's flow id (protocol, addresses and ports after the mask),
++ * the diffserv mode and the tin, then the tin's rate threshold (bit/s, 0
++ * without a pipe rate), its AQM parameters and its counters as
++ * "name value" pairs; times in us.
 + */
 +static void
 +cake_stats(struct dn_sch_inst *_si, struct sbuf *sb)
 +{
 +	struct cake_si *si = (struct cake_si *)_si;
++	const struct ipfw_flow_id *id = &_si->ni.fid;
++	char src[INET6_ADDRSTRLEN], dst[INET6_ADDRSTRLEN], inst[128];
 +	struct cake_tin *b;
++	struct in_addr a;
 +	uint32_t t;
 +
 +	if (si->flows == NULL)
 +		return;
++	inst[0] = '\0';
++	if (_si->sched->sch.flags & DN_HAVE_MASK) {
++#ifdef INET6
++		if (id->addr_type == 6) {
++			ip6_sprintf(src, &id->src_ip6);
++			ip6_sprintf(dst, &id->dst_ip6);
++		} else
++#endif
++		{
++			a.s_addr = htonl(id->src_ip);
++			inet_ntoa_r(a, src);
++			a.s_addr = htonl(id->dst_ip);
++			inet_ntoa_r(a, dst);
++		}
++		snprintf(inst, sizeof(inst), "proto %u src %s sport %u "
++		    "dst %s dport %u ", id->proto, src, id->src_port, dst,
++		    id->dst_port);
++	}
 +	for (t = 0; t < si->tin_cnt; t++) {
 +		b = &si->tins[t];
-+		sbuf_printf(sb, "sched %u diffserv %u tin %u "
++		sbuf_printf(sb, "sched %u %sdiffserv %u tin %u "
 +		    "rate %ju target %ju interval %ju pkts %ju bytes %ju "
 +		    "drops %ju marks %ju ack_drops %ju backlog %u "
 +		    "backlog_bytes %ju sparse %u bulk %u decaying %u "
 +		    "unresponsive %u collisions %ju peak_delay %ju "
 +		    "avg_delay %ju base_delay %ju\n",
-+		    _si->sched->sch.sched_nr, si->cfg.diffserv, t,
++		    _si->sched->sch.sched_nr, inst, si->cfg.diffserv, t,
 +		    (uintmax_t)(((uint64_t)si->bw *
 +		    cake_tin_share[si->cfg.diffserv][t]) >> 16),
 +		    (uintmax_t)b->cparams.target / 1000,
@@ -4007,8 +4086,7 @@ index 0000000..f6021be
 +	_SI( .type = )  DN_SCHED_CAKE,
 +	_SI( .name = ) "CAKE",
 +#ifdef CAKE_UPSTREAM
-+	/* wire_len and stats methods; dummynet keeps an idle instance */
-+	_SI( .flags = ) DN_WIRE_LEN | DN_KEEP_IDLE | DN_STATS,
++	_SI( .flags = ) DN_KEEP_IDLE,	/* dummynet keeps an idle instance */
 +#else
 +#ifdef DN_WIRE_LEN
 +	_SI( .flags = ) DN_WIRE_LEN,	/* overhead compensation */
@@ -4025,7 +4103,11 @@ index 0000000..f6021be
 +	_SI( .enqueue = ) cake_enqueue,
 +	_SI( .dequeue = ) cake_dequeue,
 +	_SI( .config = ) cake_config,		/* sched X config */
++#ifndef CAKE_UPSTREAM
 +	_SI( .destroy = ) cake_destroy,		/* sched X delete */
++#else
++	_SI( .destroy = ) NULL,
++#endif
 +	_SI( .new_sched = ) cake_new_sched,	/* new instance */
 +	_SI( .free_sched = ) cake_free_sched,	/* instance deleted */
 +	_SI( .new_fsk = ) NULL,
@@ -4045,10 +4127,10 @@ index 0000000..f6021be
 +DECLARE_DNSCHED_MODULE(dn_cake, &cake_desc);
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.h b/sys/netpfil/ipfw/dn_sched_cake.h
 new file mode 100644
-index 0000000..12e7b40
+index 0000000..92609bf
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.h
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,339 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -4060,8 +4142,8 @@ index 0000000..12e7b40
 + * used under the BSD-3-Clause option of its GPL-2.0 OR BSD-3-Clause
 + * license:
 + * Copyright (C) 2014-2018 Jonathan Morton <chromatix99@gmail.com>
-+ * Copyright (C) 2015-2018 Toke Hoiland-Jorgensen <toke@toke.dk>
-+ * Copyright (C) 2014-2018 Dave Taht <dave.taht@gmail.com>
++ * Copyright (C) 2015-2018 Toke Høiland-Jørgensen <toke@toke.dk>
++ * Copyright (C) 2014-2018 Dave Täht <dave.taht@gmail.com>
 + * Copyright (C) 2015-2018 Sebastian Moeller <moeller0@gmx.de>
 + * (C) 2015-2018 Kevin Darbyshire-Bryant <kevin@darbyshire-bryant.me.uk>
 + * Copyright (C) 2017-2018 Ryan Mounce <ryan@mounce.com.au>
@@ -4186,7 +4268,8 @@ index 0000000..12e7b40
 + * 4- flow mode, 5- memlimit (KB, 0 auto), 6- flows per tin,
 + * 7- overhead + 64 (bytes: a negative parameter means unset),
 + * 8- mpu (bytes), 9- framing.
-+ * quantum and limit are sch_cake's constants, 1514 and 10240.
++ * quantum and limit are sch_cake's constants, 1514 and 10240; limit
++ * caps the packets as well as scaling the byte limit.
 + */
 +#endif
 +struct dn_sch_cake_parms {
@@ -4199,7 +4282,7 @@ index 0000000..12e7b40
 +	uint32_t	limit;		/* hard limit, packets, all tins */
 +#else
 +	uint32_t	quantum;	/* bytes, always 1514 */
-+	uint32_t	limit;		/* 10240 packets: caps the bytes */
++	uint32_t	limit;		/* packets, all tins: always 10240 */
 +#endif
 +	uint32_t	flows_cnt;	/* per tin, multiple of SET_WAYS */
 +	uint32_t	flow_mode;	/* CAKE_FLOW_* */
@@ -4337,8 +4420,8 @@ index 0000000..12e7b40
 +struct cake_schk {
 +	struct dn_sch_cake_parms cfg;
 +	uint32_t	gen;		/* bumped by every reconfiguration */
-+	uint8_t		held;		/* holds a module reference */
 +#ifndef CAKE_UPSTREAM
++	uint8_t		held;		/* holds a module reference */
 +	struct cake_stash stash;
 +#endif
 +};

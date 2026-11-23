@@ -1,8 +1,8 @@
 diff --git a/tests/sys/netpfil/common/dummynet.sh b/tests/sys/netpfil/common/dummynet.sh
-index 66736fb..9237dbe 100644
+index 66736fbec..9505abe2e 100644
 --- a/tests/sys/netpfil/common/dummynet.sh
 +++ b/tests/sys/netpfil/common/dummynet.sh
-@@ -202,6 +202,80 @@ codel_cleanup()
+@@ -202,6 +202,102 @@ codel_cleanup()
  	firewall_cleanup $1
  }
  
@@ -32,9 +32,9 @@ index 66736fb..9237dbe 100644
 +	jexec alcatraz dnctl queue 1 config sched 1
 +
 +	# The defaults, as sch_cake's
-+	atf_check -s exit:0 \
-+	    -o match:'CAKE diffserv3 triple-isolate target 5ms interval 100ms flows 1024 ECN$' \
-+	    jexec alcatraz dnctl sched show
++	show="CAKE diffserv3 triple-isolate target 5ms interval 100ms"
++	show="${show} flows 1024 ECN"
++	atf_check -s exit:0 -o match:"${show}\$" jexec alcatraz dnctl sched show
 +
 +	firewall_config alcatraz ${fw} \
 +		"ipfw"	\
@@ -49,9 +49,23 @@ index 66736fb..9237dbe 100644
 +	jexec alcatraz dnctl sched 1 config pipe 1 type cake target 7ms \
 +	    interval 120ms noecn diffserv8 dual-dsthost flows 64 memlimit 2m \
 +	    wash ack-filter-aggressive docsis overhead 22 mpu 70 ptm
-+	atf_check -s exit:0 \
-+	    -o match:'CAKE diffserv8 dual-dsthost target 7ms interval 120ms flows 64 NoECN wash ack-filter-aggressive memlimit 2048K overhead 22 mpu 70 ptm$' \
-+	    jexec alcatraz dnctl sched show
++	show="CAKE diffserv8 dual-dsthost target 7ms interval 120ms flows 64"
++	show="${show} NoECN wash ack-filter-aggressive memlimit 2048K"
++	show="${show} overhead 22 mpu 70 ptm"
++	atf_check -s exit:0 -o match:"${show}\$" jexec alcatraz dnctl sched show
++
++	# and used: a TCP transfer (the ACK filter), marked pings (wash) and
++	# the per-tin statistics
++	jexec alcatraz nc -l 192.0.2.2 8888 > /dev/null &
++	sleep .5
++	atf_check -s exit:0 -e ignore -o ignore \
++	    sh -c "dd if=/dev/zero bs=1k count=1000 | nc -N 192.0.2.2 8888"
++	atf_check -s exit:0 -o ignore ping -i .1 -c 3 -z 0xb8 192.0.2.2
++	atf_check -s exit:0 -o match:'^sched 1 diffserv 3 tin 7 ' \
++	    jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats
++	stats=$(jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats)
++	echo "${stats}" | grep -q 'ack_drops [1-9]' || \
++	    atf_fail "no ACK dropped: ${stats}"
 +
 +	# Reconfigured with packets going through: new tables (the number of
 +	# tins and flows), then in place (diffserv8 and precedence both have
@@ -71,6 +85,14 @@ index 66736fb..9237dbe 100644
 +	atf_check -s exit:0 -o match:'type CAKE .* 1 active' \
 +	    jexec alcatraz dnctl sched show
 +
++	# With a mask, an instance per address, named in the statistics
++	jexec alcatraz dnctl sched 1 config pipe 1 type cake mask src-ip \
++	    0xffffffff
++	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
++	atf_check -s exit:0 -o match:'src 192.0.2.1 ' \
++	    -o match:'src 192.0.2.2 ' \
++	    jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats
++
 +	jexec alcatraz dnctl sched 1 config pipe 1 type fifo
 +	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
 +}
@@ -83,7 +105,7 @@ index 66736fb..9237dbe 100644
  wf2q_heap_head()
  {
  	atf_set descr 'Test WF2Q+, attempting to provoke use-after-free'
-@@ -623,6 +697,9 @@ setup_tests		\
+@@ -623,6 +719,9 @@ setup_tests		\
  	codel		\
  		ipfw	\
  		pf	\
