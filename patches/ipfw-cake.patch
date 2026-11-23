@@ -435,7 +435,7 @@ index e295f8a..7b9f44d 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3089,6 +3104,142 @@ So, ensure all scheduler
+@@ -3089,6 +3104,143 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -508,7 +508,8 @@ index e295f8a..7b9f44d 100644
 +.Cm flows
 +selects the mode;
 +.Cm flows Ar m
-+sets the number of flow queues.
++sets the number of flow queues per tin, a multiple of 8 up to 1024, the
++default, as in sch_cake.
 +Host isolation looks at the addresses dummynet sees, so on a NAT gateway
 +the scheduler has to run where they are not yet translated: before
 +.Xr pf 4
@@ -578,7 +579,7 @@ index e295f8a..7b9f44d 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -5009,6 +5160,16 @@ to 10ms, we do:
+@@ -5009,6 +5161,16 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp

@@ -3018,7 +3018,7 @@ cake_config(struct dn_schk *_schk)
 		if (ep->par[5] >= 0)
 			cfg->memlimit = MIN(ep->par[5], 4 << 20);
 		if (ep->par[6] >= 0)
-			cfg->flows_cnt = MIN(ep->par[6], 65536);
+			cfg->flows_cnt = MIN(ep->par[6], CAKE_QUEUES);
 		if (ep->par[7] >= 0)
 			cfg->overhead = MIN(ep->par[7], CAKE_OVERHEAD_MAX -
 			    CAKE_OVERHEAD_MIN) + CAKE_OVERHEAD_MIN;
@@ -3050,7 +3050,13 @@ cake_config(struct dn_schk *_schk)
 	cfg->quantum = BOUND_VAR(cfg->quantum, 300, 9000);
 	cfg->limit = BOUND_VAR(cfg->limit, 1, 65535);
 #endif
-	cfg->flows_cnt = BOUND_VAR(cfg->flows_cnt, CAKE_SET_WAYS, 65536);
+	/*
+	 * at most sch_cake's 1024 flows per tin: a flow's refill is the
+	 * quantum divided by its host's bulk flows, and with many more a
+	 * refill is 0 bytes and dequeue rotates through the flows without
+	 * end
+	 */
+	cfg->flows_cnt = BOUND_VAR(cfg->flows_cnt, CAKE_SET_WAYS, CAKE_QUEUES);
 	cfg->flows_cnt = roundup2(cfg->flows_cnt, CAKE_SET_WAYS);
 
 	return (0);

@@ -51,6 +51,7 @@
 
 #define CAKE_MAX_TINS	8
 #define CAKE_SET_WAYS	8	/* set-associative flow hash */
+#define CAKE_QUEUES	1024	/* flows per tin at most, as in sch_cake */
 
 #define DN_CAKE_MTAG_TS	55346	/* uint64_t enqueue timestamp, ns */
 

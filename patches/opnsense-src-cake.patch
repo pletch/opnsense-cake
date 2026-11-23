@@ -438,7 +438,7 @@ index e295f8a..7b9f44d 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3089,6 +3104,142 @@ So, ensure all scheduler
+@@ -3089,6 +3104,143 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -511,7 +511,8 @@ index e295f8a..7b9f44d 100644
 +.Cm flows
 +selects the mode;
 +.Cm flows Ar m
-+sets the number of flow queues.
++sets the number of flow queues per tin, a multiple of 8 up to 1024, the
++default, as in sch_cake.
 +Host isolation looks at the addresses dummynet sees, so on a NAT gateway
 +the scheduler has to run where they are not yet translated: before
 +.Xr pf 4
@@ -581,7 +582,7 @@ index e295f8a..7b9f44d 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -5009,6 +5160,16 @@ to 10ms, we do:
+@@ -5009,6 +5161,16 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp
@@ -707,10 +708,10 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..4d61b4e
+index 0000000..f6021be
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
-@@ -0,0 +1,3325 @@
+@@ -0,0 +1,3331 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -3731,7 +3732,7 @@ index 0000000..4d61b4e
 +		if (ep->par[5] >= 0)
 +			cfg->memlimit = MIN(ep->par[5], 4 << 20);
 +		if (ep->par[6] >= 0)
-+			cfg->flows_cnt = MIN(ep->par[6], 65536);
++			cfg->flows_cnt = MIN(ep->par[6], CAKE_QUEUES);
 +		if (ep->par[7] >= 0)
 +			cfg->overhead = MIN(ep->par[7], CAKE_OVERHEAD_MAX -
 +			    CAKE_OVERHEAD_MIN) + CAKE_OVERHEAD_MIN;
@@ -3763,7 +3764,13 @@ index 0000000..4d61b4e
 +	cfg->quantum = BOUND_VAR(cfg->quantum, 300, 9000);
 +	cfg->limit = BOUND_VAR(cfg->limit, 1, 65535);
 +#endif
-+	cfg->flows_cnt = BOUND_VAR(cfg->flows_cnt, CAKE_SET_WAYS, 65536);
++	/*
++	 * at most sch_cake's 1024 flows per tin: a flow's refill is the
++	 * quantum divided by its host's bulk flows, and with many more a
++	 * refill is 0 bytes and dequeue rotates through the flows without
++	 * end
++	 */
++	cfg->flows_cnt = BOUND_VAR(cfg->flows_cnt, CAKE_SET_WAYS, CAKE_QUEUES);
 +	cfg->flows_cnt = roundup2(cfg->flows_cnt, CAKE_SET_WAYS);
 +
 +	return (0);
@@ -4038,10 +4045,10 @@ index 0000000..4d61b4e
 +DECLARE_DNSCHED_MODULE(dn_cake, &cake_desc);
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.h b/sys/netpfil/ipfw/dn_sched_cake.h
 new file mode 100644
-index 0000000..fb24014
+index 0000000..12e7b40
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.h
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,338 @@
 +/*-
 + * SPDX-License-Identifier: BSD-3-Clause
 + *
@@ -4095,6 +4102,7 @@ index 0000000..fb24014
 +
 +#define CAKE_MAX_TINS	8
 +#define CAKE_SET_WAYS	8	/* set-associative flow hash */
++#define CAKE_QUEUES	1024	/* flows per tin at most, as in sch_cake */
 +
 +#define DN_CAKE_MTAG_TS	55346	/* uint64_t enqueue timestamp, ns */
 +

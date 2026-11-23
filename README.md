@@ -177,8 +177,8 @@ Then:
    limit for the whole pipe, 10240 when empty: a value set for FQ-CoDel,
    such as 1000, caps the queue at about 13 ms at 900 Mbit/s and may drop
    in bursts that CAKE's default would absorb. Leave it empty unless you
-   want a smaller queue. FQ-CoDel flows sets CAKE's flows per tin (1024 when
-   empty).
+   want a smaller queue. FQ-CoDel flows sets CAKE's flows per tin, at most 1024 as
+   in sch_cake, which is also the value when empty.
 2. On **Firewall → Shaper → CAKE**, add an entry for each pipe that should use
    CAKE: diffserv mode, isolation, link type (overhead), ACK filter and so on.
    Then **Apply**. The status line at the top says whether the module is in
