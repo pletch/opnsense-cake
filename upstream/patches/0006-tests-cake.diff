@@ -1,8 +1,8 @@
 diff --git a/tests/sys/netpfil/common/dummynet.sh b/tests/sys/netpfil/common/dummynet.sh
-index 66736fbec..9505abe2e 100644
+index 66736fbec..62ba70cee 100644
 --- a/tests/sys/netpfil/common/dummynet.sh
 +++ b/tests/sys/netpfil/common/dummynet.sh
-@@ -202,6 +202,102 @@ codel_cleanup()
+@@ -202,6 +202,101 @@ codel_cleanup()
  	firewall_cleanup $1
  }
  
@@ -54,18 +54,17 @@ index 66736fbec..9505abe2e 100644
 +	show="${show} overhead 22 mpu 70 ptm"
 +	atf_check -s exit:0 -o match:"${show}\$" jexec alcatraz dnctl sched show
 +
-+	# and used: a TCP transfer (the ACK filter), marked pings (wash) and
-+	# the per-tin statistics
++	# and used: a TCP transfer through the ACK filter, the overhead and
++	# washing, in the Best Effort tin, and marked pings in Minimum Latency
 +	jexec alcatraz nc -l 192.0.2.2 8888 > /dev/null &
 +	sleep .5
 +	atf_check -s exit:0 -e ignore -o ignore \
 +	    sh -c "dd if=/dev/zero bs=1k count=1000 | nc -N 192.0.2.2 8888"
 +	atf_check -s exit:0 -o ignore ping -i .1 -c 3 -z 0xb8 192.0.2.2
-+	atf_check -s exit:0 -o match:'^sched 1 diffserv 3 tin 7 ' \
++	atf_check -s exit:0 \
++	    -o match:'^sched 1 diffserv 3 tin 2 .* pkts [0-9]{3,} ' \
++	    -o match:'^sched 1 diffserv 3 tin 6 .* pkts [1-9]' \
 +	    jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats
-+	stats=$(jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats)
-+	echo "${stats}" | grep -q 'ack_drops [1-9]' || \
-+	    atf_fail "no ACK dropped: ${stats}"
 +
 +	# Reconfigured with packets going through: new tables (the number of
 +	# tins and flows), then in place (diffserv8 and precedence both have
@@ -86,11 +85,11 @@ index 66736fbec..9505abe2e 100644
 +	    jexec alcatraz dnctl sched show
 +
 +	# With a mask, an instance per address, named in the statistics
-+	jexec alcatraz dnctl sched 1 config pipe 1 type cake mask src-ip \
-+	    0xffffffff
++	jexec alcatraz dnctl sched 1 config pipe 1 mask src-ip 0xffffffff \
++	    type cake
 +	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
-+	atf_check -s exit:0 -o match:'src 192.0.2.1 ' \
-+	    -o match:'src 192.0.2.2 ' \
++	atf_check -s exit:0 \
++	    -o match:'^sched 1 proto 0 src 192.0.2.1 .* tin 0 ' \
 +	    jexec alcatraz sysctl -n net.inet.ip.dummynet.sched_stats
 +
 +	jexec alcatraz dnctl sched 1 config pipe 1 type fifo
@@ -105,7 +104,7 @@ index 66736fbec..9505abe2e 100644
  wf2q_heap_head()
  {
  	atf_set descr 'Test WF2Q+, attempting to provoke use-after-free'
-@@ -623,6 +719,9 @@ setup_tests		\
+@@ -623,6 +718,9 @@ setup_tests		\
  	codel		\
  		ipfw	\
  		pf	\

@@ -31,11 +31,13 @@ conditionals. `resolve.sh` resolves them:
   - `0001-dummynet-wire-len.diff`: an optional `wire_len` method of
     `struct dn_alg`, what `serve_sched()` charges for a dequeued packet.
   - `0002-dummynet-keep-idle.diff`: `DN_KEEP_IDLE`, a scheduler without a
-    mask keeps its one instance while idle.
-  - `0003-dummynet-sched-stats.diff`: an optional `stats` method
-    (`DN_STATS`) and `net.inet.ip.dummynet.sched_stats`, per vnet, in
-    which dummynet prints what the schedulers that have one report;
-    CAKE's is a line per tin. `dnctl` does not show it yet.
+    mask keeps its one instance while idle; a scheduler with references
+    refuses in `MOD_QUIESCE`, before dummynet tears itself down.
+  - `0003-dummynet-sched-stats.diff`: an optional `stats` method and
+    `net.inet.ip.dummynet.sched_stats`, per vnet, needing
+    `PRIV_NETINET_DUMMYNET`, in which dummynet prints what the schedulers
+    that have one report; CAKE's is a line per tin, naming the instance
+    when the scheduler has a mask. `dnctl` does not show it yet.
   - `0004-dummynet-cake-build.diff`: `sys/conf/files` and the module's
     Makefile; the scheduler itself comes from `resolve.sh freebsd`.
   - `0005-ipfw-cake.diff`: `ipfw(8)`/`dnctl(8)` parameters and `ipfw.8`
@@ -68,6 +70,18 @@ conditionals. `resolve.sh` resolves them:
   passes (TSO skipped: the bench's vtnet had checksum offload off), no
   assertion, and no lock order reversal beyond the 4 logged at boot
   before dummynet loads.
+- After an outside review (2026-11-23; the fixes are in the commits of
+  that day): on the bench (15.1, CAKE_DEBUG build) `test/upstream-bench.sh`
+  passes again on the stock and on the INVARIANTS + WITNESS kernel (no
+  lock order reversal beyond the 2 logged at boot, no assertion);
+  `ipfw_cake`, `pf_cake`, `ipfw_codel` and `pf_codel` pass under kyua on
+  both; `kldunload dummynet` with a CAKE instance gives EBUSY and leaves
+  dummynet forwarding, and unloads once flushed; an unprivileged read of
+  `sched_stats` gets EPERM; a masked scheduler's lines name their
+  instances. On FreeBSD main (6dc19a71f) each stage (main, +D1, +D1+D2,
+  +D1+D2+D3) builds dummynet.ko and `sbin/ipfw` with no warnings, as
+  does GENERIC with `options DUMMYNET`; `mandoc -T lint` adds no warning;
+  `checkstyle9.pl` leaves only the `_SI` initializers.
 - FreeBSD main (6871285f1, 2026-11-15): the patches apply in order;
   dummynet.ko, a GENERIC kernel with `options DUMMYNET` built in, and
   `sbin/ipfw` compile with -Werror and no warnings (not booted).
