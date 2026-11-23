@@ -14,6 +14,32 @@ built in, the plugin uses that CAKE, and sub-tick release replaces it.
 Plugin Changelog
 ================
 
+1.4.16
+
+* os-cake 1.4.16: with the CAKE module installed but not loaded, the CAKE
+  page said it was loaded and that 0 pipes used it. It now says the module
+  is loaded only when it is, and warns when a CAKE entry is enabled but the
+  module is not loaded (Apply loads it)
+* cake-kmod 1.5.16 and dummynet-st 1.0.16 (its own CAKE), scheduler:
+  - Changing a pipe between diffserv8 and precedence without recreating it
+    kept the old mode's DSCP map; the new one now takes effect
+  - IPv6 extension headers (up to 8) are walked to find the ports for the
+    flow hash, so such packets no longer all land in one flow per host pair
+  - Packets awaiting TSO segmentation are charged per segment, headers
+    included, so overhead compensation counts them as they go on the wire.
+    They are still queued and dropped whole
+  - Each vnet has its own random seed for the flow hash
+  - The cake sysctls no longer need the Giant lock; their names and
+    meanings are unchanged
+* dummynet-st 1.0.16, sub-tick release:
+  - A thread leaving dummynet enqueues the packets other threads staged for
+    at most four rounds and hands the rest to dummynet's own thread, which
+    net.inet.ip.dummynet.stage_handoffs counts; before, under load from
+    other CPUs it could be held there without bound
+  - Removing a jail with its own vnet waits for packets already in
+    dummynet before freeing its staged packets, which could leak or meet a
+    destroyed lock
+
 1.4.15
 
 * os-cake 1.4.15: on a kernel with CAKE built in, such as OPNsense's CAKE

@@ -71,10 +71,10 @@ versions of that release):
 
 ```sh
 cd /tmp
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.15/cake-kmod-1.5.15.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.15/dummynet-st-1.0.15.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.15/os-cake-1.4.15.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.15/SHA256SUMS
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/cake-kmod-1.5.16.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/dummynet-st-1.0.16.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/os-cake-1.4.16.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
