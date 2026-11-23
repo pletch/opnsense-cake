@@ -188,8 +188,6 @@
 #ifndef DN_RELEASE_GRAIN_NS
 #define DN_RELEASE_GRAIN_NS	((uint64_t)tick * 1000)
 #endif
-/* tin quantum = quantum << 4 >> weight */
-#define CAKE_TIN_QUANTUM_SHIFT	4
 #define COBALT_CACHE		16	/* cached 1/sqrt(count) values */
 
 static struct dn_alg cake_desc;
@@ -2541,6 +2539,30 @@ cake_link_params(struct cake_si *si)
  * the batching delay alone looks like a standing queue to COBALT.
 #endif
  */
+/*
+ * A tin's WDRR quantum between the tins of a pipe without a rate, as
+ * sch_cake sets it: 65535 for besteffort's one tin, 1024 by the tin's
+ * share for diffserv3 and diffserv4, and from 256 down by 7/8 a tin for
+ * diffserv8 and precedence.
+ */
+static uint32_t
+cake_tin_quantum(uint32_t diffserv, uint32_t t, uint32_t share)
+{
+	uint32_t q;
+
+	switch (diffserv) {
+	case CAKE_DIFFSERV_BESTEFFORT:
+		return (65535);
+	case CAKE_DIFFSERV_DIFFSERV3:
+	case CAKE_DIFFSERV_DIFFSERV4:
+		return (MAX((1024 * share) >> 16, 1));
+	default:
+		for (q = 256; t > 0; t--)
+			q = q * 7 >> 3;
+		return (MAX(q, 1));
+	}
+}
+
 static void
 cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 	uint32_t bw)
@@ -2550,8 +2572,7 @@ cake_tin_params(struct cake_si *si, uint32_t t, struct dn_sch_cake_parms *cfg,
 	uint32_t share = cake_tin_share[cfg->diffserv][t];
 	uint64_t rate, granularity;
 
-	tin->tin_quantum = ((uint64_t)(cfg->quantum << CAKE_TIN_QUANTUM_SHIFT) *
-	    share) >> 16;
+	tin->tin_quantum = cake_tin_quantum(cfg->diffserv, t, share);
 	tin->rate_ns = 0;
 	tin->rate_shft = 0;
 	tin->flow_quantum = cfg->quantum;
