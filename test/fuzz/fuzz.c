@@ -133,11 +133,19 @@ serve(void)
 	si->_si.credit += (int64_t)(now - sched_time) *
 	    (sched.s.link.bandwidth ? sched.s.link.bandwidth : 1000000000);
 	sched_time = si->_si.sched_time = now;
+	m = NULL;
 	while (si->_si.credit >= 0 && (m = cake_dequeue(&si->_si)) != NULL) {
 		si->_si.credit -= (int64_t)hz * m->m_pkthdr.len * 8;
 		sent++;
 		m_freem(m);
 	}
+	/*
+	 * dummynet takes NULL for an idle instance and serves it again only
+	 * when a packet arrives: without a rate, nothing may be left behind
+	 */
+	if (m == NULL && si->_si.credit >= 0 &&
+	    sched.s.link.bandwidth == 0 && si->main_q.ni.length != 0)
+		fuzz_fail("unshaped dequeue returned NULL with packets queued");
 	if (si->_si.credit >= 0)
 		si->_si.credit = 0;
 }

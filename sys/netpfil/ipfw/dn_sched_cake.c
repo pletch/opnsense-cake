@@ -286,9 +286,9 @@ static const uint8_t *cake_dscp_maps[] = {
 static const uint32_t cake_tin_cnt[] = { 1, 3, 4, 8, 8 };
 
 /*
- * Per-tin rate share and WDRR weight, Q16 of the link rate: 1/16 for
- * Bulk, 1/2 for Video and 1/4 for Voice, and for the eight tin modes 7/8
- * of the tin below.
+ * Per-tin rate share, Q16 of the link rate: 1/16 for Bulk, 1/2 for Video
+ * and 1/4 for Voice, and for the eight tin modes 7/8 of the tin below.
+ * Without a pipe rate, the tins' WDRR quantums follow the same ratios.
  */
 static const uint32_t cake_tin_share[][CAKE_MAX_TINS] = {
 	{ 65536 },
@@ -1317,6 +1317,8 @@ drop:
 static struct mbuf *
 cake_extract_head(struct cake_flow *q, struct cake_si *si, uint64_t *pkt_ts)
 {
+	static struct timeval lastwarn;
+	static int warnpps;
 	struct m_tag *mtag;
 	struct mbuf *m;
 
@@ -1340,7 +1342,8 @@ next:	m = q->mq.head;
 	/* extract packet timestamp */
 	mtag = m_tag_locate(m, MTAG_ABI_COMPAT, DN_CAKE_MTAG_TS, NULL);
 	if (mtag == NULL) {
-		D("timestamp tag is not found!");
+		if (ppsratecheck(&lastwarn, &warnpps, 1))
+			D("timestamp tag is not found!");
 		*pkt_ts = 0;
 	} else {
 		*pkt_ts = *(uint64_t *)(mtag + 1);
@@ -2316,7 +2319,8 @@ cake_dequeue(struct dn_sch_inst *_si)
 	struct cake_flow_list *list;
 	struct mbuf *m;
 	uint64_t now_ns, link_ns = 0;
-	uint32_t len, idle_tins = 0;
+	uint32_t len;
+	int wrapped = 0, empty = 1;
 	int first_flow = 1;
 #ifndef CAKE_UPSTREAM
 	int retry;
@@ -2360,19 +2364,27 @@ cake_dequeue(struct dn_sch_inst *_si)
 			/*
 			 * WDRR between the tins with flows, as in sch_cake's
 			 * unlimited mode: skip a tin while its deficit is
-			 * negative, refilling it while not positive
+			 * negative, refilling it while not positive, and give
+			 * up only when a whole round after the first wrap
+			 * found no tin with flows
 			 */
 			tin = &si->tins[si->cur_tin];
 			if (tin->tin_deficit < 0 ||
 			    tin->sparse_flows + tin->bulk_flows == 0) {
 				if (tin->tin_deficit <= 0)
 					tin->tin_deficit += tin->tin_quantum;
-				si->cur_tin = (si->cur_tin + 1) % si->tin_cnt;
-				if (tin->sparse_flows + tin->bulk_flows == 0 &&
-				    ++idle_tins > 2 * si->tin_cnt)
-					return (NULL);	/* no tin has flows */
+				if (tin->sparse_flows + tin->bulk_flows != 0)
+					empty = 0;
+				if (++si->cur_tin >= si->tin_cnt) {
+					si->cur_tin = 0;
+					if (wrapped && empty)
+						return (NULL);
+					wrapped = 1;
+				}
 				continue;
 			}
+			wrapped = 0;	/* a tin is chosen: the next walk */
+			empty = 1;	/* starts afresh */
 		}
 
 #ifndef CAKE_UPSTREAM
@@ -2524,22 +2536,6 @@ cake_link_params(struct cake_si *si)
 }
 
 /*
- * Set a tin's rate share, WDRR weight and COBALT parameters, at creation
- * and when the scheduler is reconfigured. As in cake_set_rate(), target
- * and interval are stretched when an MTU takes longer than target to send
- * at the tin's share of the link rate.
-#ifdef CAKE_UPSTREAM
- * dummynet only releases packets once per tick, so a tick longer than
- * target (kern.hz=100, for example) is treated the same way; otherwise the
- * batching delay alone looks like a standing queue to COBALT.
-#else
- * dummynet only releases packets once per tick (DN_RELEASE_GRAIN_NS;
- * a dummynet with a finer release clock sets it), so a tick longer than
- * target (kern.hz=100, for example) is treated the same way; otherwise
- * the batching delay alone looks like a standing queue to COBALT.
-#endif
- */
-/*
  * A tin's WDRR quantum between the tins of a pipe without a rate, as
  * sch_cake sets it: 65535 for besteffort's one tin, 1024 by the tin's
  * share for diffserv3 and diffserv4, and from 256 down by 7/8 a tin for
@@ -2561,6 +2557,23 @@ cake_tin_quantum(uint32_t diffserv, uint32_t t, uint32_t share)
 			q = q * 7 >> 3;
 		return (MAX(q, 1));
 	}
+
+/*
+ * Set a tin's rate share, WDRR quantum and COBALT parameters, at creation
+ * and when the scheduler is reconfigured. As in cake_set_rate(), target
+ * and interval are stretched when an MTU takes longer than target to send
+ * at the tin's share of the link rate.
+#ifdef CAKE_UPSTREAM
+ * dummynet only releases packets once per tick, so a tick longer than
+ * target (kern.hz=100, for example) is treated the same way; otherwise the
+ * batching delay alone looks like a standing queue to COBALT.
+#else
+ * dummynet only releases packets once per tick (DN_RELEASE_GRAIN_NS;
+ * a dummynet with a finer release clock sets it), so a tick longer than
+ * target (kern.hz=100, for example) is treated the same way; otherwise
+ * the batching delay alone looks like a standing queue to COBALT.
+#endif
+ */
 }
 
 static void
