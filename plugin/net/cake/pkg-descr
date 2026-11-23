@@ -14,6 +14,16 @@ built in, the plugin uses that CAKE, and sub-tick release replaces it.
 Plugin Changelog
 ================
 
+1.4.17
+
+* cake-kmod 1.5.17 and dummynet-st 1.0.17 (its own CAKE): flows is now at
+  most 1024 per tin, as in sch_cake. With more, a host with very many bulk
+  flows in one tin could make each flow's refill 0 bytes, so that dequeue
+  went round the flows many times per packet with the dummynet lock held,
+  and at 65536 without end. A larger value, such as the pipe's FQ-CoDel
+  flows, now becomes 1024
+* os-cake 1.4.17: unchanged
+
 1.4.16
 
 * os-cake 1.4.16: with the CAKE module installed but not loaded, the CAKE

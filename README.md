@@ -144,14 +144,14 @@ files moves over to the repository with
 
 ```sh
 cd /tmp
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/cake-kmod-1.5.16.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/dummynet-st-1.0.16.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/os-cake-1.4.16.pkg
-fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.16/SHA256SUMS
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.17/cake-kmod-1.5.17.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.17/dummynet-st-1.0.17.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.17/os-cake-1.4.17.pkg
+fetch https://github.com/pletch/opnsense-cake/releases/download/v1.5.17/SHA256SUMS
 sha256sum -c SHA256SUMS
-pkg add cake-kmod-1.5.16.pkg
-pkg add dummynet-st-1.0.16.pkg
-pkg add os-cake-1.4.16.pkg
+pkg add cake-kmod-1.5.17.pkg
+pkg add dummynet-st-1.0.17.pkg
+pkg add os-cake-1.4.17.pkg
 /usr/local/opnsense/scripts/firmware/register.php install os-cake
 ```
 
