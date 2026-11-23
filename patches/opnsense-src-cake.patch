@@ -708,7 +708,7 @@ index b540f11..da5edb1 100644
  		dn_tag_get(m)->output_time = V_dn_cfg.curr_time + s->link.delay ;
 diff --git a/sys/netpfil/ipfw/dn_sched_cake.c b/sys/netpfil/ipfw/dn_sched_cake.c
 new file mode 100644
-index 0000000..a021ee4
+index 0000000..67a3c2c
 --- /dev/null
 +++ b/sys/netpfil/ipfw/dn_sched_cake.c
 @@ -0,0 +1,3413 @@
@@ -2840,7 +2840,7 @@ index 0000000..a021ee4
 +				    cake_wire_bytes(&si->cfg, ack), now_ns);
 +#endif
 +			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
-+			/* sch_cake counts it in ack_drops, not the tin's drops */
++			/* in ack_drops only, as sch_cake counts it */
 +			tin->drops--;
 +			FREE_PKT(ack);
 +		}

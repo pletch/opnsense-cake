@@ -2126,7 +2126,7 @@ cake_enqueue(struct dn_sch_inst *_si, struct dn_queue *_q,
 				    cake_wire_bytes(&si->cfg, ack), now_ns);
 #endif
 			cake_update_stats(f, si, -ack->m_pkthdr.len, 1);
-			/* sch_cake counts it in ack_drops, not the tin's drops */
+			/* in ack_drops only, as sch_cake counts it */
 			tin->drops--;
 			FREE_PKT(ack);
 		}
