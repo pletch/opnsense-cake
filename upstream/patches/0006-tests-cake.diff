@@ -1,8 +1,8 @@
 diff --git a/tests/sys/netpfil/common/dummynet.sh b/tests/sys/netpfil/common/dummynet.sh
-index 66736fbec..62ba70cee 100644
+index 66736fbec..e9bd74ab9 100644
 --- a/tests/sys/netpfil/common/dummynet.sh
 +++ b/tests/sys/netpfil/common/dummynet.sh
-@@ -202,6 +202,101 @@ codel_cleanup()
+@@ -202,6 +202,105 @@ codel_cleanup()
  	firewall_cleanup $1
  }
  
@@ -57,7 +57,10 @@ index 66736fbec..62ba70cee 100644
 +	# and used: a TCP transfer through the ACK filter, the overhead and
 +	# washing, in the Best Effort tin, and marked pings in Minimum Latency
 +	jexec alcatraz nc -l 192.0.2.2 8888 > /dev/null &
-+	sleep .5
++	for i in $(seq 50); do
++		jexec alcatraz sockstat -4l -p 8888 | grep -q nc && break
++		sleep .1
++	done
 +	atf_check -s exit:0 -e ignore -o ignore \
 +	    sh -c "dd if=/dev/zero bs=1k count=1000 | nc -N 192.0.2.2 8888"
 +	atf_check -s exit:0 -o ignore ping -i .1 -c 3 -z 0xb8 192.0.2.2
@@ -70,13 +73,14 @@ index 66736fbec..62ba70cee 100644
 +	# tins and flows), then in place (diffserv8 and precedence both have
 +	# eight tins, with another DSCP map)
 +	ping -i .01 -c 300 -z 0xb8 192.0.2.2 > /dev/null &
++	pid=$!
 +	for mode in "diffserv4 flows 1024" "diffserv8" "precedence" \
 +	    "besteffort flowblind" "diffserv3 triple-isolate"
 +	do
 +		jexec alcatraz dnctl sched 1 config pipe 1 type cake ${mode}
 +		sleep .5
 +	done
-+	wait
++	wait ${pid}
 +	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.2
 +
 +	# An idle scheduler keeps its instance
@@ -104,7 +108,7 @@ index 66736fbec..62ba70cee 100644
  wf2q_heap_head()
  {
  	atf_set descr 'Test WF2Q+, attempting to provoke use-after-free'
-@@ -623,6 +718,9 @@ setup_tests		\
+@@ -623,6 +722,9 @@ setup_tests		\
  	codel		\
  		ipfw	\
  		pf	\

@@ -1,5 +1,5 @@
 diff --git a/sbin/ipfw/dummynet.c b/sbin/ipfw/dummynet.c
-index 3cf9a1854..5e8097a56 100644
+index 3cf9a1854..32e484909 100644
 --- a/sbin/ipfw/dummynet.c
 +++ b/sbin/ipfw/dummynet.c
 @@ -75,6 +75,7 @@ static struct _s_x dummynet_params[] = {
@@ -242,7 +242,7 @@ index 3cf9a1854..5e8097a56 100644
 +				else if (*end == 'g' || *end == 'G')
 +					mem *= 1024 * 1024 * 1024, end++;
 +				if (*av[0] == '\0' || *end != '\0' ||
-+				    mem < 1024 || mem > 4.0 * (1 << 30))
++				    !(mem >= 1024 && mem <= 4.0 * (1 << 30)))
 +					errx(EX_DATAERR,
 +					    "memlimit must be 1k to 4g\n");
 +				ep->par[5] = (int64_t)((mem + 1023) / 1024);
@@ -380,7 +380,7 @@ index 3cf9a1854..5e8097a56 100644
  				    sizeof(sch_extra->name));
  				sch_extra->oid.subtype = DN_SCH_PARAMS;
 diff --git a/sbin/ipfw/ipfw.8 b/sbin/ipfw/ipfw.8
-index 3336b0d50..73afeaacf 100644
+index 3336b0d50..63788f68b 100644
 --- a/sbin/ipfw/ipfw.8
 +++ b/sbin/ipfw/ipfw.8
 @@ -1,5 +1,5 @@
@@ -419,7 +419,7 @@ index 3336b0d50..73afeaacf 100644
  .El
  .Pp
  .Cm fq_codel
-@@ -3087,6 +3100,131 @@ So, ensure all scheduler
+@@ -3087,6 +3100,134 @@ So, ensure all scheduler
  configuration options not related to fq_{codel/pie} are written before
  .Cm fq_codel/fq_pie
  tokens.
@@ -450,9 +450,9 @@ index 3336b0d50..73afeaacf 100644
 +Bulk (LE, CS1), Best Effort, Video (TOS4, CS2, AF2x, CS3, AF3x, AF4x) and
 +Voice (CS4, CS5, VA, EF, CS6, CS7) tins.
 +.It Cm diffserv8
-+eight tins: Background (LE), High Throughput (AF1x, CS1), Best Effort,
-+Video (AF3x, AF4x, CS3), Low Latency (AF2x), Interactive (CS2), Minimum
-+Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
++eight tins: Background (LE), High Throughput (AF1x, TOS2, CS1), Best
++Effort, Video (AF3x, AF4x, CS3), Low Latency (AF2x, TOS4), Interactive
++(CS2), Minimum Latency (EF, VA, CS4, CS5) and Network Control (CS6, CS7).
 +.It Cm precedence
 +eight tins by IP precedence, the top three DSCP bits.
 +.El
@@ -543,6 +543,9 @@ index 3336b0d50..73afeaacf 100644
 +.Cm bw
 +or of its own parameters without dropping what is queued, unless the
 +number of tins, the number of flows or the isolation mode changes.
++On layer 2, only IPv4 and IPv6 frames are classified; other frames,
++including 802.1Q frames tagged in software, share one flow in the Best
++Effort tin.
 +As with
 +.Cm fq_codel ,
 +any token after
@@ -551,7 +554,7 @@ index 3336b0d50..73afeaacf 100644
  .El
  .Pp
  In addition to the type, all parameters allowed for a pipe can also
-@@ -4284,6 +4422,14 @@ These limits prevent accidental exhaustion of resources such as mbufs.
+@@ -4284,6 +4425,14 @@ These limits prevent accidental exhaustion of resources such as mbufs.
  If you raise these limits,
  you should make sure the system is configured so that sufficient resources
  are available.
@@ -566,7 +569,7 @@ index 3336b0d50..73afeaacf 100644
  .It Va net.inet.ip.fw.autoinc_step : No 100
  Delta between rule numbers when auto-generating them.
  The value must be in the range 1..1000.
-@@ -5002,6 +5148,15 @@ to 10ms, we do:
+@@ -5002,6 +5151,15 @@ to 10ms, we do:
  .Pp
  .Dl "dnctl sched 1 config pipe 1 type fq_codel target 10ms noecn"
  .Pp
